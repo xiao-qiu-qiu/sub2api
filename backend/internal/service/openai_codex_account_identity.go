@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,11 @@ const codexAccountIdentitySourceContextKey = "openai_codex_account_identity_sour
 // attempt. The handler reuses gin.Context across failover attempts, so every entry
 // point overwrites the staged source before projecting outbound identity.
 func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Context, c *gin.Context, account *Account) (*Account, error) {
+	if c != nil {
+		c.Set(codexAccountIdentitySourceContextKey, (*Account)(nil))
+		stageCodexFingerprintIDs(c, nil)
+		stageCodexConvergenceBodyIdentity(c, nil, nil)
+	}
 	source := account
 	if account != nil && account.IsShadow() {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
@@ -99,14 +105,26 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 	if raw == "" || namespace == "" {
 		return raw
 	}
-	return deriveStableUUIDv4(fmt.Sprintf(
+	version := codexAccountIdentityNamespaceVersion
+	if codexIdentityV2Enabled(account) {
+		if derived, ok := deriveCodexIdentityCompositeValue(account, apiKeyID, kind, raw); ok {
+			return derived
+		}
+		version = "v2"
+		kind = codexIdentitySeedKind(kind)
+	}
+	seed := fmt.Sprintf(
 		"sub2api:codex-account-identity:%s:user:%d:account:%s:kind:%s:value:%s",
-		codexAccountIdentityNamespaceVersion,
+		version,
 		apiKeyID,
 		namespace,
 		kind,
 		raw,
-	))
+	)
+	if derived, ok := deriveCodexConvergenceIdentityValue(account, seed, raw); ok {
+		return derived
+	}
+	return deriveStableUUIDv4(seed)
 }
 
 var codexAccountIdentityFields = []struct {
@@ -142,6 +160,9 @@ func applyCodexAccountIdentityFields(values map[string]any, account *Account, ap
 			changed = true
 		}
 	}
+	if applyCodexConvergenceIdentityFields(values, account, apiKeyID) {
+		changed = true
+	}
 	return changed
 }
 
@@ -149,6 +170,14 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 	raw, ok := values[openAIWSTurnMetadataHeader].(string)
 	if !ok || strings.TrimSpace(raw) == "" {
 		return false
+	}
+	if codexIdentityV2Enabled(account) {
+		next := scopeCodexAccountTurnMetadata(raw, account, apiKeyID)
+		if next == raw {
+			return false
+		}
+		values[openAIWSTurnMetadataHeader] = next
+		return true
 	}
 	metadata := map[string]any{}
 	if err := decodeOpenAIJSONUseNumber([]byte(raw), &metadata); err != nil || metadata == nil {
@@ -163,6 +192,20 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 	}
 	values[openAIWSTurnMetadataHeader] = string(rebuilt)
 	return true
+}
+
+func scopeCodexAccountTurnMetadata(raw string, account *Account, apiKeyID int64) string {
+	return rewriteCodexTurnMetadataJSON(raw, false, func(metadata map[string]any) map[string]any {
+		before := maps.Clone(metadata)
+		applyCodexAccountIdentityFields(metadata, account, apiKeyID)
+		updates := make(map[string]any)
+		for name, value := range metadata {
+			if text, ok := value.(string); ok && text != before[name] {
+				updates[name] = text
+			}
+		}
+		return updates
+	})
 }
 
 // Apply both accepted Responses metadata locations from their original values.
@@ -189,6 +232,9 @@ func applyCodexAccountIdentitySectionMap(requestBody map[string]any, account *Ac
 	originalBodySessionID := ""
 	if clientMetadata != nil {
 		originalBodySessionID, _ = clientMetadata["session_id"].(string)
+		if codexIdentityV2Enabled(account) {
+			originalBodySessionID = codexFingerprintSessionEvidence(clientMetadata, true)
+		}
 		if applyCodexAccountIdentityFields(clientMetadata, account, apiKeyID) {
 			changed = true
 		}
@@ -232,6 +278,9 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 				return body, false, fmt.Errorf("decode client_metadata for account identity: %w", err)
 			}
 			originalBodySessionID, _ = clientMetadata["session_id"].(string)
+			if codexIdentityV2Enabled(account) {
+				originalBodySessionID = codexFingerprintSessionEvidence(clientMetadata, true)
+			}
 			metadataChanged := applyCodexAccountIdentityFields(clientMetadata, account, apiKeyID)
 			if applyCodexAccountIdentityEmbeddedMetadata(clientMetadata, account, apiKeyID) {
 				metadataChanged = true
@@ -284,9 +333,21 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 			headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
 		}
 	}
-	if raw := strings.TrimSpace(headers.Get(openAIWSTurnMetadataHeader)); raw != "" {
+	if codexIdentityV2Enabled(account) {
+		for _, field := range codexConvergenceIdentityFields {
+			if raw := strings.TrimSpace(headers.Get(field.name)); raw != "" {
+				headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
+			}
+		}
+	}
+	if raw := headers.Get(openAIWSTurnMetadataHeader); strings.TrimSpace(raw) != "" {
+		if codexIdentityV2Enabled(account) {
+			headers.Set(openAIWSTurnMetadataHeader, scopeCodexAccountTurnMetadata(raw, account, apiKeyID))
+			return
+		}
+		raw = strings.TrimSpace(raw)
 		metadata := map[string]any{}
-		if err := json.Unmarshal([]byte(raw), &metadata); err == nil && metadata != nil && applyCodexAccountIdentityFields(metadata, account, apiKeyID) {
+		if err := decodeOpenAIJSONUseNumber([]byte(raw), &metadata); err == nil && metadata != nil && applyCodexAccountIdentityFields(metadata, account, apiKeyID) {
 			if rebuilt, err := marshalCodexTurnMetadata(metadata); err == nil {
 				headers.Set(openAIWSTurnMetadataHeader, string(rebuilt))
 			}
