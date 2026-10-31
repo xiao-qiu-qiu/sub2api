@@ -25,6 +25,22 @@ const openAIWSUsageDrainTimeout = 1200 * time.Millisecond
 
 var errOpenAIWSUsageDrainExpired = errors.New("websocket client usage drain expired")
 
+// v2 frame metadata describes the current turn/window; a handshake is only a
+// fallback when the frame omits it. Legacy callers retain handshake precedence.
+func openAIWSIngressTurnMetadataFallback(c *gin.Context, account *Account, payload []byte) string {
+	if c == nil {
+		return ""
+	}
+	if codexIdentityV2Enabled(codexAccountIdentitySource(c, account)) {
+		for _, path := range []string{"client_metadata." + openAIWSTurnMetadataHeader, "response.client_metadata." + openAIWSTurnMetadataHeader} {
+			if gjson.GetBytes(payload, path).Exists() {
+				return ""
+			}
+		}
+	}
+	return strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
+}
+
 type openAIWSClientRead struct {
 	receivedAt  time.Time
 	messageType coderws.MessageType
@@ -634,6 +650,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return err
 	}
+	ctx = s.prepareCodexOptionalTrafficContext(ctx, c, account)
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
@@ -965,7 +982,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
-		if turnMetadata := strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)); turnMetadata != "" {
+		if turnMetadata := openAIWSIngressTurnMetadataFallback(c, account, normalized); turnMetadata != "" {
 			next, setErr := applyPayloadMutation(normalized, "client_metadata."+openAIWSTurnMetadataHeader, turnMetadata)
 			if setErr != nil {
 				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", setErr)
@@ -977,7 +994,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if mapped := strings.TrimSpace(gjson.GetBytes(normalized, "model").String()); mapped != "" {
 			identityModel = mapped
 		}
-		accountScopedPayload, scopeErr := s.applyCodexAccountIdentityOrHarvestPinRaw(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), identityModel, normalized)
+		accountScopedPayload, scopeErr := s.scopeCodexWSIdentity(ctx, c, account, identityModel, normalized)
 		if scopeErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
 		}
@@ -1853,7 +1870,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			latencyGenerationStartedTurn = turn
 		}
-		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
+		if err := s.writeCodexWSFrame(ctx, c, account, lease, json.RawMessage(payload), strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader)), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
 				fmt.Errorf("write upstream websocket request: %w", err),

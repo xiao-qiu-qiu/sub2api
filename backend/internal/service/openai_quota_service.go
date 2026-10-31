@@ -625,6 +625,12 @@ func (s *OpenAIQuotaService) buildCodexQuotaHeaders(ctx context.Context, account
 			return nil, "", fmt.Errorf("agent identity shadow credentials are unavailable")
 		}
 	}
+	if profile := account.codexClientProfile(); profile != nil && codexIdentityEnforcement.Load() {
+		identity := profile.identity()
+		headers["user-agent"] = identity.userAgent
+		headers["originator"] = identity.originator
+		headers["version"] = identity.version
+	}
 	if !account.IsOpenAIAgentIdentity() {
 		return headers, "", nil
 	}

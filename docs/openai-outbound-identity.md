@@ -1,5 +1,7 @@
 # OpenAI 出站客户端身份
 
+账号级 v2 身份方案、CLI/Desktop 预设及独立请求外观选项见 [Codex 指纹与请求外观设置](codex-fingerprint-fusion.md)。存量默认身份保持不变。
+
 OpenAI API Key 账号默认与 OAuth 的 Codex 转发使用同一套客户端身份解析器。普通 Responses、透传、Chat Completions 及其协议回退、WebSocket 握手、图片、Embeddings、独立搜索和账号测试都会在构建出站头时设置身份。无需为现有或新增 Key 账号逐个开启。
 
 客户端传入的 `Go-http-client/2.0`、浏览器 UA、SDK UA 或陈旧 Codex UA 不再决定 API Key 默认出站身份。`User-Agent`、`originator`、`version` 从同一解析结果生成，版本跟随后台 Codex 版本设置及自动同步。账号 `user_agent` 可以选择受支持的 Codex 客户端名和系统信息，其版本仍跟随当前规范版本。

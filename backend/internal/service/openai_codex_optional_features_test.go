@@ -214,3 +214,63 @@ func TestCodexOptionalEndpointsWSAndInvalidJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexOptionalWSProjectsNestedAndRootWithoutLosingRawValues(t *testing.T) {
+	fields := `"input":[` + optionalCodexTestMessage(optionalCodexTestEnv("2026-03-01", "Asia/Shanghai"), "1772335800", true) +
+		`],"tools":[{"type":"web_search","user_location":{"city":"Shanghai"}}]`
+	metadata := `"client_metadata":{"sequence":9007199254740993,"opaque":{"n":1e+03}}`
+	for _, withRoot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("root_input_tools=%t", withRoot), func(t *testing.T) {
+			rootFields := ""
+			if withRoot {
+				rootFields = fields + ","
+			}
+			body := []byte(`{ "type":"response.create", "unknown":1e+03, ` + rootFields + metadata +
+				`,"response":{ "unknown":9007199254740993, ` + fields + `,` + metadata + ` } }`)
+			if got := applyCodexOptionalWSFeatures(nil, optionalCodexTestAccount(), body); string(got) != string(body) {
+				t.Fatal("关闭开关时两层都必须字节不变")
+			}
+			account := optionalCodexTestAccount("environment_timezone", "web_search_location", "guardian_credits")
+			got := applyCodexOptionalWSFeatures(nil, account, body)
+			prefixes := []string{"response."}
+			if withRoot {
+				prefixes = append(prefixes, "")
+			} else if gjson.GetBytes(got, "client_metadata").Raw != gjson.GetBytes(body, "client_metadata").Raw {
+				t.Fatal("nested-only 不应改顶层 transport metadata 或注入 credits")
+			}
+			for _, prefix := range prefixes {
+				if text := gjson.GetBytes(got, prefix+"input.0.content.0.text").Str; text != optionalCodexTestEnv("2026-02-28", "America/Los_Angeles") {
+					t.Fatalf("%s 环境未按创建时间投影: %s", prefix, got)
+				}
+				if gjson.GetBytes(got, prefix+"tools.0.user_location.city").Str != "Las Vegas" {
+					t.Fatalf("%s 工具位置未投影", prefix)
+				}
+				if marker := gjson.GetBytes(got, prefix+"client_metadata.guardian_credits_requested"); marker.Type != gjson.String || marker.Str != "true" {
+					t.Fatalf("%s 缺少字符串 credits 标记", prefix)
+				}
+			}
+			for _, path := range []string{"unknown", "response.unknown", "client_metadata.sequence", "response.client_metadata.sequence", "client_metadata.opaque", "response.client_metadata.opaque"} {
+				if gjson.GetBytes(got, path).Raw != gjson.GetBytes(body, path).Raw {
+					t.Fatalf("未知字段 %s 的原始数字字节被改动", path)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexOptionalWSGuardianInEitherLayerSuppressesBothCredits(t *testing.T) {
+	for _, guardianInRoot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("guardian_in_root=%t", guardianInRoot), func(t *testing.T) {
+			rootSubagent, nestedSubagent := "explorer", "guardian"
+			if guardianInRoot {
+				rootSubagent, nestedSubagent = nestedSubagent, rootSubagent
+			}
+			body := []byte(`{ "type":"response.create","input":[],"client_metadata":{"sequence":9007199254740993,"x-openai-subagent":"` + rootSubagent +
+				`"},"response":{"input":[],"client_metadata":{"unknown":1e+03,"x-openai-subagent":"` + nestedSubagent + `"}} }`)
+			got := applyCodexOptionalWSFeatures(nil, optionalCodexTestAccount("guardian_credits"), body)
+			if string(got) != string(body) {
+				t.Fatalf("任一层是 guardian 时都不应在另一层补 credits，且原值须保留: %s", got)
+			}
+		})
+	}
+}

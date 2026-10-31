@@ -58,10 +58,30 @@ func applyCodexOptionalWSFeatures(c *gin.Context, account *Account, payload []by
 	if !codexOptionalFeaturesEnabled(c, account) || !gjson.ValidBytes(payload) {
 		return payload
 	}
-	if kind := codexEnvironmentField(gjson.ParseBytes(payload), "type"); kind.Type != gjson.String || kind.Str != "response.create" {
+	root := gjson.ParseBytes(payload)
+	if kind := codexEnvironmentField(root, "type"); kind.Type != gjson.String || kind.Str != "response.create" {
 		return payload
 	}
-	return applyCodexOptionalResponseFeatures(c, account, payload, true)
+	nested := codexEnvironmentField(root, "response")
+	if root.Get("response").Exists() && !nested.Exists() {
+		return payload // 重复的 response 容器不能据首值或末值投影。
+	}
+	// 在改写任一层前统一识别来源；任一层标识 guardian 都不能在另一层补 credits。
+	guardian := !codexOptionalGuardianSelfRequest(c, root, nested)
+	rootGuardian := guardian
+	if nested.IsObject() {
+		// 仅有 envelope/transport metadata 不代表还有一份顶层请求。
+		rootGuardian = guardian && (codexEnvironmentField(root, "input").Exists() || codexEnvironmentField(root, "tools").Exists())
+		next := applyCodexOptionalResponseFeatures(c, account, []byte(nested.Raw), guardian)
+		if !bytes.Equal(next, []byte(nested.Raw)) {
+			// 只替换原始 response 值，不经 map/float64 重编码未知字段和大整数。
+			rewritten := make([]byte, 0, len(payload)-len(nested.Raw)+len(next))
+			rewritten = append(rewritten, payload[:nested.Index]...)
+			rewritten = append(rewritten, next...)
+			payload = append(rewritten, payload[nested.Index+len(nested.Raw):]...)
+		}
+	}
+	return applyCodexOptionalResponseFeatures(c, account, payload, rootGuardian)
 }
 
 func codexOptionalFeaturesEnabled(c *gin.Context, account *Account) bool {

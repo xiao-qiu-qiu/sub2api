@@ -30,7 +30,12 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	account *Account,
 	stateStore OpenAIWSStateStore,
 	groupID int64,
+	wireContext ...*gin.Context,
 ) error {
+	var c *gin.Context
+	if len(wireContext) > 0 {
+		c = wireContext[0]
+	}
 	if s == nil {
 		return nil
 	}
@@ -86,7 +91,11 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 		return err
 	}
-	if err := lease.WriteJSONWithContextTimeout(ctx, prewarmPayload, s.openAIWSWriteTimeout()); err != nil {
+	maxWirePayloadBytes := int64(0)
+	if decision.Reason == openAIOAuthWSSSEAccelerationReason {
+		maxWirePayloadBytes = s.openAIWSSSEMaxPayloadBytes()
+	}
+	if err := s.writeCodexWSFrame(ctx, c, account, lease, prewarmPayload, "", s.openAIWSWriteTimeout(), maxWirePayloadBytes); err != nil {
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"prewarm_write_fail account_id=%d conn_id=%s cause=%s",

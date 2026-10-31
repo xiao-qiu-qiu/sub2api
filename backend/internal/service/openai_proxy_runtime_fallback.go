@@ -160,6 +160,13 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 			err = &runtimeProxyEgressError{error: err, target: target}
 		}
 	}()
+	req = s.applyCodexOptionalTraffic(req, account, target.url)
+	defer func() {
+		s.observeCodexOptionalTraffic(req, resp, account, target.url)
+		if err == nil && resp != nil {
+			s.scheduleCodexOptionalTraffic(req, account, target.url)
+		}
+	}()
 	if err = s.fenceAuthConnectionEgress(req.Context(), req, account); err != nil {
 		return nil, err
 	}

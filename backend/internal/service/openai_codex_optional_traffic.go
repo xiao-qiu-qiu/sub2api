@@ -365,8 +365,27 @@ func (s *OpenAIGatewayService) scheduleCodexOptionalTraffic(req *http.Request, a
 		return
 	}
 	b := codexOptionalTrafficFromContext(req.Context())
-	if b == nil || b.runtime != &s.codexOptionalTraffic || b.snapshot.accountID != account.ID || s.boundCodexTicket(req, account) != nil {
+	if b == nil || b.runtime != &s.codexOptionalTraffic || b.snapshot.accountID != account.ID || !b.snapshot.settingsUser || s.boundCodexTicket(req, account) != nil {
 		return
+	}
+	// Legacy header forwarding can omit thread-id while keeping scoped body
+	// metadata. This option is independent of v2 and may use that same evidence
+	// for deduplication without changing the actual inference headers.
+	if req.Header.Get("thread-id") == "" && req.GetBody != nil {
+		if reader, err := req.GetBody(); err == nil {
+			body, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			if readErr == nil {
+				thread := gjson.GetBytes(body, "client_metadata.thread_id").Str
+				if thread == "" {
+					thread = gjson.GetBytes(body, "response.client_metadata.thread_id").Str
+				}
+				if thread != "" {
+					req = req.Clone(req.Context())
+					req.Header.Set("thread-id", thread)
+				}
+			}
+		}
 	}
 	s.scheduleCodexOptionalSettings(req, b, proxyURL)
 }

@@ -85,6 +85,22 @@ func TestCodexOptionalTrafficDefaultOff(t *testing.T) {
 	require.Zero(t, s.codexOptionalTraffic.running)
 }
 
+func TestCodexOptionalTrafficThreadEvidenceWithoutV2(t *testing.T) {
+	upstream := &codexOptionalTestUpstream{calls: make(chan codexOptionalTestCall, 2)}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := codexOptionalTestAccount(910, false, true)
+	account.Extra["codex_identity_scheme"] = "v1"
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"client_metadata":{"thread_id":"scoped-body-thread"}}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer fixture-only")
+	req = svc.prepareCodexOptionalTraffic(nil, account, req)
+	svc.scheduleCodexOptionalTraffic(req, account, "")
+	call := codexOptionalReceive(t, upstream.calls)
+	require.Equal(t, http.MethodGet, call.req.Method)
+	require.Equal(t, codexOptionalSettingsPath, call.req.URL.Path)
+	require.Empty(t, req.Header.Get("thread-id"), "deduplication must not mutate inference headers")
+}
+
 func TestCodexOptionalTrafficCredentialAndProxyIsolation(t *testing.T) {
 	s := &OpenAIGatewayService{}
 	a, other := codexOptionalTestAccount(1, true, false), codexOptionalTestAccount(2, true, false)

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
+
+type codexRequestCompressionKey struct{}
+
+// WithCodexRequestCompression carries a per-attempt encoding preference through
+// local routing. Native transports consume it only after their JSON processing.
+func WithCodexRequestCompression(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, codexRequestCompressionKey{}, enabled)
+}
 
 const (
 	codexRequestZstdContentEncoding = "zstd"

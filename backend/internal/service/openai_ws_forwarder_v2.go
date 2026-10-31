@@ -44,6 +44,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
 	ctx = withOpenAITransportMode(ctx, "ctx_pool")
+	ctx = s.prepareCodexOptionalTrafficContext(ctx, c, account)
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
@@ -77,7 +78,13 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		turnState = strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
-	setOpenAIWSTurnMetadata(payload, turnMetadata)
+	payloadTurnMetadata := turnMetadata
+	if codexIdentityV2Enabled(codexAccountIdentitySource(c, account)) {
+		// The handshake builder scopes its own raw metadata. Only the payload
+		// receives this scoped copy, so device mode cannot derive identity twice.
+		payloadTurnMetadata = scopeCodexAccountTurnMetadata(turnMetadata, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	}
+	setOpenAIWSTurnMetadata(payload, payloadTurnMetadata)
 	applyStagedCodexFingerprintClientMetadata(c, account, payload)
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
@@ -481,13 +488,17 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 	}
 	if !isControlledExperiment(ctx) {
-		if err := s.performOpenAIWSGeneratePrewarm(ctx, lease, decision, payload, previousResponseID, reqBody, account, stateStore, groupID); err != nil {
+		if err := s.performOpenAIWSGeneratePrewarm(ctx, lease, decision, payload, previousResponseID, reqBody, account, stateStore, groupID, c); err != nil {
 			cleanExit = errors.Is(err, errOpenAIWSSSEPayloadTooLarge)
 			return nil, err
 		}
 	}
 	if err := checkBeforeWrite(); err != nil {
 		return nil, err
+	}
+	maxWirePayloadBytes := int64(0)
+	if accelerateHTTPSSE {
+		maxWirePayloadBytes = s.openAIWSSSEMaxPayloadBytes()
 	}
 	sendRequest := func(value any) error {
 		if regionalMeterAttemptFrom(ctx) != nil {
@@ -511,7 +522,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if err := s.priorityLatencyBeforeSend(ctx, account); err != nil {
 			return err
 		}
-		if err := lease.WriteJSONWithContextTimeout(ctx, value, s.openAIWSWriteTimeout()); err != nil {
+		if err := s.writeCodexWSFrame(ctx, c, account, lease, value, turnState, s.openAIWSWriteTimeout(), maxWirePayloadBytes); err != nil {
 			lease.MarkBroken()
 			logOpenAIWSModeInfo(
 				"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",

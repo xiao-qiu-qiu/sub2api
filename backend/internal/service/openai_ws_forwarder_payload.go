@@ -159,6 +159,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	if harvestSession == "" {
 		applyCodexAccountIdentityHeaders(headers, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 		applyStagedCodexFingerprintHeaders(c, account, headers)
+		applyCodexFingerprintConvergenceHeaders(c, codexAccountIdentitySource(c, account), headers)
 	}
 
 	if account != nil && account.UsesOpenAICodexProtocol() {
@@ -191,7 +192,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	// 终态收口：WS 握手与 HTTP 出站共用同一套身份语义，账号级自定义 UA 同样作为
 	// 管理员显式配置传入（上面写进 headers 的值只在强制统一被关闭时才参与配对）。
 	if account != nil && account.UsesOpenAICodexProtocol() {
-		enforceCodexIdentityHeadersWithUA(headers, s.codexIdentityOverrideUA(account))
+		s.enforceCodexClientIdentity(c, headers, account)
 	}
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）。
@@ -210,6 +211,9 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	)
 	if c != nil && c.Request != nil {
 		s.requestTimezoneHeaders(ctx, account, c.Request.Header, headers)
+	}
+	if harvestSession == "" {
+		applyCodexWireIdentityHeaders(c, account, headers, false, true)
 	}
 	s.restoreBoundCodexTicketHarvestIdentity(ctx, headers, account)
 

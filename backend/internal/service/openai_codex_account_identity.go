@@ -24,6 +24,7 @@ const codexAccountIdentitySourceContextKey = "openai_codex_account_identity_sour
 func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Context, c *gin.Context, account *Account) (*Account, error) {
 	if c != nil {
 		c.Set(codexAccountIdentitySourceContextKey, (*Account)(nil))
+		c.Set("codex_wire_skip", false)
 		stageCodexFingerprintIDs(c, nil)
 		stageCodexConvergenceBodyIdentity(c, nil, nil)
 	}

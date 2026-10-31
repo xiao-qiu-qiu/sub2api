@@ -62,6 +62,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 		return nil, err
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
+	body = applyCodexOptionalBodyFeatures(c, account, "https://chatgpt.com/backend-api/codex/alpha/search", body)
 
 	// Codex Personal Access Token（at-...）目前可访问 ChatGPT Codex
 	// /responses，但会被 standalone /alpha/search 的 access enforcement
@@ -282,10 +283,10 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 		req.Header.Set("Conversation_ID", isolated)
 	}
 	applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), apiKeyID)
-	enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+	s.enforceCodexClientIdentity(c, req.Header, account)
 	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, s.codexIdentityOverrideUA(account))
 	account.ApplyHeaderOverrides(req.Header)
-	return req, nil
+	return s.prepareCodexHTTPWireRequest(c, account, req)
 }
 
 func buildOpenAIAlphaSearchResponsesWebSearchBody(alphaBody []byte, model string) ([]byte, error) {
@@ -372,6 +373,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		parsedURL.RawQuery = query.Encode()
 	}
 
+	body = applyCodexOptionalBodyFeatures(c, codexAccountIdentitySource(c, account), parsedURL.String(), body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -422,13 +424,16 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 			req.Header.Set("User-Agent", canonical.userAgent)
 		}
-		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		s.enforceCodexClientIdentity(c, req.Header, account)
 	}
 
 	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, s.codexIdentityOverrideUA(account))
 	account.ApplyHeaderOverrides(req.Header)
 	stripOpenAIAlphaSearchResponsesHeaders(req.Header)
-	return req, nil
+	if codexIdentityV2Enabled(codexAccountIdentitySource(c, account)) {
+		alignCodexWireHeaderMetadata(req.Header, body)
+	}
+	return s.prepareCodexOptionalTraffic(c, account, req), nil
 }
 
 // stripOpenAIAlphaSearchResponsesHeaders 让独立搜索请求与官方 Codex

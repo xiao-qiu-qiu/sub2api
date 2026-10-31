@@ -187,6 +187,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			harvestModel = normalizeOpenAICodexTicketModel(reqModel)
 		}
 		if s.harvestPinsCodexIdentity(ctx, account, harvestModel) {
+			stageCodexConvergenceBodyIdentityRaw(c, nil, nil)
 			stageCodexFingerprintIDs(c, nil)
 			pinnedBody, pinErr := s.pinHarvestIdentityBodyForModel(ctx, account, harvestModel, body)
 			if pinErr != nil {
@@ -194,6 +195,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 			body = pinnedBody
 		} else {
+			fpIDs := resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.ParseBytes(body))
 			accountScopedBody, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(body, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 			if scopeErr != nil {
 				return nil, scopeErr
@@ -208,11 +210,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			// 手术，透传热路径禁全量 Unmarshal），出站头改写由请求构造器读取
 			// context 中的同一份 IDs 完成（turn_id 等随机字段两侧必须一致）。
 			if !isOpenAIResponsesCompactPath(c) {
-				var clientHeaders http.Header
-				if c != nil && c.Request != nil {
-					clientHeaders = c.Request.Header
-				}
-				fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+
 				if fpIDs != nil {
 					fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
 					if fpErr != nil {
@@ -223,7 +221,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 					}
 				}
 				stageCodexFingerprintIDs(c, fpIDs)
+			} else if codexIdentityV2Enabled(codexAccountIdentitySource(c, account)) {
+				stageCodexFingerprintIDs(c, fpIDs)
 			}
+			stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), body)
 		}
 	}
 	if account != nil && account.IsOpenAI() && !account.IsCopilotSDKEnabled() {
@@ -796,13 +797,15 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		req.Header.Set("user-agent", CodexCanonicalUserAgent())
 	}
 	if s.harvestPinnedSessionForModel(ctx, account, extractOpenAICodexTicketModel(body)) == "" {
+		s.skipCodexWireIdentity(ctx, c, account, extractOpenAICodexTicketModel(body))
 		applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 		applyStagedCodexFingerprintHeaders(c, account, req.Header)
+		applyCodexFingerprintConvergenceHeaders(c, codexAccountIdentitySource(c, account), req.Header)
 	}
 	// 终态收口：透传路径的 OAuth 与非透传完全一致，同样强制统一出站身份
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.UsesOpenAICodexProtocol() {
-		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		s.enforceCodexClientIdentity(c, req.Header, account)
 	}
 
 	if req.Header.Get("content-type") == "" {
@@ -838,7 +841,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
 		return nil, err
 	}
-	return req, nil
+	return s.prepareCodexHTTPWireRequest(c, account, req)
 }
 
 func stripOpenAILegacyResponsesBeta(headers http.Header) {

@@ -22,24 +22,7 @@ func applyCodexOptionalGuardianCredits(c *gin.Context, account *Account, body []
 	if root.Get("client_metadata").Exists() && !metadata.IsObject() {
 		return body
 	}
-	if c != nil && c.Request != nil {
-		if strings.TrimSpace(c.GetHeader("x-codex-guardian")) != "" {
-			return body
-		}
-		for _, subagent := range c.Request.Header.Values("x-openai-subagent") {
-			if strings.EqualFold(strings.TrimSpace(subagent), "guardian") {
-				return body
-			}
-		}
-	}
-	guardian := false
-	metadata.ForEach(func(key, value gjson.Result) bool {
-		if key.Str == "x-openai-subagent" && strings.EqualFold(strings.TrimSpace(value.String()), "guardian") {
-			guardian = true
-		}
-		return true
-	})
-	if guardian {
+	if codexOptionalGuardianSelfRequest(c, root) {
 		return body
 	}
 	// 重复目标键语义不确定，不能只覆盖 gjson 读到的第一份。
@@ -52,4 +35,36 @@ func applyCodexOptionalGuardianCredits(c *gin.Context, account *Account, body []
 		return body
 	}
 	return next
+}
+
+// WS 的 root 和 response 共用同一评审来源；检查全部 metadata，包含重复键。
+func codexOptionalGuardianSelfRequest(c *gin.Context, payloads ...gjson.Result) bool {
+	if c != nil && c.Request != nil {
+		if strings.TrimSpace(c.GetHeader("x-codex-guardian")) != "" {
+			return true
+		}
+		for _, subagent := range c.Request.Header.Values("x-openai-subagent") {
+			if strings.EqualFold(strings.TrimSpace(subagent), "guardian") {
+				return true
+			}
+		}
+	}
+	for _, payload := range payloads {
+		guardian := false
+		payload.ForEach(func(key, metadata gjson.Result) bool {
+			if key.Str == "client_metadata" && metadata.IsObject() {
+				metadata.ForEach(func(key, value gjson.Result) bool {
+					if key.Str == "x-openai-subagent" && value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.Str), "guardian") {
+						guardian = true
+					}
+					return !guardian
+				})
+			}
+			return !guardian
+		})
+		if guardian {
+			return true
+		}
+	}
+	return false
 }

@@ -789,6 +789,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		}
 	}
 	ctx = withOpenAITransportRoute(ctx, "websocket", "passthrough", wsDecision.Reason, "")
+	ctx = s.prepareCodexOptionalTrafficContext(ctx, c, account)
 	requestcapture.FromContext(ctx).BindAccount(account.ID)
 	capturedSessionModel := openAIWSPassthroughPolicyModelForFrame(account, firstClientMessage)
 	var activePolicyModel atomic.Pointer[string]
@@ -813,7 +814,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			firstClientMessage = aliasedBody
 		}
 	}
-	accountScopedFirst, scopeErr := s.applyCodexAccountIdentityOrHarvestPinRaw(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), capturedSessionModel, firstClientMessage)
+	accountScopedFirst, scopeErr := s.scopeCodexWSIdentity(ctx, c, account, capturedSessionModel, firstClientMessage)
 	if scopeErr != nil {
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
 	}
@@ -1138,7 +1139,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				if mapped := strings.TrimSpace(gjson.GetBytes(payload, "model").String()); mapped != "" {
 					identityModel = mapped
 				}
-				accountScopedPayload, scopeErr := s.applyCodexAccountIdentityOrHarvestPinRaw(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), identityModel, payload)
+				accountScopedPayload, scopeErr := s.scopeCodexWSIdentity(ctx, c, account, identityModel, payload)
 				if scopeErr != nil {
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
 				}
@@ -1304,6 +1305,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				// relay's read; from here a terminal settles this turn again.
 				pendingUpstreamTurn.Store(false)
 			}
+			if policyErr == nil && blocked == nil {
+				out = s.prepareCodexWSFrame(ctx, c, account, out, strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader)))
+			}
 			return out, blocked, policyErr
 		},
 		onBlock: func(blocked *OpenAIFastBlockedError) {
@@ -1359,6 +1363,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		}
 		acceptedQueueArrival.Store(&arrival)
 	}
+	firstClientMessage = s.prepareCodexWSFrame(ctx, c, account, firstClientMessage, strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader)))
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
 	cancelFirstWrite()
 	if firstWriteErr != nil {

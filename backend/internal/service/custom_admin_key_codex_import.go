@@ -66,7 +66,7 @@ func scopedCodexPermissions(credentials, extra map[string]any, proxy *int64) ([]
 	for key := range extra {
 		switch key {
 		case "import_source", "imported_at", "auth_provider", "session_token_present", "session_expires_at", "user_image", "user_picture", "account_structure", "account_residency_region", "compute_residency", "access_token_sha256":
-		case "codex_fingerprint_mode", "openai_oauth_responses_websockets_v2_enabled", "openai_oauth_responses_websockets_v2_mode":
+		case "codex_fingerprint_mode", "codex_identity_scheme", "codex_client_profile", "codex_wire_options", "codex_wire_timezone", "codex_wire_user_location", "openai_oauth_responses_websockets_v2_enabled", "openai_oauth_responses_websockets_v2_mode":
 			permissions = append(permissions, "accounts.network")
 		default:
 			return nil, infraerrors.BadRequest("SCOPED_CODEX_FIELD", "导入包含未开放的扩展字段")
