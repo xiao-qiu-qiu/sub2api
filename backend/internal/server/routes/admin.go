@@ -413,6 +413,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 	{
 		accounts.GET("/openai-request-timezones", h.Admin.Account.GetOpenAIRequestTimezones)
 		accounts.GET("", h.Admin.Account.List)
+		accounts.GET("/trash", h.Admin.Account.ListTrash)
+		accounts.POST("/:id/restore", h.Admin.Account.Restore)
+		accounts.DELETE("/:id/permanent", h.Admin.Account.PermanentDelete)
 		accounts.GET("/management-capabilities", h.Admin.Setting.GetAccountManagementCapabilities)
 		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
@@ -652,6 +655,9 @@ func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth
 	{
 		proxies.GET("", h.Admin.Proxy.List)
 		proxies.GET("/all", h.Admin.Proxy.GetAll)
+		proxies.GET("/trash", h.Admin.Proxy.ListTrash)
+		proxies.POST("/:id/restore", h.Admin.System.ProxyTrashMihomoContext(), h.Admin.Proxy.Restore)
+		proxies.DELETE("/:id/permanent", h.Admin.Proxy.PermanentDelete)
 		// 代理导出泄露账号密码原文——要求 step-up 2FA
 		proxies.GET("/data", gin.HandlerFunc(stepUpAuth), h.Admin.Proxy.ExportData)
 		proxies.POST("/data", h.Admin.Proxy.ImportData)

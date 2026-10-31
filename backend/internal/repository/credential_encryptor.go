@@ -44,6 +44,10 @@ func NewOpenAICredentialEncryptor(cfg *config.Config, fallback service.SecretEnc
 		err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM openai_oauth_reauth_configs
 			WHERE COALESCE(length(password_ciphertext), 0) > 0
 			OR COALESCE(length(totp_secret_ciphertext), 0) > 0
+			OR COALESCE(length(otp_url_ciphertext), 0) > 0
+			UNION ALL SELECT 1 FROM account_trash_archives
+			WHERE COALESCE(length(password_ciphertext), 0) > 0
+			OR COALESCE(length(totp_secret_ciphertext), 0) > 0
 			OR COALESCE(length(otp_url_ciphertext), 0) > 0)`).Scan(&exists)
 		return exists, err
 	}}

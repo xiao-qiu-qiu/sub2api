@@ -18,6 +18,10 @@
             @create="showCreate = true"
           >
             <template #after>
+              <button v-if="authStore.isAdmin" type="button" class="btn btn-secondary" @click="showTrash = true">
+                <Icon name="trash" size="sm" class="mr-2" />
+                {{ t('trash.title') }}
+              </button>
               <a href="/admin/upstream-channels" class="btn btn-secondary" data-testid="manage-upstream-channels">{{ t('upstreamEntities.manage') }}</a>
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
@@ -498,6 +502,7 @@
     <TLSFingerprintProfilesModal v-if="authStore.isAdmin" :show="showTLSFingerprintProfiles" @close="showTLSFingerprintProfiles = false" />
     <TotpStepUpDialog :controller="accountExportStepUp" />
     <BulkExport2FADialog v-if="authStore.isAdmin && export2faIds.length" :account-ids="export2faIds" @close="export2faIds = []" />
+    <RecycleBinDialog v-if="authStore.isAdmin" :show="showTrash" kind="accounts" @close="showTrash = false" @changed="reload" />
   </AppLayout>
 </template>
 
@@ -521,6 +526,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import RecycleBinDialog from '@/components/admin/RecycleBinDialog.vue'
 import { CreateAccountModal, EditAccountModal, BulkEditAccountModal, SyncFromCrsModal, TempUnschedStatusModal } from '@/components/account'
 import AccountTableActions from '@/components/admin/account/AccountTableActions.vue'
 import AccountTableFilters from '@/components/admin/account/AccountTableFilters.vue'
@@ -640,6 +646,7 @@ const showBulkEdit = ref(false)
 const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
 const showDeleteDialog = ref(false)
+const showTrash = ref(false)
 const showCreateShadowDialog = ref(false)
 const showReAuth = ref(false)
 const showTest = ref(false)
@@ -1459,6 +1466,7 @@ const isAnyModalOpen = computed(() => {
     showBulkEdit.value ||
     showTempUnsched.value ||
     showDeleteDialog.value ||
+    showTrash.value ||
     showReAuth.value ||
     showTest.value ||
     showStats.value ||
@@ -2593,7 +2601,18 @@ const confirmCreateSparkShadow = async () => {
   }
 }
 const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.value = true }
-const confirmDelete = async () => { if(!deletingAcc.value) return; try { await adminAPI.accounts.delete(deletingAcc.value.id); showDeleteDialog.value = false; deletingAcc.value = null; reload() } catch (error) { console.error('Failed to delete account:', error) } }
+const confirmDelete = async () => {
+  if (!deletingAcc.value) return
+  try {
+    await adminAPI.accounts.delete(deletingAcc.value.id)
+    appStore.showSuccess(t('admin.accounts.accountDeleted'))
+    showDeleteDialog.value = false
+    deletingAcc.value = null
+    await reload()
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.failedToDelete')))
+  }
+}
 const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
   togglingSchedulable.value = a.id

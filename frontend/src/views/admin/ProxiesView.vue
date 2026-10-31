@@ -47,6 +47,10 @@
 
           <!-- Right: All action buttons -->
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <button type="button" class="btn btn-secondary" @click="showTrash = true">
+              <Icon name="trash" size="md" class="mr-2" />
+              {{ t('trash.title') }}
+            </button>
             <button
               @click="loadProxies"
               :disabled="loading"
@@ -910,6 +914,7 @@
         </div>
       </template>
     </BaseDialog>
+    <RecycleBinDialog :show="showTrash" kind="proxies" @close="showTrash = false" @changed="loadProxies" />
   </AppLayout>
 </template>
 
@@ -928,6 +933,7 @@ import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import RecycleBinDialog from '@/components/admin/RecycleBinDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ImportDataModal from '@/components/admin/proxy/ImportDataModal.vue'
@@ -1040,6 +1046,7 @@ const editPasswordVisible = ref(false)
 const editPasswordDirty = ref(false)
 const showImportData = ref(false)
 const showDeleteDialog = ref(false)
+const showTrash = ref(false)
 const showBatchDeleteDialog = ref(false)
 const showExportDataDialog = ref(false)
 const showAccountsModal = ref(false)

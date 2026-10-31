@@ -32,8 +32,10 @@ import requestTiming from './requestTiming'
 import latencyObservability from './latencyObservability'
 
 import autoConfig from './autoConfig'
+import trash from './trash'
 
 export default {
+  trash,
   accountTestTiming,
   openaiAuth,
   upstreamEntities,

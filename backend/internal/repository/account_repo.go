@@ -1278,49 +1278,7 @@ func (r *accountRepository) ApplyOpenAIOAuthReauth(
 }
 
 func (r *accountRepository) Delete(ctx context.Context, id int64) error {
-	if scoped := r.accountTransactionScope(ctx); scoped != r {
-		return scoped.Delete(ctx, id)
-	}
-	groupIDs, err := r.loadAccountGroupIDs(ctx, id)
-	if err != nil {
-		return err
-	}
-	// 使用事务保证账号与关联分组的删除原子性
-	tx, err := r.client.Tx(ctx)
-	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
-		return err
-	}
-
-	var txClient *dbent.Client
-	if err == nil {
-		defer func() { _ = tx.Rollback() }()
-		txClient = tx.Client()
-	} else {
-		// 已处于外部事务中（ErrTxStarted），复用当前 client
-		txClient = r.client
-	}
-	// Account.Delete is a soft delete. Keep explicit analytics ownership for
-	// retained usage; only the FK handles a true physical account deletion.
-
-	if _, err := txClient.AccountGroup.Delete().Where(dbaccountgroup.AccountIDEQ(id)).Exec(ctx); err != nil {
-		return err
-	}
-	if _, err := txClient.ExecContext(ctx, "DELETE FROM scheduled_test_plans WHERE account_id = $1", id); err != nil {
-		return err
-	}
-	if _, err := txClient.Account.Delete().Where(dbaccount.IDEQ(id)).Exec(ctx); err != nil {
-		return err
-	}
-	if tx != nil {
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	r.deleteSchedulerAccountSnapshot(ctx, id)
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, buildSchedulerGroupPayload(groupIDs)); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account delete failed: account=%d err=%v", id, err)
-	}
-	return nil
+	return r.deleteAccountToTrash(ctx, id)
 }
 
 func (r *accountRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Account, *pagination.PaginationResult, error) {
