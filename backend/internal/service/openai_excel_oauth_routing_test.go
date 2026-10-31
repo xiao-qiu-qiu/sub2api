@@ -108,7 +108,7 @@ func TestExcelOAuthNativeEntryPointsReject(t *testing.T) {
 	_, _, err = gateway.buildOpenAIWSHeaders(context.Background(), c, a, "synthetic", OpenAIWSProtocolDecision{}, false, "", "", "", "", "")
 	require.ErrorIs(t, err, errExcelOAuthRouteUnavailable)
 	svc := &AccountTestService{openaiGatewayService: gateway}
-	err = svc.testOpenAICompactConnection(c, a, "gpt-5.6-sol")
+	err = svc.testOpenAICompactConnection(c, a, "gpt-5.6-sol", "")
 	require.ErrorContains(t, err, errExcelOAuthRouteUnavailable.Error())
 	a.Extra["openai_excel_bps"] = false
 	err = svc.testOpenAIImageOAuth(c, context.Background(), a, "gpt-image-2", "A red square")

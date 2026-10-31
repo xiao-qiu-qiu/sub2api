@@ -52,11 +52,12 @@ func TestAccountTestService_OpenCodeGoGrokUsesResponses(t *testing.T) {
 	svc, upstream := adaptiveCNAccountTestService(account, adaptiveCNResponsesTestResponse())
 	c, recorder := newTestContext()
 
-	err := svc.TestAccountConnection(c, account.ID, "grok-4.6", "hi", AccountTestModeDefault)
+	err := svc.TestAccountConnection(c, account.ID, "grok-4.6", "ciallo responses", AccountTestModeDefault)
 
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 1)
 	require.Equal(t, "https://opencode.ai/zen/go/v1/responses", upstream.requests[0].URL.String())
+	require.Equal(t, "ciallo responses", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
 	require.Equal(t, "Bearer sk-opencode-go-test", upstream.requests[0].Header.Get("Authorization"))
 	require.NotEmpty(t, upstream.requests[0].Header.Get("X-OpenCode-Session"))
 	require.Contains(t, recorder.Body.String(), `"type":"test_complete"`)
@@ -67,12 +68,13 @@ func TestAccountTestService_OpenCodeGoMiniMaxUsesAnthropicMessages(t *testing.T)
 	svc, upstream := adaptiveCNAccountTestService(account, adaptiveCNAnthropicTestResponse())
 	c, recorder := newTestContext()
 
-	err := svc.TestAccountConnection(c, account.ID, "minimax-m3", "hi", AccountTestModeDefault)
+	err := svc.TestAccountConnection(c, account.ID, "minimax-m3", "ciallo anthropic", AccountTestModeDefault)
 
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 1)
 	req := upstream.requests[0]
 	require.Equal(t, "https://opencode.ai/zen/go/v1/messages", req.URL.String())
+	require.Equal(t, "ciallo anthropic", gjson.GetBytes(upstream.lastBody, "messages.0.content.0.text").String())
 	require.Empty(t, req.URL.RawQuery)
 	require.Equal(t, "sk-opencode-go-test", req.Header.Get("x-api-key"))
 	require.NotEmpty(t, req.Header.Get("X-OpenCode-Session"))

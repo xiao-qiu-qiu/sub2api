@@ -110,6 +110,19 @@
         {{ promptInputHint }}
       </p>
 
+      <div v-if="supportsTextTestPrompt && showTextPromptEditor" id="account-text-test-prompt-editor">
+        <TextArea
+          ref="textPromptInput"
+          v-model="textTestPrompt"
+          id="account-text-test-prompt"
+          :label="t('admin.accounts.textTestPromptLabel')"
+          :placeholder="t('admin.accounts.textTestPromptPlaceholder')"
+          :hint="t('admin.accounts.textTestPromptHint')"
+          :disabled="status === 'connecting'"
+          rows="3"
+        />
+      </div>
+
       <!-- Optional media uploads for real generation / transcription -->
       <div v-if="supportsImageUpload" class="space-y-1.5">
         <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -316,14 +329,28 @@
       </Teleport>
 
       <!-- Test Info -->
-      <div class="flex items-center justify-between px-1 text-xs text-gray-500 dark:text-gray-400">
+      <div class="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-gray-500 dark:text-gray-400">
         <div class="flex items-center gap-3">
           <span class="flex items-center gap-1">
             <Icon name="grid" size="sm" :stroke-width="2" />
             {{ t('admin.accounts.testModel') }}
           </span>
         </div>
-        <span class="flex items-center gap-1">
+        <button
+          v-if="supportsTextTestPrompt"
+          type="button"
+          class="flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-1 transition-colors hover:bg-gray-100 hover:text-primary-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-dark-600 dark:hover:text-primary-400"
+          :disabled="status === 'connecting'"
+          :title="t('common.edit')"
+          :aria-expanded="showTextPromptEditor"
+          aria-controls="account-text-test-prompt-editor"
+          @click="toggleTextPromptEditor"
+        >
+          <Icon name="chat" size="sm" class="shrink-0" :stroke-width="2" />
+          <span class="truncate">{{ testModeSummary }}</span>
+          <Icon name="edit" size="sm" class="shrink-0" :stroke-width="2" />
+        </button>
+        <span v-else class="flex items-center gap-1">
           <Icon name="chat" size="sm" :stroke-width="2" />
           {{ testModeSummary }}
         </span>
@@ -424,6 +451,11 @@ const errorMessage = ref('')
 const availableModels = ref<ClaudeModel[]>([])
 const selectedModelId = ref('')
 const testPrompt = ref('')
+const DEFAULT_TEXT_TEST_PROMPT = 'ciallo'
+const textTestPrompt = ref(DEFAULT_TEXT_TEST_PROMPT)
+const effectiveTextTestPrompt = computed(() => textTestPrompt.value.trim() || DEFAULT_TEXT_TEST_PROMPT)
+const showTextPromptEditor = ref(false)
+const textPromptInput = ref<InstanceType<typeof TextArea> | null>(null)
 const loadingModels = ref(false)
 const modelLoadError = ref('')
 const modelAuthError = ref(false)
@@ -527,6 +559,19 @@ const supportsPromptInput = computed(() => {
     grokTestMode.value === 'tts'
   )
 })
+
+const supportsTextTestPrompt = computed(
+  () => !supportsImageTest.value && (!isGrokAccount.value || grokTestMode.value === 'text')
+)
+
+const toggleTextPromptEditor = async () => {
+  showTextPromptEditor.value = !showTextPromptEditor.value
+  if (showTextPromptEditor.value) {
+    await nextTick()
+    textPromptInput.value?.focus()
+    textPromptInput.value?.select()
+  }
+}
 
 const supportsImageUpload = computed(
   () => isGrokAccount.value && (grokTestMode.value === 'image' || grokTestMode.value === 'video')
@@ -671,6 +716,9 @@ const promptInputHint = computed(() => {
 })
 
 const testModeSummary = computed(() => {
+  if (supportsTextTestPrompt.value) {
+    return t('admin.accounts.testPrompt', { prompt: effectiveTextTestPrompt.value })
+  }
   if (isGrokAccount.value) {
     switch (grokTestMode.value) {
       case 'video':
@@ -690,7 +738,7 @@ const testModeSummary = computed(() => {
     }
   }
   if (supportsImageTest.value) return t('admin.accounts.imageTestMode')
-  return t('admin.accounts.testPrompt')
+  return t('admin.accounts.testPrompt', { prompt: effectiveTextTestPrompt.value })
 })
 
 const canStartTest = computed(() => {
@@ -758,6 +806,8 @@ watch(
   async ([newVal]) => {
     if (newVal && props.account) {
       testPrompt.value = ''
+      textTestPrompt.value = DEFAULT_TEXT_TEST_PROMPT
+      showTextPromptEditor.value = false
       testMode.value = 'default'
       grokTestMode.value = 'text'
       resetState()
@@ -891,7 +941,9 @@ const startTest = async () => {
       audio_data_url?: string
     } = {
       model_id: showModelSelect.value ? selectedModelId.value : '',
-      prompt: supportsPromptInput.value ? testPrompt.value.trim() : ''
+      prompt: supportsTextTestPrompt.value
+        ? effectiveTextTestPrompt.value
+        : supportsPromptInput.value ? testPrompt.value.trim() : ''
     }
     if (isOpenAIAccount.value) {
       requestBody.mode = testMode.value

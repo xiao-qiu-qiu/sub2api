@@ -7,7 +7,7 @@ import (
 )
 
 func TestPelicanPayloadsDoNotChangeDefaultAccountTestPayloads(t *testing.T) {
-	defaultClaude, err := createTestPayload("claude-sonnet-4-6")
+	defaultClaude, err := createTestPayload("claude-sonnet-4-6", "")
 	require.NoError(t, err)
 	defaultMessages, ok := defaultClaude["messages"].([]map[string]any)
 	require.True(t, ok)
@@ -18,7 +18,7 @@ func TestPelicanPayloadsDoNotChangeDefaultAccountTestPayloads(t *testing.T) {
 	require.NotContains(t, defaultClaude, "output_config")
 	require.NotContains(t, defaultClaude, "thinking")
 
-	defaultOpenAI := createOpenAITestPayload("gpt-6-astra", true)
+	defaultOpenAI := createOpenAITestPayload("gpt-6-astra", true, "")
 	defaultInput, ok := defaultOpenAI["input"].([]map[string]any)
 	require.True(t, ok)
 	defaultOpenAIContent, ok := defaultInput[0]["content"].([]map[string]any)

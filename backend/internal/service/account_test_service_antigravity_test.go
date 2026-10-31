@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityConnectionTestModel(t *testing.T) {
@@ -59,6 +60,30 @@ func TestAntigravityBuildGeminiTestRequestWithPrompt_ImageModel(t *testing.T) {
 	firstContent := contents[0].(map[string]any)
 	parts := firstContent["parts"].([]any)
 	require.Equal(t, "a cute cat", parts[0].(map[string]any)["text"])
+}
+
+func TestAntigravityTextTestRequestsPreservePrompt(t *testing.T) {
+	svc := &AntigravityGatewayService{}
+	for _, prompt := range []string{"", "ciallo! \"你好\"\n第二行"} {
+		for _, model := range []string{"gemini-3.8-flash-high", "claude-sonnet-4-6"} {
+			t.Run(model+"/"+prompt, func(t *testing.T) {
+				var raw []byte
+				var err error
+				if shouldUseAntigravityGeminiTestRequest(model, model) {
+					raw, err = svc.buildGeminiTestRequestWithPrompt("proj-123", model, prompt)
+				} else {
+					raw, err = svc.buildClaudeTestRequest("proj-123", model, prompt)
+				}
+				require.NoError(t, err)
+				expected := prompt
+				if expected == "" {
+					expected = "."
+				}
+				require.Equal(t, expected, gjson.GetBytes(raw, "request.contents.0.parts.0.text").String())
+				require.Equal(t, int64(1), gjson.GetBytes(raw, "request.generationConfig.maxOutputTokens").Int())
+			})
+		}
+	}
 }
 
 func TestExtractContentFromSSEResponse_ExtractsTextAndInlineImages(t *testing.T) {

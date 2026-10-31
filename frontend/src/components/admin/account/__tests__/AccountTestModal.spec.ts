@@ -24,6 +24,7 @@ vi.mock('@/composables/useClipboard', () => ({
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   const messages: Record<string, string> = {
+    'admin.accounts.testPrompt': 'Prompt: "{prompt}"',
     'admin.accounts.imagePromptDefault': 'Generate a cute orange cat astronaut sticker on a clean pastel background.'
   }
   return {
@@ -36,7 +37,7 @@ vi.mock('vue-i18n', async () => {
         if (key === 'admin.accounts.imagePreviewAlt' && params?.index) {
           return `test-image-${params.index}`
         }
-        return messages[key] || key
+        return (messages[key] || key).replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ''))
       }
     })
   }
@@ -81,6 +82,7 @@ function mountModal(account: Record<string, unknown> = {
         TextArea: {
           props: ['modelValue'],
           emits: ['update:modelValue'],
+          methods: { focus: vi.fn(), select: vi.fn() },
           template: '<textarea class="textarea-stub" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
         },
         Icon: true
@@ -182,7 +184,7 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toEqual({
       model_id: 'grok-4.3',
-      prompt: '',
+      prompt: 'ciallo',
       mode: 'text'
     })
   })
@@ -216,9 +218,45 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toMatchObject({
       model_id: 'gpt-5.4',
-      prompt: '',
+      prompt: 'ciallo',
       mode: 'compact'
     })
+  })
+
+  it.each([
+    ['  say hello from the connection test  ', 'say hello from the connection test'],
+    ['   ', 'ciallo']
+  ])('点击提示词后发送实际编辑内容，留空回退默认值 (%j)', async (input, expectedPrompt) => {
+    getAvailableModels.mockResolvedValue([{ id: 'claude-sonnet-4-5', display_name: 'Sonnet' }])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
+    const wrapper = mountModal({
+      id: 42, name: 'Claude Account', platform: 'anthropic', type: 'oauth', status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const editPrompt = wrapper.get('button[aria-controls="account-text-test-prompt-editor"]')
+    expect(editPrompt.text()).toContain('Prompt: "ciallo"')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    await editPrompt.trigger('click')
+    await wrapper.get('textarea').setValue(input)
+    expect(editPrompt.text()).toContain(`Prompt: "${expectedPrompt}"`)
+
+    const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+    await start.trigger('click')
+    await flushPromises()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toMatchObject({
+      model_id: 'claude-sonnet-4-5', prompt: expectedPrompt
+    })
+
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(editPrompt.text()).toContain('Prompt: "ciallo"')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    wrapper.unmount()
   })
 })
 

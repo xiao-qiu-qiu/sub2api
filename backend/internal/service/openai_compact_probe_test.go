@@ -136,7 +136,7 @@ func TestBuildOpenAICompactProbeExtraUpdates_2xxWithoutCompactionItemMarksUnsupp
 }
 
 func TestCreateOpenAICompactProbePayload_NativeV2Shape(t *testing.T) {
-	payload := createOpenAICompactProbePayload("gpt-5.6-sol", true)
+	payload := createOpenAICompactProbePayload("gpt-5.6-sol", true, "")
 	if payload["stream"] != true {
 		t.Fatalf("v2 probe payload must be streaming")
 	}
@@ -152,7 +152,7 @@ func TestCreateOpenAICompactProbePayload_NativeV2Shape(t *testing.T) {
 		t.Fatalf("last input item must be compaction_trigger, got %v", input[len(input)-1])
 	}
 
-	apiKeyPayload := createOpenAICompactProbePayload("gpt-5.6-sol", false)
+	apiKeyPayload := createOpenAICompactProbePayload("gpt-5.6-sol", false, "")
 	if _, has := apiKeyPayload["store"]; has {
 		t.Fatalf("API-key probe payload must not force store")
 	}

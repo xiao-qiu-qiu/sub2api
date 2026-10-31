@@ -114,10 +114,13 @@ func TestAccountTestService_AdaptiveDeepSeekAlsoTestsResponsesEndpoint(t *testin
 	)
 	c, recorder := newTestContext()
 
-	err := svc.TestAccountConnection(c, account.ID, "deepseek-chat", "", AccountTestModeDefault)
+	err := svc.TestAccountConnection(c, account.ID, "deepseek-chat", "  ciallo adaptive  ", AccountTestModeDefault)
 
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 3)
+	require.Equal(t, "ciallo adaptive", gjson.GetBytes(upstream.bodies[0], "messages.0.content").String())
+	require.Equal(t, "ciallo adaptive", gjson.GetBytes(upstream.bodies[1], "messages.0.content.0.text").String())
+	require.Equal(t, "ciallo adaptive", gjson.GetBytes(upstream.bodies[2], "input.0.content.0.text").String())
 	require.Equal(t, "http://responses.example/responses", upstream.requests[2].URL.String())
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.requests[2].Context()))
 	require.Equal(t, "Bearer sk-adaptive-test", upstream.requests[2].Header.Get("Authorization"))

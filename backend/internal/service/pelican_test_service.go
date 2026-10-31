@@ -43,8 +43,8 @@ func isQualityObservation(ctx context.Context) bool {
 }
 
 // TestPelicanAccountConnection is the dedicated account test path for the
-// Pelican UI. The existing /test endpoint deliberately keeps its historical
-// probe payload; only this endpoint opts into the user prompt and reasoning.
+// Pelican UI. It adds reasoning controls and a larger answer budget to the
+// standard connection test's customizable prompt.
 func (s *AccountTestService) TestPelicanAccountConnection(c *gin.Context, accountID int64, modelID, prompt, reasoningEffort string) error {
 	options, _ := pelicanTestOptionsFromContext(c.Request.Context())
 	options.prompt = strings.TrimSpace(prompt)
@@ -72,7 +72,7 @@ func pelicanTestRequested(c *gin.Context) bool {
 }
 
 func createPelicanClaudePayload(modelID, prompt, reasoningEffort string) (map[string]any, error) {
-	payload, err := createTestPayload(modelID)
+	payload, err := createTestPayload(modelID, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -82,14 +82,6 @@ func createPelicanClaudePayload(modelID, prompt, reasoningEffort string) (map[st
 		if claude.SupportsAdaptiveThinking(modelID) {
 			payload["thinking"] = map[string]any{"type": "adaptive"}
 		}
-	}
-	messages, ok := payload["messages"].([]map[string]any)
-	if !ok || len(messages) == 0 {
-		return payload, nil
-	}
-	content, ok := messages[0]["content"].([]map[string]any)
-	if ok && len(content) > 0 {
-		content[0]["text"] = promptOrDefault(prompt)
 	}
 	return payload, nil
 }
@@ -125,14 +117,7 @@ func pelicanClaudeStopFailure(stopReason, category string) string {
 }
 
 func createPelicanOpenAIPayload(modelID string, isOAuth bool, prompt, reasoningEffort string) map[string]any {
-	payload := createOpenAITestPayload(modelID, isOAuth)
-	input, ok := payload["input"].([]map[string]any)
-	if ok && len(input) > 0 {
-		content, ok := input[0]["content"].([]map[string]any)
-		if ok && len(content) > 0 {
-			content[0]["text"] = promptOrDefault(prompt)
-		}
-	}
+	payload := createOpenAITestPayload(modelID, isOAuth, prompt)
 	if effort := normalizePelicanReasoningEffort(reasoningEffort); effort != "" {
 		payload["reasoning"] = map[string]any{"effort": effort}
 	}

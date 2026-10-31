@@ -56,7 +56,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersi
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/1/test", bytes.NewReader(nil))
 
-	err := svc.TestAccountConnection(c, account.ID, "gpt-5.4", "", AccountTestModeCompact)
+	err := svc.TestAccountConnection(c, account.ID, "gpt-5.4", "  ciallo compact  ", AccountTestModeCompact)
 	require.NoError(t, err)
 
 	// 原生 v2：探测普通 /responses 线，不再打已下线的 /responses/compact。
@@ -74,6 +74,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersi
 	require.False(t, gjson.GetBytes(upstream.lastBody, "store").Bool())
 	inputItems := gjson.GetBytes(upstream.lastBody, "input").Array()
 	require.NotEmpty(t, inputItems)
+	require.Equal(t, "ciallo compact", inputItems[0].Get("content").String())
 	require.Equal(t, "compaction_trigger", inputItems[len(inputItems)-1].Get("type").String())
 
 	updates := <-updateCalls

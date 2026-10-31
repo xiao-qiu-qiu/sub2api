@@ -202,7 +202,7 @@
           {{
             supportsImageTest
               ? t('admin.accounts.imageTestMode')
-              : t('admin.accounts.testPrompt')
+              : t('admin.accounts.testPrompt', { prompt: 'hi' })
           }}
         </span>
       </div>
