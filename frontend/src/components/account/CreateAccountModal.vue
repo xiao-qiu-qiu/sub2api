@@ -3562,7 +3562,7 @@
         </div>
       </div>
 
-      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <!-- Codex 指纹收敛模式（OpenAI OAuth / setup-token） -->
       <div
         v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3579,6 +3579,11 @@
           </div>
         </div>
       </div>
+
+      <CodexFingerprintSettings
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-model="codexAdvancedSettings"
+      />
 
       <!-- OpenAI Compact 能力配置 -->
       <div
@@ -4153,6 +4158,8 @@
 </template>
 
 <script setup lang="ts">
+import CodexFingerprintSettings from './CodexFingerprintSettings.vue'
+import { readCodexFingerprintSettings, codexFingerprintSettingsPatch, validateCodexFingerprintSettings } from '@/utils/codexFingerprintSettings'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
 import ExtraImageModelsField from '@/components/account/ExtraImageModelsField.vue'
 import { parseExtraImageModels } from '@/utils/extraImageModels'
@@ -4796,6 +4803,7 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexAdvancedSettings = ref(readCodexFingerprintSettings())
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -5822,6 +5830,7 @@ const resetForm = () => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  codexAdvancedSettings.value = readCodexFingerprintSettings()
   anthropicPassthroughEnabled.value = false
   anthropicStripClaudeCodeIdentityEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -5886,6 +5895,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
 
   const extra: Record<string, unknown> = { ...(base || {}) }
+  if (accountCategory.value === 'oauth-based') {
+    const fingerprintError = validateCodexFingerprintSettings(codexAdvancedSettings.value)
+    if (fingerprintError) throw new Error(t(fingerprintError))
+    Object.assign(extra, codexFingerprintSettingsPatch(codexAdvancedSettings.value))
+  }
   extra.openai_request_timezone = openAIRequestTimezone.value
   if (form.type === 'apikey') {
     extra.extra_image_models = parseExtraImageModels(extraImageModels.value)
@@ -6113,6 +6127,13 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (form.platform === 'openai' && accountCategory.value === 'oauth-based') {
+    const fingerprintError = validateCodexFingerprintSettings(codexAdvancedSettings.value)
+    if (fingerprintError) {
+      appStore.showError(t(fingerprintError))
+      return
+    }
+  }
   if (isOpenAIBPSOAuth.value && !bpsOAuthModels.value.some(model => model.trim())) {
     appStore.showError(t('admin.accounts.oauth.openai.excelModelsRequired'))
     return

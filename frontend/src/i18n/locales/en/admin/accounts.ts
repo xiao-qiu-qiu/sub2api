@@ -945,6 +945,76 @@ export default {
         codexCLIOnlyAppServer: 'Allow Codex app-server clients',
         codexCLIOnlyAppServerDesc:
           "Effective only when the switch above is on. When enabled, this account also allows third-party clients that embed the Codex engine over the app-server protocol (e.g. Claude Code's codex plugin); they still pass the global engine-fingerprint gate. OR-combined with the global app-server toggle.",
+        fingerprintAdvanced: {
+          title: 'Advanced fingerprint settings',
+          optional: 'Optional',
+          intro: 'Defaults preserve existing behavior. Identity scheme, request options and client profile are independent; changing the scheme does not enable any switches.',
+          scheme: 'Identity scheme',
+          v1: 'v1 (default)',
+          v2: 'v2 (opt in)',
+          schemeHint: 'Switch identity schemes in a new session. v2 does not require device convergence; the Device only mode above is recommended, but will not be selected automatically.',
+          wireTitle: 'Request behavior · Independent switches',
+          timezone: 'Timezone (IANA)',
+          timezoneHint: 'Enter a timezone such as Asia/Shanghai for the environment timezone option. Leave blank to omit the override. No automatic IP lookup.',
+          location: 'Manual search location',
+          locationHint: 'Overrides location only when the search location option is enabled and a location is provided. Leave all fields blank to preserve the original request location. No automatic IP lookup. Location affects search results and answers.',
+          city: 'City',
+          region: 'Region / State / Province',
+          country: 'Country code',
+          profile: 'Client profile',
+          inherit: 'Preserve existing behavior (no override)',
+          profileHint: 'Select CLI or Desktop to override the client profile. Select Preserve existing behavior to clear the profile override.',
+          platform: 'Operating system platform',
+          versionMode: 'Codex core version policy',
+          latest: 'Follow existing version sync',
+          fixed: 'Fixed version',
+          versionHint: 'Version sync applies only to Codex core. The Desktop application version must always be entered separately.',
+          coreVersion: 'Codex core version (required)',
+          desktopVersion: 'Desktop application version (required)',
+          desktopVersionHint: 'Enter the actual Desktop application version; do not reuse the Codex core version.',
+          cliEntry: 'Use the CLI exec entry point',
+          overrides: 'Optional system information overrides',
+          overridesHint: 'Leave blank to use profile defaults.',
+          osType: 'OS type (osType)',
+          osVersion: 'OS version (osVersion)',
+          arch: 'Architecture (arch)',
+          terminal: 'Terminal (terminal)',
+          apply: 'Apply advanced fingerprint settings',
+          bulkHint: 'Only apply this group to all target accounts when checked. Otherwise each account keeps its configuration. Applying clears blank overrides and writes disabled switches as off. The convergence mode above is not changed.',
+          coreVersionRequired: 'A Codex core version is required in fixed version mode.',
+          desktopVersionRequired: 'The Desktop profile requires the actual Desktop application version.',
+          invalidTimezone: 'Enter a valid IANA timezone, such as Asia/Shanghai or UTC.',
+          flags: {
+            body_order: {
+              title: 'Request body field order',
+              hint: 'Enable request body field ordering independently of the identity scheme and other switches.'
+            },
+            request_compression: {
+              title: 'Request compression',
+              hint: 'Enable request compression.'
+            },
+            environment_timezone: {
+              title: 'Environment timezone',
+              hint: 'Enable environment timezone handling using the manual timezone below. Environment information can affect model answers.'
+            },
+            web_search_location: {
+              title: 'Search location',
+              hint: 'Use only the explicit location below; preserve the original location when unconfigured. Search results and answers may change.'
+            },
+            settings_user: {
+              title: 'User settings marker',
+              hint: 'Enable settings_user handling in requests.'
+            },
+            guardian_credits: {
+              title: 'Guardian credits marker',
+              hint: 'Controls the credits marker in requests; it does not represent an actual balance or top-up.'
+            },
+            cookie_replay: {
+              title: 'Account cookie replay',
+              hint: 'Replay cookies for this account. Cookies are isolated per account and are not shared across accounts.'
+            }
+          }
+        },
         codexFingerprintMode: 'Codex fingerprint convergence',
         codexFingerprintModeDesc: 'When multiple users share the same OAuth account, converge device/session identifiers to account-level stable values to reduce upstream-visible device and session count. Off by default (client identifiers pass through as-is); opt in explicitly when needed. Some accounts reported quota shrinkage after enabling convergence, so choose based on your own measurements.',
         codexFingerprintOff: 'Off (passthrough, default)',

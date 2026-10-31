@@ -1133,7 +1133,7 @@
         </div>
       </div>
 
-      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <!-- Codex 指纹收敛模式（OpenAI OAuth / setup-token） -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintMode') }}</label>
@@ -1150,6 +1150,15 @@
           </p>
           <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
         </div>
+      </div>
+
+      <div v-if="allOpenAIOAuth" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="flex cursor-pointer items-center justify-between gap-4 text-sm font-medium text-gray-700 dark:text-gray-200">
+          {{ t('admin.accounts.openai.fingerprintAdvanced.apply') }}
+          <input v-model="enableCodexAdvancedSettings" type="checkbox" data-testid="bulk-codex-advanced-apply" class="rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+        </label>
+        <p class="text-xs leading-relaxed text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.fingerprintAdvanced.bulkHint') }}</p>
+        <CodexFingerprintSettings v-if="enableCodexAdvancedSettings" v-model="codexAdvancedSettings" />
       </div>
 
       <!-- Upstream billing auto probe (any API-key platform) -->
@@ -1563,6 +1572,8 @@
 </template>
 
 <script setup lang="ts">
+import CodexFingerprintSettings from './CodexFingerprintSettings.vue'
+import { readCodexFingerprintSettings, codexFingerprintSettingsPatch, validateCodexFingerprintSettings } from '@/utils/codexFingerprintSettings'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
 
 import { ref, watch, computed } from 'vue'
@@ -1860,7 +1871,9 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
+const enableCodexAdvancedSettings = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexAdvancedSettings = ref(readCodexFingerprintSettings())
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -2278,6 +2291,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
 
+  if (enableCodexAdvancedSettings.value && allOpenAIOAuth.value) {
+    Object.assign(ensureExtra(), codexFingerprintSettingsPatch(codexAdvancedSettings.value, undefined, true))
+  }
+
   if (enableCodexFingerprintMode.value) {
     const extra = ensureExtra()
     // off 必须显式落键，不能靠删本地键表达。批量更新走 JSONB 顶层合并
@@ -2377,6 +2394,13 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
 }
 
 const handleSubmit = async () => {
+  if (enableCodexAdvancedSettings.value && allOpenAIOAuth.value) {
+    const fingerprintError = validateCodexFingerprintSettings(codexAdvancedSettings.value, undefined, true)
+    if (fingerprintError) {
+      appStore.showError(t(fingerprintError))
+      return
+    }
+  }
   if (bpsDefaults.loading.value) return
   if (targetMode.value === 'selected' && targetAccountIds.value.length === 0) {
     appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
@@ -2411,6 +2435,7 @@ const handleSubmit = async () => {
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
     enableCodexFingerprintMode.value ||
+    (enableCodexAdvancedSettings.value && allOpenAIOAuth.value) ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -2585,6 +2610,8 @@ watch(
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
       enableCodexFingerprintMode.value = false
+      enableCodexAdvancedSettings.value = false
+      codexAdvancedSettings.value = readCodexFingerprintSettings()
       codexFingerprintMode.value = 'off'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false

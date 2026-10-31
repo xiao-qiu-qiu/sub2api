@@ -1054,6 +1054,76 @@ export default {
         codexCLIOnlyDesc: '仅对 OpenAI OAuth 生效。开启后仅允许 Codex 官方客户端家族访问；关闭后完全绕过并保持原逻辑。',
         codexCLIOnlyAppServer: '允许 Codex app-server 客户端',
         codexCLIOnlyAppServerDesc: '仅在上方开关开启时生效。开启后本账号额外放行内嵌 Codex 引擎、经 app-server 协议接入的第三方客户端（如 Claude Code 的 codex 插件），仍需通过全局引擎指纹门；与全局 app-server 开关取 OR（任一开即放行）。',
+        fingerprintAdvanced: {
+          title: '高级指纹设置',
+          optional: '按需配置',
+          intro: '默认保留现有行为。身份方案、请求开关和客户端档案可以独立配置；不启用的开关不会随身份方案自动开启。',
+          scheme: '身份方案',
+          v1: 'v1（默认）',
+          v2: 'v2（显式启用）',
+          schemeHint: '请在新会话中切换身份方案。v2 不要求开启设备收敛；建议搭配上方“仅设备”模式，但不会自动替你修改。',
+          wireTitle: '请求行为 · 独立开关',
+          timezone: '时区（IANA）',
+          timezoneHint: '手动填写，例如 Asia/Shanghai；配合环境时区开关使用。留空不指定时区，不根据 IP 自动查询。',
+          location: '手动搜索位置',
+          locationHint: '仅在搜索位置开关启用且填写了位置时覆盖。全部留空保留请求原位置；不根据 IP 自动查询。位置会影响搜索结果和回答。',
+          city: '城市',
+          region: '地区 / 州 / 省',
+          country: '国家 / 地区代码',
+          profile: '客户端档案',
+          inherit: '保留原行为（不覆盖）',
+          profileHint: '选择 CLI 或 Desktop 后才覆盖客户端档案。切回“保留原行为”会清除该档案覆盖。',
+          platform: '操作系统平台',
+          versionMode: 'Codex core 版本策略',
+          latest: '跟随现有版本同步',
+          fixed: '固定版本',
+          versionHint: '“跟随同步”仅适用于 Codex core。Desktop 应用版本始终需要单独填写。',
+          coreVersion: 'Codex core 版本（必填）',
+          desktopVersion: 'Desktop 应用版本（必填）',
+          desktopVersionHint: '填写真实的 Desktop 应用版本；不要复用 Codex core 版本。',
+          cliEntry: '使用 CLI exec 入口',
+          overrides: '可选系统信息覆盖',
+          overridesHint: '留空使用档案默认值。',
+          osType: '系统类型（osType）',
+          osVersion: '系统版本（osVersion）',
+          arch: '架构（arch）',
+          terminal: '终端（terminal）',
+          apply: '应用高级指纹设置',
+          bulkHint: '仅勾选后更新所有目标账号的这组高级设置；未勾选时保持各账号原配置。勾选后空白覆盖项会被清除、关闭的开关会写为关闭。不会修改上方收敛模式。',
+          coreVersionRequired: '固定版本模式必须填写 Codex core 版本。',
+          desktopVersionRequired: 'Desktop 档案必须填写真实的 Desktop 应用版本。',
+          invalidTimezone: '请填写有效的 IANA 时区，例如 Asia/Shanghai 或 UTC。',
+          flags: {
+            body_order: {
+              title: '请求体字段顺序',
+              hint: '启用请求体字段顺序处理。独立于身份方案与其他开关。'
+            },
+            request_compression: {
+              title: '请求压缩',
+              hint: '启用请求压缩处理。'
+            },
+            environment_timezone: {
+              title: '环境时区',
+              hint: '启用环境时区处理，使用下方手动时区。环境信息会影响模型回答。'
+            },
+            web_search_location: {
+              title: '搜索位置',
+              hint: '仅使用下方显式填写的位置；未配置保留原位置。搜索结果和回答可能改变。'
+            },
+            settings_user: {
+              title: '用户设置标记',
+              hint: '启用请求中的 settings_user 处理。'
+            },
+            guardian_credits: {
+              title: 'Guardian credits 标记',
+              hint: '仅控制请求中的 credits 标记，不代表实际额度或充值。'
+            },
+            cookie_replay: {
+              title: '账号 Cookie 回放',
+              hint: '回放该账号的 Cookie；Cookie 按账号隔离，不在账号之间共享。'
+            }
+          }
+        },
         codexFingerprintMode: 'Codex 指纹收敛',
         codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，将各用户的设备/会话标识收敛为账号级恒定值，减少上游可见的设备数和会话数。默认关闭（原样透传客户端标识），需要时再显式开启；部分账号开启收敛后出现过额度缩水，请按自己的实测结果选择。',
         codexFingerprintOff: '关闭（透传，默认）',
