@@ -158,7 +158,12 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	}
 
 	binding, _ := ctx.Value(requestTimezoneEgressKey{}).(*requestTimezoneBinding)
-	wrapped := &coderOpenAIWSClientConn{timezoneBinding: binding, timezoneProxy: proxyURL}
+	wrapped := &coderOpenAIWSClientConn{
+		timezoneBinding:        binding,
+		timezoneProxy:          proxyURL,
+		optionalTrafficContext: codexOptionalTrafficWSDialContext(ctx, targetURL),
+		optionalTrafficProxy:   proxyURL,
+	}
 	opts := &coderws.DialOptions{
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
@@ -207,7 +212,14 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		opts.HTTPClient = &clone
 	}
 
+	opts.HTTPHeader = applyCodexOptionalTrafficWS(ctx, targetURL, opts.HTTPHeader, proxyURL)
+	if wrapped.optionalTrafficContext != nil {
+		wrapped.optionalTrafficHeaders = opts.HTTPHeader.Clone()
+	}
 	conn, resp, err := coderws.Dial(ctx, targetURL, opts)
+	if err == nil && resp != nil {
+		observeCodexOptionalTrafficWS(ctx, targetURL, opts.HTTPHeader, resp.StatusCode, resp.Header, proxyURL)
+	}
 	if region != "" {
 		parsed, _ := url.Parse(targetURL)
 		status := 0
@@ -370,12 +382,15 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 }
 
 type coderOpenAIWSClientConn struct {
-	timezoneBinding *requestTimezoneBinding
-	timezoneProxy   string
-	requestTimezone string
-	timezoneMu      sync.Mutex
-	conn            *coderws.Conn
-	upstreamPings   atomic.Int64
+	optionalTrafficContext context.Context
+	optionalTrafficHeaders http.Header
+	optionalTrafficProxy   string
+	timezoneBinding        *requestTimezoneBinding
+	timezoneProxy          string
+	requestTimezone        string
+	timezoneMu             sync.Mutex
+	conn                   *coderws.Conn
+	upstreamPings          atomic.Int64
 }
 
 func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
@@ -397,7 +412,7 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if payload, ok := value.(openAIWSPreparedJSON); ok {
 		return c.WriteFrame(ctx, coderws.MessageText, payload)
 	}
-	if c.timezoneBinding != nil {
+	if c.timezoneBinding != nil || c.optionalTrafficContext != nil {
 		payload, err := json.Marshal(value)
 		if err != nil {
 			return err
@@ -459,7 +474,15 @@ func (c *coderOpenAIWSClientConn) WriteFrame(ctx context.Context, msgType coderw
 			payload = normalizeOpenAIRequestLocaleTimezone(ctx, c.timezoneBinding.account, payload, "ws", name)
 		}
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	if err := c.conn.Write(ctx, msgType, payload); err != nil {
+		return err
+	}
+	if msgType == coderws.MessageText && c.optionalTrafficContext != nil {
+		if b := codexOptionalTrafficFromContext(c.optionalTrafficContext); b != nil && b.runtime != nil && b.runtime.service != nil {
+			b.runtime.service.scheduleCodexWSOptionalTraffic(c.optionalTrafficContext, b.snapshot.account(), c.optionalTrafficHeaders, c.optionalTrafficProxy, payload)
+		}
+	}
+	return nil
 }
 
 func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {
