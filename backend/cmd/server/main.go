@@ -33,23 +33,29 @@ var embeddedVersion string
 
 // Build-time variables (can be set by ldflags)
 var (
-	Version   = ""
-	Commit    = "unknown"
-	Date      = "unknown"
-	BuildType = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
+	Version              = ""
+	ReauthRuntimeVersion = "" // Defaults to the embedded upstream VERSION, independently of custom build labels.
+	Commit               = "unknown"
+	Date                 = "unknown"
+	BuildType            = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
 )
 
 func init() {
-	// 如果 Version 已通过 ldflags 注入（例如 -X main.Version=...），则不要覆盖。
-	if strings.TrimSpace(Version) != "" {
-		return
-	}
+	Version, ReauthRuntimeVersion = resolveBuildVersions(Version, ReauthRuntimeVersion, embeddedVersion)
+}
 
-	// 默认从 embedded VERSION 文件读取版本号（编译期打包进二进制）。
-	Version = strings.TrimSpace(embeddedVersion)
-	if Version == "" {
-		Version = "0.0.0-dev"
+func resolveBuildVersions(version, runtimeVersion, embedded string) (string, string) {
+	upstream := strings.TrimSpace(embedded)
+	if upstream == "" {
+		upstream = "0.0.0-dev"
 	}
+	if version = strings.TrimSpace(version); version == "" {
+		version = upstream
+	}
+	if runtimeVersion = strings.TrimSpace(runtimeVersion); runtimeVersion == "" {
+		runtimeVersion = upstream
+	}
+	return version, runtimeVersion
 }
 
 // initLogger configures the default slog handler based on gin.Mode().
@@ -87,6 +93,7 @@ func main() {
 
 	if *showVersion {
 		log.Printf("Sub2API %s (commit: %s, built: %s)\n", Version, Commit, Date)
+		log.Printf("Re-login runtime version: %s\n", ReauthRuntimeVersion)
 		return
 	}
 
@@ -168,8 +175,9 @@ func runMainServer() {
 	}
 
 	buildInfo := handler.BuildInfo{
-		Version:   Version,
-		BuildType: BuildType,
+		Version:              Version,
+		ReauthRuntimeVersion: ReauthRuntimeVersion,
+		BuildType:            BuildType,
 	}
 
 	app, err := initializeApplication(buildInfo)

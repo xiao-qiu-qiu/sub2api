@@ -45,6 +45,20 @@ func TestOpenAIOAuthReauthPreservesExternalWorker(t *testing.T) {
 	require.Equal(t, "external_offline", s.WorkerStatus().Reason)
 }
 
+func TestOpenAIOAuthReauthCustomBuildUsesUpstreamRuntime(t *testing.T) {
+	t.Setenv("OPENAI_REAUTH_WORKER_TOKEN", "")
+	t.Setenv("DATA_DIR", t.TempDir())
+	s := &OpenAIOAuthReauthService{}
+	s.configureWorker(nil, BuildInfo{
+		Version:              "2.19.0-custom.20261101",
+		ReauthRuntimeVersion: "2.19.0",
+	})
+	defer s.stopWorker()
+
+	require.NotNil(t, s.worker)
+	require.Equal(t, "2.19.0", s.WorkerStatus().Version)
+}
+
 func TestOpenAIOAuthReauthWorkerHeartbeatKeepsExternalWorkerAvailable(t *testing.T) {
 	t.Setenv("OPENAI_REAUTH_WORKER_TOKEN", strings.Repeat("a", 32))
 	s := &OpenAIOAuthReauthService{}

@@ -27,6 +27,7 @@ const maxExtracted = 768 << 20
 type Status struct {
 	StartedAt int64  `json:"-"`
 	Mode      string `json:"mode"`
+	Version   string `json:"version,omitempty"`
 	State     string `json:"state"`
 	Reason    string `json:"reason,omitempty"`
 }
@@ -48,7 +49,7 @@ func New(root, version, baseURL, token string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{root: root, version: strings.TrimPrefix(version, "v"), baseURL: baseURL, token: token,
 		ctx: ctx, cancel: cancel, client: &http.Client{Timeout: 5 * time.Minute},
-		status: Status{Mode: "managed", State: "idle"}}
+		status: Status{Mode: "managed", Version: strings.TrimPrefix(version, "v"), State: "idle"}}
 }
 
 func (m *Manager) Status() Status { m.mu.Lock(); defer m.mu.Unlock(); return m.status }

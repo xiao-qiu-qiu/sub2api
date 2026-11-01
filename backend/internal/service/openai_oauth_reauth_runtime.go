@@ -47,7 +47,12 @@ func (s *OpenAIOAuthReauthService) configureWorker(cfg *config.Config, info Buil
 			host = cfg.Server.Host
 		}
 	}
-	s.worker = reauthruntime.New(filepath.Join(dir, "credential-worker"), info.Version, "http://"+net.JoinHostPort(host, strconv.Itoa(port)), s.workerToken)
+	runtimeVersion := strings.TrimSpace(info.ReauthRuntimeVersion)
+	if runtimeVersion == "" {
+		// Preserve callers that supply BuildInfo directly without the server bootstrap.
+		runtimeVersion = info.Version
+	}
+	s.worker = reauthruntime.New(filepath.Join(dir, "credential-worker"), runtimeVersion, "http://"+net.JoinHostPort(host, strconv.Itoa(port)), s.workerToken)
 }
 
 // WorkerAuthentication verifies the private protocol without exposing the key.

@@ -1,8 +1,37 @@
 # 登录 Worker 随主程序自动管理
 
-Linux amd64 / arm64 的内置管理器已经支持自动下载、校验、启动与重试。主程序升级并重启后，按自身版本使用对应的 owner Release 运行包；旧版本目录仍保留，2FA 恢复日志放在版本目录外。服务器不编译应用，也不安装 Python/Node 依赖。
+Linux amd64 / arm64 的内置管理器已经支持自动下载、校验、启动与重试。主程序升级并重启后，按构建时选定的运行包版本使用对应的 owner Release 运行包；旧版本目录仍保留，2FA 恢复日志放在版本目录外。服务器不编译应用，也不安装 Python/Node 依赖。
 
 旧部署若设置了 `OPENAI_REAUTH_WORKER_TOKEN`，会保留外部 Worker 模式。单独升级主程序不会接管这个 systemd 服务，可能出现主程序已有 2FA 功能、外部 Worker 仍是旧版的情况。
+
+## 自定义构建的运行包版本
+
+展示版本与托管 Worker 运行包版本分别设置：
+
+- `main.Version` 用于应用版本展示，可以通过 `-X main.Version=...` 添加自定义构建后缀。
+- `main.ReauthRuntimeVersion` 用于选择 Worker 运行包，缺省读取编译时内嵌的 `backend/cmd/server/VERSION`，通过 `BuildInfo.ReauthRuntimeVersion` 传给运行包管理器。单独覆盖展示版本不会改变运行包选择。
+- 需要固定其他运行包版本时，构建参数显式指定 `-X main.ReauthRuntimeVersion=...`。该值必须对应 owner 已发布且包含目标架构运行包及 SHA-256 摘要的 Release，并与当前主程序的 Worker 协议兼容；自定义展示版本本身不代表存在同名运行包。
+
+例如，在 `backend` 目录执行以下构建；`1.2.3` 仅为示例，应替换为实际可用的运行包版本：
+
+```bash
+go build -ldflags "-X main.Version=1.2.3-custom -X main.ReauthRuntimeVersion=1.2.3" \
+  -o sub2api ./cmd/server
+```
+
+省略 `-X main.ReauthRuntimeVersion=...` 时仍使用内嵌 `VERSION`，不从 `1.2.3-custom` 这样的展示版本推导。正式发布时应确保内嵌版本与配套运行包一致；自定义构建若修改了 Worker 协议，也需提供兼容运行包并显式选择其版本。这里的版本规则适用于托管 Worker；外部 Worker 由其部署方式单独升级和验收。
+
+三个版本输入都会去除首尾空白；仅包含空白的覆盖值按未设置处理。内嵌 `VERSION` 为空时，未覆盖的展示版本与运行包版本各自回退为 `0.0.0-dev`。这是开发构建的缺省值，不保证存在对应 Release 运行包；使用托管 Worker 时需选定实际已发布的兼容版本。
+
+构建后可通过 `./sub2api -version` 查看展示版本，以及单独输出的 `Re-login runtime version: ...`。运行中的托管 Worker 状态通过 `worker.status.version` 标明所选运行包版本；管理器会去掉版本开头的 `v`。该字段表示选定版本，须结合状态和实际通信判断 Worker 是否已就绪。
+
+## 应用与 Worker 分别验收
+
+应用进程启动、API 健康检查成功或容器显示 `healthy`，只证明相应的应用健康检查通过。Worker 下载、校验或启动失败时，应用仍可能正常提供其他功能，必须单独检查：
+
+1. 应用：确认预期构建已运行，API 健康检查通过。
+2. 托管 Worker：在已触发 Worker 准备的实例中，确认所选运行包版本、下载与校验结果、托管子进程存活，并确认该 API 收到成功鉴权的 `totp-claim`，验证领取接口与持久恢复存储可用。外部模式则检查对应外部 Worker 服务与通信。
+3. 自动重登：在允许执行真实登录的验收场景中，单独核实任务已创建、被 Worker 领取并完成，凭据成功写回；涉及 2FA 时还需核实相应恢复状态。Worker 存活或领取成功本身不证明真实登录成功。
 
 ## 将标准旧 sidecar 一次迁入自动管理
 
