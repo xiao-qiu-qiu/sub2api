@@ -23,7 +23,7 @@ go build -ldflags "-X main.Version=1.2.3-custom -X main.ReauthRuntimeVersion=1.2
 
 三个版本输入都会去除首尾空白；仅包含空白的覆盖值按未设置处理。内嵌 `VERSION` 为空时，未覆盖的展示版本与运行包版本各自回退为 `0.0.0-dev`。这是开发构建的缺省值，不保证存在对应 Release 运行包；使用托管 Worker 时需选定实际已发布的兼容版本。
 
-构建后可通过 `./sub2api -version` 查看展示版本，以及单独输出的 `Re-login runtime version: ...`。运行中的托管 Worker 状态通过 `worker.status.version` 标明所选运行包版本；管理器会去掉版本开头的 `v`。该字段表示选定版本，须结合状态和实际通信判断 Worker 是否已就绪。
+构建后可通过 `./sub2api -version` 查看展示版本，以及单独输出的 `Re-login runtime version: ...`。凭证运营列表响应中的 `worker.version` 标明所选运行包版本；管理器会去掉版本开头的 `v`。该字段表示选定版本，须结合状态和实际通信判断 Worker 是否已就绪。
 
 ## 应用与 Worker 分别验收
 
