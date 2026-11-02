@@ -1,10 +1,10 @@
 <template>
-  <div class="relative">
+  <div class="relative min-w-0 max-w-40">
     <!-- Admin: Full version badge with dropdown -->
     <template v-if="isAdmin">
       <button
         @click="toggleDropdown"
-        class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
+        class="flex max-w-full items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
         :class="[
           hasUpdate
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
@@ -12,13 +12,19 @@
         ]"
         :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
       >
-        <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
+        <span
+          v-if="currentVersion"
+          class="min-w-0 truncate font-medium"
+          :title="`v${currentVersion}`"
+        >
+          v{{ currentVersion }}
+        </span>
         <span
           v-else
           class="h-3 w-12 animate-pulse rounded bg-gray-200 font-medium dark:bg-dark-600"
         ></span>
         <!-- Update indicator -->
-        <span v-if="hasUpdate" class="relative flex h-2 w-2">
+        <span v-if="hasUpdate" class="relative flex h-2 w-2 flex-shrink-0">
           <span
             class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75"
           ></span>
@@ -80,17 +86,18 @@
             <template v-else>
               <!-- Version display - centered and prominent -->
               <div class="mb-4 text-center">
-                <div class="inline-flex items-center gap-2">
+                <div class="inline-flex max-w-full items-center gap-2">
                   <span
                     v-if="currentVersion"
-                    class="text-2xl font-bold text-gray-900 dark:text-white"
+                    class="min-w-0 truncate text-2xl font-bold text-gray-900 dark:text-white"
+                    :title="`v${currentVersion}`"
                     >v{{ currentVersion }}</span
                   >
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
                     v-if="!hasUpdate"
-                    class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
+                    class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
                       class="h-3 w-3 text-green-600 dark:text-green-400"
@@ -105,7 +112,10 @@
                     </svg>
                   </span>
                 </div>
-                <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
+                <p
+                  class="mt-1 truncate text-xs text-gray-500 dark:text-dark-400"
+                  :title="hasUpdate ? `v${latestVersion}` : undefined"
+                >
                   {{
                     hasUpdate
                       ? t('version.latestVersion') + ': v' + latestVersion
@@ -254,7 +264,10 @@
                     <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
                       {{ t('version.updateAvailable') }}
                     </p>
-                    <p class="text-xs text-amber-600/70 dark:text-amber-400/70">
+                    <p
+                      class="truncate text-xs text-amber-600/70 dark:text-amber-400/70"
+                      :title="`v${latestVersion}`"
+                    >
                       v{{ latestVersion }}
                     </p>
                   </div>
@@ -311,7 +324,10 @@
                     <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
                       {{ t('version.updateAvailable') }}
                     </p>
-                    <p class="text-xs text-amber-600/70 dark:text-amber-400/70">
+                    <p
+                      class="truncate text-xs text-amber-600/70 dark:text-amber-400/70"
+                      :title="`v${latestVersion}`"
+                    >
                       v{{ latestVersion }}
                     </p>
                   </div>
@@ -478,16 +494,16 @@
                           :key="item.version"
                           @click="selectRollbackVersion(item.version)"
                           :disabled="rollingBack"
-                          class="flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60"
+                          class="flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60"
                           :class="
                             selectedRollbackVersion === item.version
                               ? 'border-amber-300 bg-amber-50 shadow-sm dark:border-amber-700 dark:bg-amber-900/20'
                               : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50 dark:border-dark-700 dark:hover:border-dark-600 dark:hover:bg-dark-700/40'
                           "
                         >
-                          <span class="flex items-center gap-2">
+                          <span class="flex min-w-0 items-center gap-2">
                             <span
-                              class="flex h-3.5 w-3.5 items-center justify-center rounded-full border transition-colors"
+                              class="flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-full border transition-colors"
                               :class="
                                 selectedRollbackVersion === item.version
                                   ? 'border-amber-500'
@@ -500,7 +516,8 @@
                               ></span>
                             </span>
                             <span
-                              class="text-sm font-semibold"
+                              class="min-w-0 truncate text-sm font-semibold"
+                              :title="`v${item.version}`"
                               :class="
                                 selectedRollbackVersion === item.version
                                   ? 'text-amber-700 dark:text-amber-300'
@@ -509,7 +526,9 @@
                               >v{{ item.version }}</span
                             >
                           </span>
-                          <span class="text-[11px] tabular-nums text-gray-400 dark:text-dark-500">
+                          <span
+                            class="flex-shrink-0 text-[11px] tabular-nums text-gray-400 dark:text-dark-500"
+                          >
                             {{ formatPublishedAt(item.published_at) }}
                           </span>
                         </button>
@@ -609,7 +628,7 @@
                                 ></path>
                               </svg>
                               <Icon v-else name="clock" size="sm" :stroke-width="2" />
-                              <span>{{
+                              <span class="min-w-0 truncate" :title="`v${selectedRollbackVersion}`">{{
                                 rollingBack
                                   ? t('version.rollingBack')
                                   : t('version.rollbackConfirm', {
@@ -631,7 +650,11 @@
     </template>
 
     <!-- Non-admin: Simple static version text -->
-    <span v-else-if="version" class="text-xs text-gray-500 dark:text-dark-400">
+    <span
+      v-else-if="version"
+      class="block max-w-full truncate text-xs text-gray-500 dark:text-dark-400"
+      :title="`v${version}`"
+    >
       v{{ version }}
     </span>
   </div>
@@ -651,9 +674,9 @@ import {
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+const GITHUB_REPO = 'xiao-qiu-qiu/sub2api'
+// GHCR image tags carry no "v" prefix.
+const DOCKER_IMAGE = 'ghcr.io/xiao-qiu-qiu/sub2api'
 
 const { t } = useI18n()
 
@@ -710,7 +733,7 @@ const manualTabs = computed(() => [
 const scriptRollbackCommand = computed(() => {
   if (!selectedRollbackVersion.value) return ''
   const tag = `v${selectedRollbackVersion.value}`
-  return `curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo bash -s -- rollback ${tag}`
+  return `curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo env SUB2API_GITHUB_REPO=${GITHUB_REPO} bash -s -- rollback ${tag}`
 })
 
 const dockerRollbackCommand = computed(() => {

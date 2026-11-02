@@ -31,29 +31,36 @@ import (
 //go:embed VERSION
 var embeddedVersion string
 
+//go:embed REAUTH_RUNTIME_VERSION
+var embeddedReauthRuntimeVersion string
+
 // Build-time variables (can be set by ldflags)
 var (
 	Version              = ""
-	ReauthRuntimeVersion = "" // Defaults to the embedded upstream VERSION, independently of custom build labels.
+	ReauthRuntimeVersion = "" // Defaults to the separately pinned upstream runtime version.
 	Commit               = "unknown"
 	Date                 = "unknown"
 	BuildType            = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
 )
 
 func init() {
-	Version, ReauthRuntimeVersion = resolveBuildVersions(Version, ReauthRuntimeVersion, embeddedVersion)
+	Version, ReauthRuntimeVersion = resolveBuildVersions(Version, ReauthRuntimeVersion, embeddedVersion, embeddedReauthRuntimeVersion)
 }
 
-func resolveBuildVersions(version, runtimeVersion, embedded string) (string, string) {
-	upstream := strings.TrimSpace(embedded)
-	if upstream == "" {
-		upstream = "0.0.0-dev"
+func resolveBuildVersions(version, runtimeVersion, embedded, embeddedRuntime string) (string, string) {
+	defaultVersion := strings.TrimSpace(embedded)
+	if defaultVersion == "" {
+		defaultVersion = "0.0.0-dev"
+	}
+	defaultRuntimeVersion := strings.TrimSpace(embeddedRuntime)
+	if defaultRuntimeVersion == "" {
+		defaultRuntimeVersion = "0.0.0-dev"
 	}
 	if version = strings.TrimSpace(version); version == "" {
-		version = upstream
+		version = defaultVersion
 	}
 	if runtimeVersion = strings.TrimSpace(runtimeVersion); runtimeVersion == "" {
-		runtimeVersion = upstream
+		runtimeVersion = defaultRuntimeVersion
 	}
 	return version, runtimeVersion
 }

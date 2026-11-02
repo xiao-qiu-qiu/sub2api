@@ -18,6 +18,7 @@ FULL_CONFIG = Path('.goreleaser.yaml')
 SIMPLE_CONFIG = Path('.goreleaser.simple.yaml')
 VERSION_FILE = Path('backend/cmd/server/VERSION')
 VERSION_RE = re.compile(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+CODEQ_STABLE_RE = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+-codeq')
 
 
 def config(simple=False):
@@ -67,7 +68,7 @@ def plan(args):
         raise ValueError('invalid VERSION')
     VERSION_FILE.write_text(version + '\n')
     result = {'sha': sha, 'tag': tag, 'version': version,
-              'prerelease': str('-' in version).lower(),
+              'prerelease': str('-' in version and not CODEQ_STABLE_RE.fullmatch(version)).lower(),
               'owner_lower': os.environ.get('GITHUB_REPOSITORY_OWNER', '').lower(),
               'simple': str(args.simple).lower(), 'dry_run': str(args.dry_run).lower(),
               'date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -93,6 +94,9 @@ def generate_config(args):
     else:
         # Artifacts are supplied through the OSS extra_files mechanism. No build
         # is repeated on the publishing runner, and release templates stay intact.
+        if CODEQ_STABLE_RE.fullmatch(os.environ.get('RELEASE_VERSION', '')):
+            # GoReleaser's auto mode treats the codeq suffix as a prerelease.
+            data['release']['prerelease'] = 'false'
         data['before'] = {'hooks': []}
         data['builds'] = [{'id': 'sub2api', 'skip': True}]
         data['archives'] = []

@@ -4,7 +4,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -31,15 +33,18 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestErr      error
 	latestRepo     string
+	recentRepo     string
 }
 
 func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repo string) (*GitHubRelease, error) {
 	s.latestRepo = repo
-	return s.release, nil
+	return s.release, s.latestErr
 }
 
-func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchRecentReleases(_ context.Context, repo string, _ int) ([]*GitHubRelease, error) {
+	s.recentRepo = repo
 	return s.recentReleases, s.recentErr
 }
 
@@ -70,7 +75,67 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrNoUpdateAvailable))
 	require.ErrorIs(t, err, ErrNoUpdateAvailable)
-	require.Equal(t, "ranxi2001/sub2api", githubClient.latestRepo)
+	require.Equal(t, "xiao-qiu-qiu/sub2api", githubClient.latestRepo)
+}
+
+func TestUpdateServiceCodeqReleaseStream(t *testing.T) {
+	client := &updateServiceGitHubClientStub{
+		release:        &GitHubRelease{TagName: "v2.19.10-codeq"},
+		recentReleases: []*GitHubRelease{{TagName: "v2.19.8-codeq"}},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "2.19.9-codeq", "release")
+	info, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.True(t, info.HasUpdate)
+	require.Equal(t, "2.19.10-codeq", info.LatestVersion)
+	versions, err := svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, versions, 1)
+	require.Equal(t, "2.19.8-codeq", versions[0].Version)
+	require.Equal(t, "xiao-qiu-qiu/sub2api", client.latestRepo)
+	require.Equal(t, client.latestRepo, client.recentRepo)
+}
+
+func TestUpdateServiceRejectsCacheFromPreviousRepository(t *testing.T) {
+	for _, repository := range []string{"", "ranxi2001/sub2api"} {
+		for _, offline := range []bool{false, true} {
+			t.Run(repository+"/offline="+strconv.FormatBool(offline), func(t *testing.T) {
+				data, err := json.Marshal(map[string]any{
+					"repository": repository,
+					"latest":     "99.0.0",
+					"release_info": &ReleaseInfo{
+						HTMLURL: "https://github.com/ranxi2001/sub2api/releases/tag/v99.0.0",
+					},
+					"timestamp": time.Now().Unix(),
+				})
+				require.NoError(t, err)
+				cache := &updateServiceCacheStub{data: string(data)}
+				client := &updateServiceGitHubClientStub{
+					release: &GitHubRelease{TagName: "v2.19.2-codeq"},
+				}
+				if offline {
+					client.latestErr = errors.New("GitHub unavailable")
+				}
+				svc := NewUpdateService(cache, client, "2.19.2-codeq", "source")
+				info, err := svc.CheckUpdate(context.Background(), false)
+				require.NoError(t, err)
+				require.Equal(t, "xiao-qiu-qiu/sub2api", client.latestRepo)
+				require.False(t, info.HasUpdate)
+				require.False(t, info.Cached)
+				require.Equal(t, "2.19.2-codeq", info.LatestVersion)
+				if offline {
+					require.Nil(t, info.ReleaseInfo)
+					require.Contains(t, info.Warning, "GitHub unavailable")
+				} else {
+					client.latestRepo = ""
+					cached, err := svc.CheckUpdate(context.Background(), false)
+					require.NoError(t, err)
+					require.True(t, cached.Cached)
+					require.Empty(t, client.latestRepo)
+				}
+			})
+		}
+	}
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {

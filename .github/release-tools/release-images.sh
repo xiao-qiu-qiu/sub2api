@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${RELEASE_VERSION:?}" "${RELEASE_SHA:?}" "${GITHUB_REPOSITORY:?}" "${RUNNER_TEMP:?}"
+stable=false
+if [[ $RELEASE_VERSION != *-* || $RELEASE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+-codeq$ ]]; then
+  stable=true
+fi
 owner=${GITHUB_REPOSITORY%%/*}
 registries=("ghcr.io/${owner,,}/sub2api")
 if [[ ${SIMPLE_RELEASE:-false} != true && ${DOCKERHUB_USERNAME:-skip} != skip ]]; then
@@ -17,7 +21,7 @@ for arch in "${arches[@]}"; do
     args+=(--tag "$registry:$RELEASE_VERSION-$arch")
     if [[ ${SIMPLE_RELEASE:-false} == true ]]; then
       args+=(--tag "$registry:$RELEASE_VERSION")
-      if [[ $RELEASE_VERSION != *-* ]]; then args+=(--tag "$registry:latest"); fi
+      if [[ $stable == true ]]; then args+=(--tag "$registry:latest"); fi
     fi
   done
   if [[ ${DRY_RUN:-false} == true ]]; then
@@ -32,7 +36,7 @@ if [[ ${DRY_RUN:-false} != true && ${SIMPLE_RELEASE:-false} != true ]]; then
   minor=${RELEASE_VERSION#*.}; minor=${minor%%.*}
   for registry in "${registries[@]}"; do
     tags=(--tag "$registry:$RELEASE_VERSION")
-    if [[ $RELEASE_VERSION != *-* ]]; then
+    if [[ $stable == true ]]; then
       tags+=(--tag "$registry:latest" --tag "$registry:$major.$minor" --tag "$registry:$major")
     fi
     docker buildx imagetools create "${tags[@]}" \

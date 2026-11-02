@@ -15,7 +15,7 @@
 
 按需同步上游更新，扩展实用功能，独立发布生产版本。
 
-[平台](https://tosky.io/) · [使用文档](https://tosky.io/docs/) · [版本下载](https://github.com/ranxi2001/sub2api/releases) · [问题反馈](https://github.com/ranxi2001/sub2api/issues)
+[平台](https://tosky.io/) · [使用文档](https://tosky.io/docs/) · [版本下载](https://github.com/xiao-qiu-qiu/sub2api/releases) · [问题反馈](https://github.com/ranxi2001/sub2api/issues)
 
 中文 | [English](README_EN.md) | [日本語](README_JA.md)
 
@@ -60,7 +60,7 @@
 - **Mihomo 出口管理**：维护订阅、动态代理、节点状态和账号业务出口；支持从订阅节点或动态代理单条、批量添加为静态代理，再给账号分别选择固定节点。[操作说明](docs/mihomo-static-node-proxies.md)
 - **Excel / Basispoints**：维护模型级 BPS 路由、内嵌图片 HTTPS 中转、磁盘和并发保护、结构化输出校验，以及工具历史和 transport 恢复。路由遵循账号与模型配置；不支持的托管工具可按策略回退原生 Codex，或保持 BPS 并省略工具，具体边界见 [BPS 配置说明](docs/excel-bps.md)。
 - **上游修复维护**：持续跟踪上游 Codex、Responses、工具调用、密文恢复和限流修复；先确认与本 fork 的行为差异，再按提交级别移植并补充回归测试。
-- **独立发布与升级**：使用 `ranxi2001/sub2api` 的 Release、安装资源和容器镜像。版本变更见 [更新说明](https://github.com/ranxi2001/sub2api/releases)；Release 成功不代表生产服务已经部署，线上状态需要单独验证。
+- **codeq 发布与升级**：本 fork 使用 `xiao-qiu-qiu/sub2api` 的 Release、安装资源和容器镜像，应用版本统一为 `X.Y.Z-codeq`。版本和自动重登运行包分别维护，详见 [codeq 版本说明](docs/codeq-release.md)；Release 成功不代表生产服务已经部署。
 
 贡献代码时，请在独立分支中说明影响的请求路径、账号类型、配置默认值和兼容边界。涉及生产分支的修复应先进入原 PR head，通过 CI 后再合并；不要提交 Token、OAuth 导出、ticket、代理凭据或生产配置。
 

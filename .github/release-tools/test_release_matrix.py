@@ -139,6 +139,21 @@ class ReleaseMatrixTest(unittest.TestCase):
         self.assertEqual(output['owner_lower'], 'exampleowner')
         self.assertEqual(len(json.loads(output['matrix'])['include']), 5)
 
+    def test_codeq_release_is_stable_and_preserves_reauth_runtime_version(self):
+        runtime_file = release.VERSION_FILE.with_name('REAUTH_RUNTIME_VERSION')
+        runtime_file.write_text('2.19.1\n')
+        with patch.dict(os.environ, {'GITHUB_OUTPUT': 'outputs', 'RELEASE_VERSION': '9.8.7-codeq'}), patch.object(subprocess, 'check_output', return_value='a' * 40 + '\n'):
+            release.plan(argparse.Namespace(ref='v9.8.7-codeq', dry_run=False, simple=False))
+            output = dict(line.split('=', 1) for line in Path('outputs').read_text().splitlines())
+            self.assertEqual(output['version'], '9.8.7-codeq')
+            self.assertEqual(output['prerelease'], 'false')
+            self.assertEqual(runtime_file.read_text(), '2.19.1\n')
+            for simple in (False, True):
+                with self.subTest(simple=simple):
+                    release.generate_config(argparse.Namespace(mode='publish', simple=simple, output='publisher.yaml'))
+                    data = yaml.safe_load(Path('publisher.yaml').read_text())
+                    self.assertEqual(data['release']['prerelease'], 'false')
+
     def test_docker_commands_do_not_publish_during_dry_run(self):
         fake_bin = Path('bin')
         fake_bin.mkdir()
@@ -170,7 +185,7 @@ class ReleaseMatrixTest(unittest.TestCase):
                 log_path = Path(f'docker-{simple}.log').resolve()
                 env = {**os.environ, 'PATH': str(fake_bin.resolve()) + os.pathsep + os.environ['PATH'],
                        'DOCKER_LOG': str(log_path), 'RUNNER_TEMP': self.temp.name,
-                       'RELEASE_VERSION': '9.8.7', 'RELEASE_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'ExampleOwner/sub2api',
+                       'RELEASE_VERSION': '9.8.7-codeq', 'RELEASE_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'ExampleOwner/sub2api',
                        'DRY_RUN': 'false', 'SIMPLE_RELEASE': str(simple).lower(), 'DOCKERHUB_USERNAME': 'fixturehub'}
                 subprocess.run(['bash', str(ROOT / '.github/release-tools/release-images.sh')], env=env, check=True)
                 log = log_path.read_text()
