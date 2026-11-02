@@ -1,3 +1,4 @@
+import lottery from './lottery'
 import accountTestTiming from './accountTestTiming'
 import openaiAuth from './openaiAuth'
 import upstreamEntities from './upstreamEntities'
@@ -36,6 +37,7 @@ import trash from './trash'
 
 export default {
   trash,
+  lottery,
   accountTestTiming,
   openaiAuth,
   upstreamEntities,
