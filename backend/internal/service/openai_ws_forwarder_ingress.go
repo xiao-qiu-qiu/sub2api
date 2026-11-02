@@ -1577,6 +1577,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 	}
 
+	ctx = openAIWSOAuthRecoveryContext(ctx, c)
+	var freshTokenErr error
+	token, freshTokenErr = s.freshOpenAIWSOAuthToken(ctx, account, token)
+	if freshTokenErr != nil {
+		return freshTokenErr
+	}
+	recordOAuthRecoveryToken(ctx, account, token)
 	firstRoutingFields := gjson.GetManyBytes(firstPayload.payloadRaw, "model", "service_tier")
 	wsHeaders, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
@@ -1717,6 +1724,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	agentTaskRecoveryTried := false
+	var wrapOAuthCurrentTurnFailure func(error) error
 	var acquireTurnLease func(int, string, bool, bool) (*openAIWSConnLease, error)
 	acquireTurnLease = func(turn int, preferred string, forcePreferredConn bool, forceNewConn bool) (*openAIWSConnLease, error) {
 		req := cloneOpenAIWSAcquireRequest(baseAcquireReq)
@@ -1774,6 +1782,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				account.ProxyID != nil && account.Proxy != nil,
 			)
 			var dialErr *openAIWSDialError
+			if errors.As(acquireErr, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusUnauthorized {
+				if failure := s.openAIWSOAuth401(openAIWSOAuthRecoveryContext(ctx, c), account, token, dialErr.ResponseHeaders, dialErr.ResponseBody, canonicalModel); failure != nil {
+					if turn > 1 && wrapOAuthCurrentTurnFailure != nil {
+						return nil, wrapOAuthCurrentTurnFailure(failure)
+					}
+					return nil, failure
+				}
+			}
 			if errors.As(acquireErr, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
 				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(acquireErr.Error()), canonicalModel)
 				return nil, s.newOpenAIWSRateLimitFailoverError(account, dialErr.ResponseHeaders, nil, acquireErr.Error())
@@ -1830,6 +1846,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	latencyGenerationStartedTurn := 0
 	priorityLatencyCtx := ctx
 	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (forwardResult *OpenAIForwardResult, forwardErr error) {
+		ctx := openAIWSOAuthRecoveryContext(ctx, c)
+		recordOAuthRecoveryToken(ctx, account, token)
 		responseModelObserver := &upstreamResponseModelObserver{}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
@@ -1853,8 +1871,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		turnStart := requesttiming.Now(ctx)
 		turnCtx, startDrain, finishDrain := openAIWSDrainContext(ctx)
 		defer finishDrain()
-		ctx := turnCtx
+		ctx = turnCtx
 		wroteDownstream := false
+		oauthStager := openAIWSOAuthStager{enabled: s.oauthRecovery != nil && oauth401CanRecover(account, nil)}
 		if err := s.acquireOpenAIRPMForSend(ctx, latest); err != nil {
 			return nil, err
 		}
@@ -1978,14 +1997,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if openAIWSMessageShouldParseUsage(eventType, upstreamMessage) {
 				regionalMeterObserveUsage(ctx, upstreamMessage, eventType)
 				parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
-				if smartStrict {
-					if _, observed := extractOpenAIUsageFromJSONBytes(upstreamMessage); observed {
-						usageObserved = true
-					}
+				if _, observed := extractOpenAIUsageFromJSONBytes(upstreamMessage); observed {
+					usageObserved = true
 				}
 			}
 			if eventType == "error" || eventType == "response.failed" {
 				markOpenAICyberPolicyEvent(c, upstreamMessage, http.StatusOK, &usage)
+				if openAIWSOAuthFailureStatus(account, upstreamMessage, extractOpenAISSEErrorMessage(upstreamMessage)) == http.StatusUnauthorized {
+					if failure := s.openAIWSOAuth401(ctx, account, token, lease.HandshakeHeaders(), upstreamMessage, mappedModel); failure != nil && !smartStrict && !clientDisconnected && !wroteDownstream && !usageObserved && imageCounter.Count() == 0 {
+						lease.MarkBroken()
+						return nil, failure
+					}
+				}
 			}
 			if eventType == "response.failed" && isOpenAIInvalidEncryptedContentSSE(upstreamMessage, eventType) {
 				s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(c, payload, "ingress_ws_invalid_encrypted_lineage_mark", account.ID, turn, upstreamMessage)
@@ -2133,7 +2156,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						clientMessage = rewritten
 					}
 				}
-				if err := writeClientMessage(clientMessage); err != nil {
+				if err := oauthStager.write(clientMessage, writeClientMessage); err != nil {
 					if isOpenAIWSClientDisconnectError(err) {
 						clientDisconnected = true
 						startDrain()
@@ -2154,7 +2177,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						)
 					}
 				} else {
-					wroteDownstream = true
+					wroteDownstream = wroteDownstream || oauthStager.committed || isTerminalEvent
 					markOpenAIWSClientVisibleFailure(c, eventType, upstreamMessage)
 				}
 			}
@@ -2190,7 +2213,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					RequestID:                     responseID,
 					Usage:                         usage,
 					UsageUnavailable:              smartStrict && !usageObserved,
-					ObservedUsageOnError:          smartStrict && usageObserved,
+					ObservedUsageOnError:          usageObserved,
 					Model:                         originalModel,
 					UpstreamModel:                 mappedModel,
 					UpstreamResponseModel:         responseModelObserver.Model(),
@@ -2215,6 +2238,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					result.wsReplayInput = replayInput
 					result.wsReplayInputExists = true
 				}
+				result.wsAccountFailoverReplayInput = replayCollector.AllItems()
 				if imageCount > 0 {
 					result.ImageCount = imageCount
 					result.ImageSize = imageSizeTier
@@ -2305,6 +2329,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	lastTurnReplayInputExists := false
 	currentTurnReplayInput := []json.RawMessage(nil)
 	currentTurnReplayInputExists := false
+	var lastOAuthFailoverInput, currentOAuthFailoverInput []json.RawMessage
+	var lastOAuthFailoverInputExists, currentOAuthFailoverInputExists bool
 	skipBeforeTurn := false
 	hasCurrentOrReplayFunctionCallOutput := func(payload []byte) bool {
 		if openAIWSRawPayloadHasToolCallOutput(payload) {
@@ -2577,6 +2603,29 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		} else {
 			currentTurnReplayInput = nextReplayInput
 			currentTurnReplayInputExists = nextReplayInputExists
+		}
+		turnRecoveryCtx := openAIWSOAuthRecoveryContext(ctx, c)
+		currentOAuthFailoverInput, currentOAuthFailoverInputExists, _ = buildOpenAIWSReplayInputSequence(lastOAuthFailoverInput, lastOAuthFailoverInputExists, currentClientPayload, currentPreviousResponseID != "")
+		wrapOAuthCurrentTurnFailure = func(cause error) error {
+			retryPayload, safe, _ := buildOpenAIWSCurrentTurnRetryPayload(currentClientPayload, currentOAuthFailoverInput, currentOAuthFailoverInputExists, currentOriginalModel)
+			if !safe || smartStrict || s.ProtectsWSNodeContinuation(account, currentPayload) {
+				retryPayload = nil
+			}
+			return newOpenAIWSCurrentTurnFailoverError(cause, retryPayload)
+		}
+		freshToken, tokenErr := s.freshOpenAIWSOAuthToken(turnRecoveryCtx, account, token)
+		if tokenErr != nil {
+			return tokenErr
+		}
+		if freshToken != token {
+			if sessionLease != nil {
+				sessionLease.MarkBroken()
+			}
+			retryErr := wrapOAuthCurrentTurnFailure(ErrOpenAIWSOAuthCredentialChanged)
+			if hooks != nil && hooks.AfterTurn != nil {
+				hooks.AfterTurn(turn, nil, retryErr)
+			}
+			return retryErr
 		}
 		replayHasFunctionCallOutput := currentTurnReplayInputExists &&
 			openAIWSRawItemsHasFunctionCallOutput(currentTurnReplayInput)
@@ -2909,6 +2958,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if hooks != nil && hooks.AfterTurn != nil {
 				hooks.AfterTurn(turn, nil, finalErr)
 			}
+			var authFailure *UpstreamFailoverError
+			if turn > 1 && errors.As(finalErr, &authFailure) && authFailure.StatusCode == http.StatusUnauthorized {
+				return wrapOAuthCurrentTurnFailure(finalErr)
+			}
 			return finalErr
 		}
 		turnRetry = 0
@@ -2923,6 +2976,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		responseID := strings.TrimSpace(result.RequestID)
 		lastTurnResponseID = responseID
+		lastOAuthFailoverInput = combineOpenAIWSReplayItems(currentOAuthFailoverInput, result.wsAccountFailoverReplayInput)
+		lastOAuthFailoverInputExists = currentOAuthFailoverInputExists
 		if contextWindowBoundary.WindowID != "" {
 			lastTurnWindowID = contextWindowBoundary.WindowID
 		}

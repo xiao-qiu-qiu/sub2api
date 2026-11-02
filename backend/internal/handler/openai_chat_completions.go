@@ -130,13 +130,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
-	if !acquired {
+	if !h.waitForOpenAIOAuthRecoveryBeforeAdmission(c, apiKey.GroupID, forwardModel, streamStarted, false) {
 		return
 	}
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+
+	userSlots := &openAIOAuthRecoveryUserSlot{acquireFunc: func() (func(), bool) {
+		return h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
+	}}
+	if !userSlots.acquire() {
+		return
 	}
+	defer userSlots.release()
 
 	if err := h.checkRegionalBillingEligibility(c.Request.Context(), apiKey, subscription); err != nil {
 		reqLog.Info("openai_chat_completions.billing_eligibility_check_failed", zap.Error(err))
@@ -199,6 +203,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if isOpenAIOAuthRecoveryError(err) {
+				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, false)
+				return
+			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
 				return
@@ -379,6 +387,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if handled, retry := h.recoverOpenAIOAuthHTTP401(c, userSlots, account, result, failoverErr, streamStarted, false); handled {
+						if !retry {
+							return
+						}
+						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)

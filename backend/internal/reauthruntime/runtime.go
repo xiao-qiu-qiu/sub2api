@@ -119,6 +119,12 @@ func (m *Manager) run() {
 		"OPENAI_TOTP_JOURNAL_DIR=" + filepath.Join(m.root, "totp-recovery"),
 		"OPENAI_REAUTH_WORKER_ID=managed-" + randomID(), "TOSUB2_ROOT=" + filepath.Join(dir, "tosub2"),
 		"TOSUB2_PYTHON=" + filepath.Join(dir, "python"), "NODE_EXECUTABLE=" + filepath.Join(dir, "node")}
+	// Keep idle managed workers responsive while preserving explicit settings.
+	pollSeconds, configured := os.LookupEnv("OPENAI_REAUTH_POLL_SECONDS")
+	if !configured {
+		pollSeconds = "1"
+	}
+	cmd.Env = append(cmd.Env, "OPENAI_REAUTH_POLL_SECONDS="+pollSeconds)
 	// The managed child has a minimal environment. Explicitly pass the bounded
 	// concurrency setting; Python validates it before claiming anything.
 	if concurrency := os.Getenv("OPENAI_REAUTH_CONCURRENCY"); concurrency != "" {

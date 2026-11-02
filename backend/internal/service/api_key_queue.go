@@ -54,7 +54,8 @@ type APIKeySlotQueueCache interface {
 	AdvanceAPIKeyQueue(ctx context.Context, apiKeyID int64, requestID string, mode APIKeyQueueMode, deadlineMs int64, keyLimit int, maxWaiting int) (APIKeyQueueOutcome, error)
 	// AbortAPIKeyQueueAttempt fences late ENTER/POLL commands and removes this
 	// exact attempt from the wait set, plus the regular set when removeSlot is
-	// true. A confirmed ACQUIRED must pass false so the new reservation survives.
+	// true. Pass false only when handing a confirmed ACQUIRED to its new
+	// reservation; rejected admissions must remove that regular member too.
 	AbortAPIKeyQueueAttempt(ctx context.Context, apiKeyID int64, requestID string, deadlineMs int64, removeSlot bool) error
 	// GetAPIKeyQueueStats returns active and waiting counts in one atomic read.
 	GetAPIKeyQueueStats(ctx context.Context, apiKeyID int64) (active int, waiting int, err error)
@@ -556,6 +557,9 @@ func (s *ConcurrencyService) AcquireAPIKeySlotWithWait(ctx context.Context, apiK
 // path; a disabled/deleted/expired/changed key stops waiting with the same
 // authentication error.
 func (s *ConcurrencyService) ReserveAPIKeySlotWithWait(ctx context.Context, apiKeyID int64, maxConcurrency int) (*APIKeySlotReservation, error) {
+	if err := CheckOAuthRecoveryAdmission(ctx); err != nil {
+		return nil, err
+	}
 	if maxConcurrency == 0 {
 		return s.trackAPIKeyReservation(ctx, apiKeyID), nil
 	}
@@ -693,6 +697,10 @@ func (s *ConcurrencyService) reserveAPIKeySlotImmediate(ctx context.Context, cac
 // effective limit used for the admission and is exposed for Live transfer.
 func (s *ConcurrencyService) adoptAPIKeyGrantOrRelease(ctx context.Context, cache APIKeySlotLeaseCache, owner *apiKeyAdmissionOwner, apiKeyID int64, requestID string, limit int, started time.Time) (*APIKeySlotReservation, error) {
 	release, pauseRenewal := keepEnforcedAPIKeySlotState(owner, cache, apiKeyID, requestID, started)
+	if err := CheckOAuthRecoveryAdmission(ctx); err != nil {
+		release()
+		return nil, err
+	}
 	if ctx != nil && ctx.Err() != nil {
 		release()
 		return nil, apiKeyQueueContextCause(ctx)
@@ -743,11 +751,19 @@ func (s *ConcurrencyService) switchAPIKeyQueueToUnlimited(ctx context.Context, c
 	return s.trackAPIKeyReservation(ctx, apiKeyID), nil
 }
 
-func (s *ConcurrencyService) waitAPIKeyQueue(ctx context.Context, cache APIKeySlotQueueCache, owner *apiKeyAdmissionOwner, apiKeyID int64, requestID string, keyLimit int, policy APIKeyQueuePolicy, localDeadline time.Time, deadlineMs int64, revalidator APIKeyQueueAuthRevalidator) (*APIKeySlotReservation, error) {
+func (s *ConcurrencyService) waitAPIKeyQueue(ctx context.Context, cache APIKeySlotQueueCache, owner *apiKeyAdmissionOwner, apiKeyID int64, requestID string, keyLimit int, policy APIKeyQueuePolicy, localDeadline time.Time, deadlineMs int64, revalidator APIKeyQueueAuthRevalidator) (reservation *APIKeySlotReservation, resultErr error) {
 	// Leaving the queue always fences late commands. On a confirmed ACQUIRED the
 	// regular member is the new reservation, so it must not be removed here.
 	removeRegularOnExit := true
 	defer func() {
+		if errors.Is(resultErr, ErrOAuthRecoveryAdmissionInterrupted) {
+			// No reservation is handed over on interruption. The fence must
+			// remove an acquired member even if its earlier release failed.
+			if err := s.abortAPIKeyQueueAttemptErr(cache, apiKeyID, requestID, deadlineMs, true); err != nil {
+				resultErr = apiKeyQueueError(APIKeyQueueErrorUnavailable, fmt.Errorf("close API key queue before OAuth recovery: %w", err))
+			}
+			return
+		}
 		s.abortAPIKeyQueueAttempt(cache, apiKeyID, requestID, deadlineMs, removeRegularOnExit)
 	}()
 
@@ -813,6 +829,9 @@ func (s *ConcurrencyService) waitAPIKeyQueue(ctx context.Context, cache APIKeySl
 		case APIKeyQueueOutcomeWaiting:
 			mode = APIKeyQueueModePoll
 		case APIKeyQueueOutcomeTimeout:
+			if err := CheckOAuthRecoveryAdmission(ctx); err != nil {
+				return nil, err
+			}
 			return nil, apiKeyQueueError(APIKeyQueueErrorTimeout, nil)
 		case APIKeyQueueOutcomeAborted:
 			if ctx.Err() != nil {
@@ -851,6 +870,9 @@ func (s *ConcurrencyService) waitAPIKeyQueue(ctx context.Context, cache APIKeySl
 			wait = remaining
 		}
 		if wait <= 0 {
+			if err := CheckOAuthRecoveryAdmission(ctx); err != nil {
+				return nil, err
+			}
 			return nil, apiKeyQueueError(APIKeyQueueErrorTimeout, nil)
 		}
 		timer := time.NewTimer(wait)
@@ -894,6 +916,9 @@ func apiKeyQueueContextCause(ctx context.Context) error {
 func (s *ConcurrencyService) apiKeyQueueWaitError(ctx context.Context, localDeadline time.Time) error {
 	if ctx != nil && ctx.Err() != nil {
 		return apiKeyQueueContextCause(ctx)
+	}
+	if err := CheckOAuthRecoveryAdmission(ctx); err != nil {
+		return err
 	}
 	if time.Now().After(localDeadline) {
 		return apiKeyQueueError(APIKeyQueueErrorTimeout, nil)

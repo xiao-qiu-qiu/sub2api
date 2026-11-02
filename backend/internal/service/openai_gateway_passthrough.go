@@ -1563,6 +1563,8 @@ func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
 	switch {
 	case strings.Contains(combined, "rate_limit"):
 		return http.StatusTooManyRequests
+	case credentialOperationEnvelope(openAIOAuthErrorEnvelope(payload)) == "requires_relogin":
+		return http.StatusUnauthorized
 	case strings.Contains(errType, "invalid_request"):
 		return http.StatusBadRequest
 	case strings.Contains(combined, "authentication") || strings.Contains(combined, "unauthorized") || strings.Contains(combined, "invalid_api_key"):
@@ -1719,9 +1721,9 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 		return openAIStream403AccountFailure(payload, message)
 	}
 	// A response.failed event is transported over HTTP 200. Prefer its semantic
-	// rate-limit status over a generic/invalid_request error type so it can enter
-	// the same 429 retry policy as a regular upstream HTTP response.
-	if semanticStatus == http.StatusTooManyRequests {
+	// authentication/rate-limit status over a generic/invalid_request error type
+	// so it enters the same recovery/retry policy as an upstream HTTP response.
+	if semanticStatus == http.StatusUnauthorized || semanticStatus == http.StatusTooManyRequests {
 		return true
 	}
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {

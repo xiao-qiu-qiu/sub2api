@@ -452,6 +452,15 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, errors.New("client websocket writer is nil")
 	}
 	ctx = withOpenAITransportMode(ctx, "http_bridge")
+	ctx = openAIWSOAuthRecoveryContext(ctx, c)
+	// The client connection can survive a login performed by another request.
+	// Read current native credentials for every HTTP bridge turn.
+	var tokenErr error
+	token, tokenErr = s.freshOpenAIWSOAuthToken(ctx, account, token)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+	recordOAuthRecoveryToken(ctx, account, token)
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	strictSession := smartProtocolStrict(ctx)
@@ -670,7 +679,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			if shouldFailover && (turn == 1 || resp.StatusCode == http.StatusTooManyRequests) {
 				return nil, newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, false).WithGrokForbiddenPolicy(account)
 			}
-		} else if !strictSession && shouldFailover && (turn == 1 || resp.StatusCode == http.StatusTooManyRequests) {
+		} else if !strictSession && shouldFailover && (turn == 1 || resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode == http.StatusUnauthorized && oauth401CanRecover(account, respBody))) {
 			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, body, respBody)
 		}
 		if account.Platform != PlatformGrok && (shouldFailover || shouldCooldownOpenAITransientUpstreamError(resp.StatusCode, respBody)) {
@@ -736,7 +746,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			RequestID:                     responseID,
 			Usage:                         usage,
 			UsageUnavailable:              strictSession && !usageObserved,
-			ObservedUsageOnError:          strictSession && usageObserved,
+			ObservedUsageOnError:          usageObserved,
 			streamReadIncomplete:          strictSession && upstreamTerminalEvent == "",
 			Model:                         originalModel,
 			UpstreamModel:                 mappedModel,
@@ -876,10 +886,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		if openAIWSMessageShouldParseUsage(eventType, upstreamMessage) {
 			parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
-			if strictSession {
-				if _, observed := extractOpenAIUsageFromJSONBytes(upstreamMessage); observed {
-					usageObserved = true
-				}
+			if _, observed := extractOpenAIUsageFromJSONBytes(upstreamMessage); observed {
+				usageObserved = true
 			}
 		}
 		if eventType == "error" || eventType == "response.failed" {
@@ -915,7 +923,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			if errMessage == "" {
 				errMessage = "upstream error event"
 			}
-			statusCode := openAIStreamFailureStatus(upstreamMessage, errMessage)
+			statusCode := openAIWSOAuthFailureStatus(account, upstreamMessage, errMessage)
 			shouldFailover := openAIStreamFailedEventShouldFailover(upstreamMessage, errMessage)
 			if eventType == "error" {
 				errCodeRaw, errTypeRaw, _ := parseOpenAIWSErrorEventFields(upstreamMessage)
@@ -933,6 +941,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn, upstreamMessage)
 			}
 			requestScopedCapacity := isOpenAIUpstreamCapacityShedEvent(upstreamMessage)
+			if statusCode == http.StatusUnauthorized && oauth401CanRecover(account, upstreamMessage) {
+				shouldFailover = true
+			}
 			if account.Platform == PlatformGrok && (eventType == "error" || eventType == "response.failed") {
 				// SSE error events do not carry an HTTP status. The local status
 				// mapper therefore defaults unknown xAI codes (for example
@@ -947,9 +958,15 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 			// A disconnected client needs this attempt drained for usage, not replayed,
 			// even when only non-semantic heartbeats were delivered.
-			if !strictSession && !clientDisconnected && !wroteDownstream && shouldFailover && (turn == 1 || statusCode == http.StatusTooManyRequests) {
+			if !strictSession && !clientDisconnected && !wroteDownstream && !usageObserved && imageCounter.Count() == 0 && shouldFailover &&
+				(turn == 1 || statusCode == http.StatusTooManyRequests || (statusCode == http.StatusUnauthorized && oauth401CanRecover(account, upstreamMessage))) {
 				if account.Platform == PlatformGrok {
 					return nil, newOpenAIUpstreamFailoverError(statusCode, resp.Header, upstreamMessage, errMessage, false).WithGrokForbiddenPolicy(account)
+				}
+				if statusCode == http.StatusUnauthorized {
+					if failure := s.openAIWSOAuth401(ctx, account, token, resp.Header, upstreamMessage, mappedModel); failure != nil {
+						return nil, failure
+					}
 				}
 				return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, true, resp.Header.Get("x-request-id"), upstreamMessage, errMessage, mappedModel, resp.Header)
 			}
@@ -991,7 +1008,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		if !clientDisconnected && !suppressClientMessage {
 			isKeepalive := eventType == "keepalive"
-			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
+			stageBeforeSemanticOutput := account.Platform == PlatformOpenAI && !wroteDownstream && (turn == 1 || oauth401CanRecover(account, nil))
 			commitStagedMessages := !stageBeforeSemanticOutput ||
 				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
 				isOpenAIWSTerminalEvent(eventType)

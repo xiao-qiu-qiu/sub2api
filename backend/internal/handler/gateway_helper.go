@@ -337,6 +337,9 @@ func (h *ConcurrencyHelper) AcquireUserSlotWithWait(c *gin.Context, userID int64
 
 func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userID int64, maxConcurrency int, apiKeyID int64, keyLimit int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
 	ctx := c.Request.Context()
+	if err := service.CheckOAuthRecoveryAdmission(ctx); err != nil {
+		return nil, err
+	}
 	// Reserve key capacity before any user queue can emit an SSE heartbeat.
 	keyRelease, err := h.withAPIKeySlot(ctx, apiKeyID, keyLimit, nil)
 	if err != nil {
@@ -557,10 +560,20 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 	defer timer.Stop()
 
 	for {
+		if slotType == "user" {
+			if err := service.CheckOAuthRecoveryAdmission(c.Request.Context()); err != nil {
+				return nil, err
+			}
+		}
 		select {
 		case <-ctx.Done():
 			if parentErr := c.Request.Context().Err(); parentErr != nil {
 				return nil, parentErr
+			}
+			if slotType == "user" {
+				if err := service.CheckOAuthRecoveryAdmission(c.Request.Context()); err != nil {
+					return nil, err
+				}
 			}
 			return nil, &ConcurrencyError{
 				SlotType:  slotType,

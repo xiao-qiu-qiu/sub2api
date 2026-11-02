@@ -355,17 +355,23 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 // applying the same transition twice for an error/response.failed pair.
 func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
 	message := extractOpenAISSEErrorMessage(payload)
-	status := openAIStreamFailureStatus(payload, message)
+	status := openAIWSOAuthFailureStatus(account, payload, message)
 	s.rateLimitService.observeQualityStatus(ctx, account, status)
 	switch status {
 	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
-		s.handleOpenAIStreamTerminalAccountSideEffects(nil, account, payload, message, headers, canonicalModel)
+		if status == http.StatusUnauthorized {
+			payload = openAIOAuthErrorEnvelope(payload)
+		}
+		if status == http.StatusTooManyRequests {
+			headers = openAIWSSemantic429Headers(account, canonicalModel, headers)
+		}
+		s.handleOpenAIAccountUpstreamError(ctx, account, status, headers, payload, canonicalModel)
 		return true
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
 			return false
 		}
-		s.handleOpenAIStreamTerminalAccountSideEffects(nil, account, payload, message, headers, canonicalModel)
+		s.handleOpenAIAccountUpstreamError(ctx, account, status, headers, payload, canonicalModel)
 		return true
 	}
 

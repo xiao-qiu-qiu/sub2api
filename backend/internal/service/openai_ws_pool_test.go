@@ -891,6 +891,7 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
 
 	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
 	account := activeCodexFingerprintPoolAccountForTest(132)
@@ -908,7 +909,7 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	first.Release()
 
 	nextHeaders := stableOpenAIWSIdentityHeadersForTest()
-	nextHeaders.Set("Authorization", "Bearer token-b")
+	nextHeaders.Set("Authorization", "Bearer token-a")
 	nextHeaders.Set("x-codex-turn-metadata", `{"turn_id":"turn-b"}`)
 	nextHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex;tier=priority")
 	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
@@ -920,7 +921,36 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	require.True(t, second.Reused())
 	require.Equal(t, firstConnID, second.ConnID())
 	second.Release()
-	require.Equal(t, 1, dialer.DialCount(), "stable identity match should ignore auth, turn metadata, and soft routing hints")
+	require.Equal(t, 1, dialer.DialCount(), "same credentials and stable identity should ignore turn metadata and soft routing hints")
+}
+
+func TestOpenAIWSConnPool_AcquireDoesNotReuseChangedOAuthCredential(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	headers := stableOpenAIWSIdentityHeadersForTest()
+	headers.Set("Authorization", "Bearer token-a")
+	req := openAIWSAcquireRequest{Account: activeCodexFingerprintPoolAccountForTest(133), WSURL: "wss://example.com/v1/responses", Headers: headers}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	first, err := pool.Acquire(ctx, req)
+	require.NoError(t, err)
+	firstID := first.ConnID()
+	first.Release()
+	// Identity and turn metadata stay unchanged; only the OAuth credential moves.
+	req.Headers = cloneHeader(headers)
+	req.Headers.Set("Authorization", "Bearer token-b")
+	second, err := pool.Acquire(ctx, req)
+	require.NoError(t, err)
+	defer second.Release()
+	require.False(t, second.Reused())
+	require.NotEqual(t, firstID, second.ConnID())
+	require.Equal(t, 2, dialer.DialCount(), "a new OAuth credential must replace the idle old connection even at capacity")
 }
 
 func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.T) {

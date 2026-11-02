@@ -207,7 +207,7 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	tempModel := tempUnschedulableModel(stateCtx, nil)
 	modelTempMatched := tempModel != "" && tempUnschedRulesApply(account, statusCode, responseBody, tempModel) &&
 		len(matchTempUnschedulableRules(account, statusCode, responseBody)) > 0
-	if shouldDisable && !modelTempMatched {
+	if shouldDisable && !modelTempMatched && s.oauthRecovery.matching(stateCtx, account) == nil {
 		s.BlockAccountScheduling(account, time.Time{}, "upstream_disable")
 	}
 	// Pool-mode retryable upstream errors are already bounded by the request-local
@@ -426,6 +426,9 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
 	if s == nil || !isOpenAIAccount(account) {
 		return false
+	}
+	if s.oauthRecovery.active(account.ID) {
+		return true
 	}
 	mu := s.openAIAccountRuntimeBlockLock(account.ID)
 	mu.Lock()

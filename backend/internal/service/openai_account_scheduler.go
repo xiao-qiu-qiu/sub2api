@@ -2245,6 +2245,13 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 // openAISelectionFilterStats so that "no available accounts" errors state why
 // each candidate was dropped instead of failing silently (#4599).
 func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx context.Context, account *Account, req OpenAIAccountScheduleRequest) (bool, string) {
+	return s.accountRequestCompatibility(ctx, account, req, false)
+}
+
+// Recovery discovery may ignore a temporary runtime block, but must preserve
+// the request's normal model, privacy, quota and channel eligibility checks.
+// Actual admission always calls the wrapper above with the block enforced.
+func (s *defaultOpenAIAccountScheduler) accountRequestCompatibility(ctx context.Context, account *Account, req OpenAIAccountScheduleRequest, ignoreRuntimeBlock bool) (bool, string) {
 	ctx = withOpenAIProxyQuarantineTransport(ctx, req.RequiredTransport)
 	if account == nil {
 		return false, "account_nil"
@@ -2263,7 +2270,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
-	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact) {
+	if !ignoreRuntimeBlock && s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact) {
 		return false, "runtime_blocked"
 	}
 	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account) {
@@ -2667,7 +2674,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
 	selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
-	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
+	if err == nil {
 		return selection, decision, err
 	}
 	if !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
@@ -2678,11 +2685,25 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 		return selection, decision, err
 	}
 	blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now())
-	if blocked == 0 {
-		return selection, decision, err
+	if blocked > 0 && !openAIProxyStreamQuarantineBypassed(ctx) {
+		s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
+		selection, decision, err = s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+		if err == nil || (!errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts)) {
+			return selection, decision, err
+		}
 	}
-	s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
-	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	recoveryCtx := context.WithValue(ctx, oauthRecoveryDiscoveryKey{}, true)
+	recoveryCtx = context.WithValue(recoveryCtx, oauthRecoverySelectionKey{}, oauthRecoverySelection{
+		excluded: excludedIDs, transport: requiredTransport, capability: requiredCapability, imageCapability: requiredImageCapability, requireCompact: requireCompact,
+	})
+	waited, recoveryErr := s.WaitForOpenAIOAuthRecovery(recoveryCtx, groupID, requestedModel)
+	if recoveryErr != nil {
+		return nil, decision, recoveryErr
+	}
+	if waited {
+		return s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	}
+	return selection, decision, err
 }
 
 type openAIGroupPrivacyRequirementContextKey struct{}

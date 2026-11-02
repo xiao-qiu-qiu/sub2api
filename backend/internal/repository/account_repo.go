@@ -103,12 +103,13 @@ func stripCodexFingerprintSeedFromExtraUpdate(extra map[string]any) map[string]a
 	}
 	_, seedExists := extra["codex_fingerprint_seed"]
 	_, admissionExists := extra[service.OpenAITwoFAAdmissionExtraKey]
-	if !seedExists && !admissionExists {
+	_, recoveryExists := extra[immediateOAuthRecoveryTaskExtraKey]
+	if !seedExists && !admissionExists && !recoveryExists {
 		return extra
 	}
 	stripped := make(map[string]any, len(extra)-1)
 	for key, value := range extra {
-		if key == "codex_fingerprint_seed" || key == service.OpenAITwoFAAdmissionExtraKey {
+		if key == "codex_fingerprint_seed" || key == service.OpenAITwoFAAdmissionExtraKey || key == immediateOAuthRecoveryTaskExtraKey {
 			continue
 		}
 		stripped[key] = value
@@ -881,6 +882,15 @@ func lockAndMergeAccountProbeExtra(
 		}
 	}
 	extra := service.MergeOpenAICodexTicketExtra(copyJSONMap(normalizeJSONMap(account.Extra)), currentExtra)
+	// Event recovery ownership is server-owned and must survive stale or full
+	// admin saves, even when the visible error message is cleared separately.
+	delete(extra, immediateOAuthRecoveryTaskExtraKey)
+	if recoveryTask, exists := currentExtra[immediateOAuthRecoveryTaskExtraKey]; exists {
+		if extra == nil {
+			extra = make(map[string]any)
+		}
+		extra[immediateOAuthRecoveryTaskExtraKey] = recoveryTask
+	}
 	if identityUnchanged {
 		extra = preserveCommittedCodexUsage(extra, currentExtra)
 	}
@@ -1178,8 +1188,9 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 // account still has the credential snapshot captured before protocol login.
 // Re-authentication may take several minutes; the expected-value guard keeps a
 // concurrent manual edit or token refresh from being overwritten by a stale
-// callback. Successful swaps also restore the account's active/schedulable
-// state and clear transient scheduling quarantine.
+// callback. Event-triggered recovery preserves current scheduling controls;
+// other re-logins restore active/schedulable state as before. Successful swaps
+// clear transient scheduling quarantine.
 func (r *accountRepository) ApplyOpenAIOAuthReauth(
 	ctx context.Context,
 	taskID int64,
@@ -1197,6 +1208,7 @@ func (r *accountRepository) ApplyOpenAIOAuthReauth(
 	}
 	extra = copyJSONMap(extra)
 	delete(extra, service.OpenAITwoFAAdmissionExtraKey)
+	delete(extra, immediateOAuthRecoveryTaskExtraKey)
 	extraJSON, err := json.Marshal(normalizeJSONMap(extra))
 	if err != nil {
 		return false, err
@@ -1219,14 +1231,23 @@ func (r *accountRepository) ApplyOpenAIOAuthReauth(
 		), updated_account AS (
 		UPDATE accounts AS a
 		SET credentials = $1::jsonb,
-			extra = CASE
+			extra = (CASE
 				WHEN $2::jsonb = '{}'::jsonb THEN a.extra
 				ELSE COALESCE(a.extra, '{}'::jsonb) || $2::jsonb
-			END,
+			END) - '`+immediateOAuthRecoveryTaskExtraKey+`',
 			expires_at = COALESCE($14::timestamptz, a.expires_at),
-			status = $5,
-			error_message = '',
-			schedulable = CASE WHEN a.extra ? 'openai_two_fa_admission' THEN a.schedulable ELSE TRUE END,
+			status = CASE
+				WHEN a.extra ->> '`+immediateOAuthRecoveryTaskExtraKey+`' = locked_task.id::text
+					AND (a.status <> 'error' OR a.error_message IS DISTINCT FROM $15) THEN a.status
+				ELSE $5 END,
+			error_message = CASE
+				WHEN a.extra ->> '`+immediateOAuthRecoveryTaskExtraKey+`' = locked_task.id::text
+					AND a.error_message IS DISTINCT FROM $15 THEN a.error_message
+				ELSE '' END,
+			schedulable = CASE
+				WHEN a.extra ? 'openai_two_fa_admission'
+					OR a.extra ->> '`+immediateOAuthRecoveryTaskExtraKey+`' = locked_task.id::text THEN a.schedulable
+				ELSE TRUE END,
 			rate_limited_at = NULL,
 			rate_limit_reset_at = NULL,
 			overload_until = NULL,
@@ -1262,7 +1283,7 @@ func (r *accountRepository) ApplyOpenAIOAuthReauth(
 		service.SchedulerOutboxEventAccountChanged, taskID, workerID,
 		service.OpenAIOAuthReauthStatusCallbackProcessing,
 		service.OpenAIOAuthReauthStatusSucceeded, service.OpenAIOAuthReauthStageSucceeded,
-		subscriptionExpiresAt)
+		subscriptionExpiresAt, service.ImmediateOAuthRecoveryErrorMessage)
 	if err != nil {
 		return false, err
 	}

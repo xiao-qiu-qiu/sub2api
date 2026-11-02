@@ -44,6 +44,15 @@ class RuntimeControlsTest(unittest.TestCase):
             worker._worker_loop(self.config(), stop)
         run.assert_called_once()
 
+    def test_idle_worker_retries_claim_after_configured_poll_interval(self):
+        cfg = worker.replace(self.config(), poll_seconds=1.0)
+        stop = Mock()
+        stop.is_set.side_effect = (False, False, True)
+        with patch.object(worker, 'run_once', side_effect=(False, True)) as run:
+            worker._worker_loop(cfg, stop)
+        self.assertEqual(run.call_count, 2)
+        stop.wait.assert_called_once_with(1.0)
+
     def test_real_processes_scale_down_without_interrupting_active_work_then_scale_up(self):
         context = multiprocessing.get_context('spawn')
         with tempfile.TemporaryDirectory() as directory:

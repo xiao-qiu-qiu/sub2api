@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -92,6 +93,7 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	oauthCredential     [32]byte
 	timezoneMode        string
 	timezoneHeaders     [3]string
 	anchorScope         string
@@ -2436,6 +2438,9 @@ func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Head
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures:    normalizeOpenAIWSBetaFeatures(headers),
 		timezoneHeaders: [3]string{headers.Get("Oai-Client-Timezone"), headers.Get("X-Openai-Timezone"), headers.Get("X-Timezone")},
+	}
+	if oauth401CanRecover(account, nil) {
+		key.oauthCredential = sha256.Sum256([]byte(headers.Get("Authorization")))
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

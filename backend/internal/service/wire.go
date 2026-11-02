@@ -1307,6 +1307,7 @@ func ProvideAccountTokenGuardV2Service(repo AccountTokenGuardV2Repository, setti
 	cfg *config.Config,
 ) *AccountTokenGuardV2Service {
 	svc := NewAccountTokenGuardV2Service(repo, settings, admin, openAIGateway, reauth)
+	openAIGateway.SetOpenAIOAuthRecovery(svc)
 	if recorder, ok := repo.(CredentialOperationRefreshRecorder); ok && reauth != nil && reauth.oauth != nil {
 		reauth.oauth.SetRefreshFailureRecorder(recorder)
 	}

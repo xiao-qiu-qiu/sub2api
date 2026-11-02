@@ -512,6 +512,7 @@ var ErrNoAvailableCompactAccounts = errors.New("no available accounts support /r
 
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
+	oauthRecovery           *openAIOAuthRecoveryCoordinator
 	codexOptionalTraffic    codexOptionalTrafficRuntime
 	smartProtocolHistory    openAISmartProtocolHistory
 	requestTimezoneEgress   openAIRequestTimezoneEgress
@@ -868,6 +869,9 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 // CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
+	if s != nil {
+		s.oauthRecovery.stop()
+	}
 	if s != nil {
 		s.codexSnapshotMu.Lock()
 		s.codexSnapshotClosed = true
@@ -1457,6 +1461,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			if err != nil {
 				return "", "", err
 			}
+			recordOAuthRecoveryToken(ctx, account, accessToken)
 			return accessToken, "oauth", nil
 		}
 		// 降级：TokenProvider 未配置时直接从账号读取
@@ -1464,6 +1469,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		if accessToken == "" {
 			return "", "", errors.New("access_token not found in credentials")
 		}
+		recordOAuthRecoveryToken(ctx, account, accessToken)
 		return accessToken, "oauth", nil
 	case AccountTypeSetupToken:
 		if !account.IsOpenAIOAuthLike() {

@@ -732,6 +732,22 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if account == nil {
 		return errors.New("account is nil")
 	}
+	ctx = openAIWSOAuthRecoveryContext(ctx, c)
+	var tokenErr error
+	token, tokenErr = s.freshOpenAIWSOAuthToken(ctx, account, token)
+	if tokenErr != nil {
+		return tokenErr
+	}
+	recordOAuthRecoveryToken(ctx, account, token)
+	oauthReplay := newOpenAIWSOAuthReplay(s.oauthRecovery != nil && oauth401CanRecover(account, nil), firstClientMessage, gjson.GetBytes(firstClientMessage, "model").String())
+	var activeRecoveryBudget atomic.Pointer[oauthRecoveryBudget]
+	activeRecoveryBudget.Store(recoveryBudget(ctx))
+	turnRecoveryContext := func() context.Context {
+		if budget := activeRecoveryBudget.Load(); budget != nil {
+			return context.WithValue(ctx, oauthRecoveryBudgetKey{}, budget)
+		}
+		return ctx
+	}
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
@@ -967,6 +983,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
 		)
 		s.handleOpenAIWSDialTransientFailure(ctx, account, capturedSessionModel, dialErr)
+		if statusCode == http.StatusUnauthorized {
+			if failure := s.openAIWSOAuth401(ctx, account, token, handshakeHeaders, responseBody, capturedSessionModel); failure != nil {
+				return failure
+			}
+		}
 		if statusCode == http.StatusTooManyRequests {
 			s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()), capturedSessionModel)
 			return s.newOpenAIWSRateLimitFailoverError(account, handshakeHeaders, nil, err.Error())
@@ -1211,6 +1232,19 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						return payload, nil, err
 					}
 				}
+				turnCtx := openAIWSOAuthRecoveryContext(ctx, c)
+				activeRecoveryBudget.Store(recoveryBudget(turnCtx))
+				oauthReplay.begin(clientPayload, requestModelForThisFrame)
+				freshToken, err := s.freshOpenAIWSOAuthToken(turnCtx, account, token)
+				if err != nil {
+					return payload, nil, err
+				}
+				if freshToken != token {
+					return payload, nil, oauthReplay.retry(ErrOpenAIWSOAuthCredentialChanged)
+				}
+				recordOAuthRecoveryToken(turnCtx, account, token)
+			} else if eventType == "session.update" || strings.HasPrefix(eventType, "conversation.item.") {
+				oauthReplay.invalidate()
 			}
 			// 在评估策略前先刷新 capturedSessionModel：客户端可能通过
 			// session.update 修改 session-level model（Realtime /
@@ -1397,7 +1431,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	failureAccountSideEffectsApplied := false
 	relayResult, relayExit := openaiwsv2.RunEntry(openaiwsv2.EntryInput{
 		Ctx:                ctx,
-		ClientConn:         policyClientConn,
+		ClientConn:         &openAIWSOAuthStagedConn{openAIWSOAuthFrameConn: policyClientConn, stager: openAIWSOAuthStager{enabled: oauthReplay.enabled}},
 		UpstreamConn:       relayUpstreamFrameConn,
 		FirstClientMessage: firstClientMessage,
 		Options: openaiwsv2.RelayOptions{
@@ -1523,6 +1557,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			},
 			AfterClientWrite: func(msgType coderws.MessageType, payload []byte, writeErr error) {
 				if msgType == coderws.MessageText && writeErr == nil {
+					oauthReplay.clientWrote(payload)
+				}
+				if msgType == coderws.MessageText && writeErr == nil {
 					eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 					markOpenAIWSClientVisibleFailure(c, eventType, payload)
 				}
@@ -1550,6 +1587,15 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					return nil
 				}
 				eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
+				oauthReplay.observe(payload)
+				if (eventType == "error" || eventType == "response.failed") && openAIWSOAuthFailureStatus(account, payload, extractOpenAISSEErrorMessage(payload)) == http.StatusUnauthorized {
+					if failure := s.openAIWSOAuth401(turnRecoveryContext(), account, token, handshakeHeaders, payload, *activePolicyModel.Load()); failure != nil {
+						failureAccountSideEffectsApplied = true
+						if oauthReplay.canReplay() {
+							return oauthReplay.retry(failure)
+						}
+					}
+				}
 				regionalMeterObserveUsage(ctx, payload, eventType)
 				if eventType == "response.created" {
 					failureAccountSideEffectsApplied = false
@@ -1560,7 +1606,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(payload)
 				isPreOutputRateLimit := eventType == "error" && !wroteDownstream && isOpenAIWSRateLimitError(errCodeRaw, errTypeRaw, errMsgRaw)
 				if (eventType == "error" || eventType == "response.failed") && !failureAccountSideEffectsApplied && !isPreOutputRateLimit {
-					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, account, *activePolicyModel.Load(), handshakeHeaders, payload)
+					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(turnRecoveryContext(), account, *activePolicyModel.Load(), handshakeHeaders, payload)
 				}
 				if eventType != "error" {
 					return nil

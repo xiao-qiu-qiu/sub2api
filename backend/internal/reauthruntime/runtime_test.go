@@ -130,35 +130,58 @@ func TestManagedProcessGetsOnlyWorkerEnvironmentAndStops(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux process supervision")
 	}
-	root := t.TempDir()
-	dir := filepath.Join(root, "1.2.3-linux-"+runtime.GOARCH)
-	require.NoError(t, os.MkdirAll(dir, 0700))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "ready"), []byte("cached"), 0600))
-	script := "#!/bin/sh\nprintf '%s' \"$OPENAI_REAUTH_WORKER_TOKEN\" > worker-token\nprintf '%s' \"$DATABASE_PASSWORD\" > unrelated-secret\nprintf '%s' \"$OPENAI_REAUTH_CONCURRENCY\" > concurrency\nexec /bin/sleep 60\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "python"), []byte(script), 0700))
-	t.Setenv("OPENAI_REAUTH_CONCURRENCY", "4")
-	t.Setenv("DATABASE_PASSWORD", "must-not-inherit")
-	m := New(root, "1.2.3", "http://127.0.0.1:4040", "synthetic-worker-token")
-	m.Ensure()
-	defer m.Stop()
-	// Child output can precede the parent's running status update after Start.
-	// Wait for both independently, including the last environment file write.
-	require.Eventually(t, func() bool {
-		return m.Status().State == "running"
-	}, 5*time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		got, err := os.ReadFile(filepath.Join(dir, "concurrency"))
-		return err == nil && string(got) == "4"
-	}, 5*time.Second, 10*time.Millisecond)
-	got, err := os.ReadFile(filepath.Join(dir, "worker-token"))
-	require.NoError(t, err)
-	require.Equal(t, "synthetic-worker-token", string(got))
-	got, err = os.ReadFile(filepath.Join(dir, "unrelated-secret"))
-	require.NoError(t, err)
-	require.Empty(t, got)
-	got, err = os.ReadFile(filepath.Join(dir, "concurrency"))
-	require.NoError(t, err)
-	require.Equal(t, "4", string(got))
-	m.Stop()
-	require.Equal(t, "stopped", m.Status().State)
+	for _, tc := range []struct {
+		name       string
+		configured bool
+		value      string
+		want       string
+	}{
+		{name: "default", want: "1"},
+		{name: "explicit", configured: true, value: "2.5", want: "2.5"},
+		{name: "explicit_empty", configured: true, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OPENAI_REAUTH_POLL_SECONDS", tc.value)
+			if !tc.configured {
+				require.NoError(t, os.Unsetenv("OPENAI_REAUTH_POLL_SECONDS"))
+			}
+			root := t.TempDir()
+			dir := filepath.Join(root, "1.2.3-linux-"+runtime.GOARCH)
+			require.NoError(t, os.MkdirAll(dir, 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "ready"), []byte("cached"), 0600))
+			script := "#!/bin/sh\nprintf '%s' \"$OPENAI_REAUTH_WORKER_TOKEN\" > worker-token\nprintf '%s' \"$DATABASE_PASSWORD\" > unrelated-secret\nprintf '%s' \"$OPENAI_REAUTH_CONCURRENCY\" > concurrency\nprintf '%s' \"$OPENAI_REAUTH_POLL_SECONDS\" > poll-seconds\nexec /bin/sleep 60\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "python"), []byte(script), 0700))
+			t.Setenv("OPENAI_REAUTH_CONCURRENCY", "4")
+			t.Setenv("DATABASE_PASSWORD", "must-not-inherit")
+			m := New(root, "1.2.3", "http://127.0.0.1:4040", "synthetic-worker-token")
+			m.Ensure()
+			defer m.Stop()
+			// Child output can precede the parent's running status update after Start.
+			// Wait for both independently, including the last environment file write.
+			require.Eventually(t, func() bool {
+				return m.Status().State == "running"
+			}, 5*time.Second, 10*time.Millisecond)
+			require.Eventually(t, func() bool {
+				got, err := os.ReadFile(filepath.Join(dir, "poll-seconds"))
+				return err == nil && string(got) == tc.want
+			}, 5*time.Second, 10*time.Millisecond)
+			got, err := os.ReadFile(filepath.Join(dir, "worker-token"))
+			require.NoError(t, err)
+			require.Equal(t, "synthetic-worker-token", string(got))
+			got, err = os.ReadFile(filepath.Join(dir, "unrelated-secret"))
+			require.NoError(t, err)
+			require.Empty(t, got)
+			got, err = os.ReadFile(filepath.Join(dir, "concurrency"))
+			require.NoError(t, err)
+			require.Equal(t, "4", string(got))
+			got, err = os.ReadFile(filepath.Join(dir, "poll-seconds"))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(got))
+			value, configured := os.LookupEnv("OPENAI_REAUTH_POLL_SECONDS")
+			require.Equal(t, tc.configured, configured)
+			require.Equal(t, tc.value, value)
+			m.Stop()
+			require.Equal(t, "stopped", m.Status().State)
+		})
+	}
 }

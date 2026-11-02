@@ -1871,6 +1871,9 @@ func isAgentIdentityTaskInvalidCodexModelsError(err error) bool {
 // and API key manifests come from custom upstreams whose /models auth may
 // diverge from their chat endpoints.
 func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx context.Context, account, credAccount *Account, err error) {
+	if fresh, _ := ctx.Value(oauthRecoveryProbeKey{}).(bool); fresh {
+		return
+	}
 	if s == nil || account == nil || err == nil {
 		return
 	}
@@ -1891,6 +1894,9 @@ func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx con
 func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error), ifNoneMatch string) (*OpenAIModelsResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if fresh, _ := ctx.Value(oauthRecoveryProbeKey{}).(bool); fresh {
+		return fetch(ctx, "")
 	}
 	cacheKey := buildOpenAIModelsCacheKey(request)
 	manifest, state := s.openAIModelsCache.get(cacheKey, time.Now())

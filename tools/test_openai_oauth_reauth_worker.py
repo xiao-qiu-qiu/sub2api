@@ -120,6 +120,20 @@ class OpenAIOAuthReauthWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(WorkerError, "configure TOSUB2_ROOT"):
                 WorkerConfig.from_env()
 
+    def test_poll_interval_uses_environment_and_keeps_standalone_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "src"
+            source.mkdir()
+            (source / "protocol-login.mjs").touch()
+            (source / "tls-transport.mjs").touch()
+            for value, expected in ((None, 5.0), ("1", 1.0), ("2.5", 2.5)):
+                with self.subTest(value=value):
+                    env = {"OPENAI_REAUTH_WORKER_TOKEN": "x" * 32, "TOSUB2_ROOT": root}
+                    if value is not None:
+                        env["OPENAI_REAUTH_POLL_SECONDS"] = value
+                    with patch.dict(os.environ, env, clear=True):
+                        self.assertEqual(WorkerConfig.from_env().poll_seconds, expected)
+
     def test_explicit_invalid_email_protocol_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "src"

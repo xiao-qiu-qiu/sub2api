@@ -20,6 +20,7 @@ import (
 
 // RateLimitService 处理限流和过载状态管理
 type RateLimitService struct {
+	oauthRecovery         *openAIOAuthRecoveryCoordinator
 	accountOps            *AccountOpsService
 	qualityTrigger        *quality5xxTrigger
 	accountRepo           AccountRepository
@@ -506,6 +507,14 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 		authAccount := account
 		if resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account); rerr == nil && resolved != nil {
 			authAccount = resolved
+		}
+		if budget := recoveryBudget(ctx); budget != nil && s.oauthRecovery != nil {
+			waitCtx, cancel := budget.waitContext(ctx, s.oauthRecovery.waitTime)
+			_, handled := s.oauthRecovery.begin(waitCtx, authAccount, responseBody)
+			cancel()
+			if handled {
+				return true
+			}
 		}
 		// OpenAI: token_invalidated / token_revoked 表示 token 被永久作废（非过期），直接标记 error
 		openai401Code := extractUpstreamErrorCode(responseBody)

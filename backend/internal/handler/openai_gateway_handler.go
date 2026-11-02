@@ -900,14 +900,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
-	if !acquired {
+	if !h.waitForOpenAIOAuthRecoveryBeforeAdmission(c, apiKey.GroupID, forwardModel, streamStarted, false) {
 		return
 	}
-	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+
+	userSlots := &openAIOAuthRecoveryUserSlot{acquireFunc: func() (func(), bool) {
+		return h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
+	}}
+	if !userSlots.acquire() {
+		return
 	}
+	defer userSlots.release()
 
 	// 2. Re-check billing eligibility after wait
 	if err := h.checkRegionalBillingEligibility(c.Request.Context(), apiKey, subscription); err != nil {
@@ -1002,6 +1005,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if isOpenAIOAuthRecoveryError(err) {
+				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, false)
+				return
+			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
 				return
@@ -1259,6 +1266,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					// 但重试耗尽时仍须按已提交的 SSE 响应返回流内错误。
 					if c.Writer.Written() {
 						streamStarted = true
+					}
+					if handled, retry := h.recoverOpenAIOAuthHTTP401(c, userSlots, account, result, failoverErr, streamStarted, false); handled {
+						if !retry {
+							return
+						}
+						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
@@ -1619,13 +1633,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
-	if !acquired {
+	if !h.waitForOpenAIOAuthRecoveryBeforeAdmission(c, apiKey.GroupID, reqModel, streamStarted, true) {
 		return
 	}
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+
+	userSlots := &openAIOAuthRecoveryUserSlot{acquireFunc: func() (func(), bool) {
+		return h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit, reqStream, &streamStarted, reqLog)
+	}}
+	if !userSlots.acquire() {
+		return
 	}
+	defer userSlots.release()
 
 	if err := h.checkRegionalBillingEligibility(c.Request.Context(), apiKey, subscription); err != nil {
 		reqLog.Info("openai_messages.billing_eligibility_check_failed", zap.Error(err))
@@ -1697,6 +1715,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if isOpenAIOAuthRecoveryError(err) {
+				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, true)
+				return
+			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
 				return
@@ -1878,10 +1900,20 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if c.Writer.Written() {
+						streamStarted = true
+					}
+					if handled, retry := h.recoverOpenAIOAuthHTTP401(c, userSlots, account, result, failoverErr, streamStarted, true); handled {
+						if !retry {
+							return
+						}
+						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
@@ -2491,13 +2523,31 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 ) (func(), bool) {
 	defer requesttiming.Observe(c.Request.Context(), "user_queue")()
 	ctx := c.Request.Context()
-	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, userConcurrency, apiKeyID, keyLimit, reqStream, streamStarted)
-	if err != nil {
-		reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
-		h.handleConcurrencyError(c, err, "user", *streamStarted)
-		return nil, false
+	for {
+		userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, userConcurrency, apiKeyID, keyLimit, reqStream, streamStarted)
+		if err == nil {
+			if recoveryErr := service.CheckOAuthRecoveryAdmission(ctx); recoveryErr != nil {
+				if userReleaseFunc != nil {
+					userReleaseFunc()
+				}
+				err = recoveryErr
+			}
+		}
+		if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) {
+			// The interrupted admission has released its key/user queue state;
+			// wait on the original request and then run ordinary admission again.
+			if !h.waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c, *streamStarted) {
+				return nil, false
+			}
+			continue
+		}
+		if err != nil {
+			reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
+			h.handleConcurrencyError(c, err, "user", *streamStarted)
+			return nil, false
+		}
+		return wrapReleaseOnDone(ctx, userReleaseFunc), true
 	}
-	return wrapReleaseOnDone(ctx, userReleaseFunc), true
 }
 
 // openAISlotAcquireResult 是账号槽位获取的三态结果。
@@ -3128,6 +3178,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 必须尽早注册，确保任何 early return 都能释放已获取的并发槽位。
 	defer releaseTurnSlots()
 
+	oauthRecoveryTurns := newOpenAIOAuthWSTurnRecoveryContext(ctx)
+	ctx = oauthRecoveryTurns
+	c.Request = c.Request.WithContext(ctx)
+	if err := waitForOpenAIOAuthWSRecovery(ctx, c, h.gatewayService, apiKey.GroupID, wsForwardModel); err != nil {
+		closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, err)
+		return
+	}
+
 	// 首轮准入携带本轮的不可变权限快照；failover 重入复用同一 ctx 链条。
 	ctx = service.WithAPIKeyQueueRequestPermissions(ctx, firstTurnQueuePermissions)
 	userReleaseFunc, userAcquired, err := admitOpenAIWSTurn(h.concurrencyHelper, ctx, c, subject.UserID, subject.Concurrency, apiKey.ID, apiKey.ConcurrencyLimit)
@@ -3316,6 +3374,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if isOpenAIOAuthRecoveryError(err) {
+				closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, err)
+				return
+			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "latency scheduling temporarily unavailable; retry after 5 seconds")
 				return
@@ -3513,6 +3575,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
 			return
 		}
+		currentRecoveryTurn := 1
+		currentRecoveryTurnObservedResult := false
 		hooks := &service.OpenAIWSIngressHooks{
 			ClientLifecycleContext:      clientLifecycleCtx,
 			InitialRequestModel:         reqModel,
@@ -3553,6 +3617,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			BeforeRequestWithClientPayload: func(turn int, payload, clientPayload []byte, originalModel string) error {
+				if turn > 1 {
+					oauthRecoveryTurns.beginTurn()
+				}
+				currentRecoveryTurn = turn
+				currentRecoveryTurnObservedResult = false
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				// 连接级 cyber session gate 也在 BeforeRequest 先执行，使 native 与
@@ -3671,6 +3740,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					if outboundModel == "" {
 						outboundModel = strings.TrimSpace(wsForwardModel)
 					}
+					if recoveryErr := waitForOpenAIOAuthWSRecovery(ctx, c, h.gatewayService, apiKey.GroupID, outboundModel); recoveryErr != nil {
+						return recoveryErr
+					}
 					if _, admissionErr := h.gatewayService.AdmitOpenAITurn(ctx, c, account, outboundModel); admissionErr != nil {
 						reqLog.Info("openai.websocket_turn_admission_rejected",
 							zap.Int("turn", turn),
@@ -3721,6 +3793,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return checkSimpleModeTurnBilling()
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				currentRecoveryTurn = turn
+				currentRecoveryTurnObservedResult = result != nil
 				turnStart := getTurnStart(turn)
 				// Each ingress samples its own forward boundary. Callback cleanup is
 				// never queue time. Preserve the current frame across account failover.
@@ -3872,6 +3946,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
 				return
 			}
+			if isOpenAIOAuthRecoveryError(err) {
+				releaseTurnSlots()
+				closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, err)
+				return
+			}
 			if isOpenAIRPMError(err) {
 				releaseTurnSlots()
 				reason := "OpenAI OAuth RPM protection is temporarily unavailable; retry later"
@@ -3900,13 +3979,66 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "continuation requires its original live node and connection; automatic replay is disabled")
 				return
 			}
+			if errors.Is(err, service.ErrOpenAIWSOAuthCredentialChanged) {
+				releaseTurnSlots()
+				retryPayload, currentTurn := service.OpenAIWSCurrentTurnRetryPayload(err)
+				if !oauthRecoveryTurns.allowCredentialReplay(retryPayload, currentTurn, currentRecoveryTurnObservedResult) {
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "upstream credentials changed; reconnect with complete context")
+					return
+				}
+				if !service.OpenAIWSIngressCanFailover(ctx, c) {
+					return
+				}
+				retryModel := strings.TrimSpace(gjson.GetBytes(retryPayload, "model").String())
+				if retryModel == "" {
+					retryModel = reqModel
+				}
+				ctx = service.WithAPIKeyQueueRequestPermissions(ctx, openAIWSQueueTurnPermissions(retryModel, retryPayload))
+				if authErr := h.concurrencyHelper.RevalidateTurnAuth(ctx); authErr != nil {
+					closeOpenAIWSAdmissionError(wsConn, reqLog, "openai.websocket_credential_rebuild_auth_rejected", authErr)
+					return
+				}
+				wsAttemptMessage = append([]byte(nil), retryPayload...)
+				previousResponseID = strings.TrimSpace(gjson.GetBytes(retryPayload, "previous_response_id").String())
+				if retryModel != reqModel {
+					reqModel = retryModel
+					wsRouteModel = retryModel
+					channelMappingWS, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, wsRouteModel)
+					wsForwardModel = openAIChannelForwardModel(channelMappingWS, wsRouteModel)
+				}
+				_ = h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID)
+				reqLog.Info("openai.websocket_credential_changed_rebuilding", zap.Int64("account_id", account.ID))
+				if !ensureUserSlotHeld() {
+					return
+				}
+				break
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				retryPayload, retryCurrentTurn := service.OpenAIWSCurrentTurnRetryPayload(err)
 				nextAttemptMessage, retrySafe := openAIWSNextAttemptMessage(wsAttemptMessage, retryPayload, retryCurrentTurn)
-				if !retrySafe {
+				if !retrySafe || currentRecoveryTurnObservedResult || (currentRecoveryTurn > 1 && !retryCurrentTurn) {
 					closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 					return
+				}
+				// Proxy has joined upstream work. Release slots before waiting,
+				// then re-enter selection and latest turn admission with fresh auth.
+				if failoverErr.StatusCode == http.StatusUnauthorized {
+					releaseTurnSlots()
+					handled, recoveryErr := recoverOpenAIOAuthWS401(ctx, c, h.gatewayService, account, failoverErr)
+					if recoveryErr != nil {
+						closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, recoveryErr)
+						return
+					}
+					if handled {
+						wsAttemptMessage = nextAttemptMessage
+						previousResponseID = strings.TrimSpace(gjson.GetBytes(wsAttemptMessage, "previous_response_id").String())
+						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID)
+						if !ensureUserSlotHeld() {
+							return
+						}
+						break
+					}
 				}
 				wsAttemptMessage = nextAttemptMessage
 				if retryCurrentTurn {

@@ -740,6 +740,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	}
 	observer.ObserveServiceTier(finalResponse.ServiceTier, true)
 	if strings.TrimSpace(finalResponse.Status) == "failed" {
+		partialResult := openAICompatBufferedFailureResult(c, resp, originalModel, billingModel, upstreamModel, usage, priorModels, startTime)
 		payload, _ := json.Marshal(gin.H{"type": "response.failed", "response": finalResponse})
 		// cyber_policy 致命不可重试：不 failover，以 Chat Completions 错误格式回写（F4），
 		// 标记供 handler 事后写风控/邮件/tokens=0 用量行。
@@ -760,8 +761,11 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			return nil, fmt.Errorf("openai cyber_policy: %s", msg)
 		}
 		message := openAICompatFailedResponseMessage(finalResponse)
-		if openAIStreamFailedEventShouldFailover(payload, message) {
+		if partialResult == nil && openAIStreamFailedEventShouldFailover(payload, message) {
 			return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header)
+		}
+		if partialResult != nil && openAIStreamFailureStatus(payload, message) == http.StatusUnauthorized {
+			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payload, message, resp.Header, upstreamModel)
 		}
 		message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payload, message)
 		// response.failed 到达在 HTTP 200 SSE 流上，无真实 HTTP 错误码；统一走语义
@@ -774,10 +778,10 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			}
 			MarkResponseCommitted(c)
 			writeChatCompletionsError(c, status, errType, errMsg)
-			return nil, fmt.Errorf("upstream response failed (passthrough): %s", errMsg)
+			return partialResult, fmt.Errorf("upstream response failed (passthrough): %s", errMsg)
 		}
 		writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", message)
-		return nil, fmt.Errorf("upstream response failed: %s", message)
+		return partialResult, fmt.Errorf("upstream response failed: %s", message)
 	}
 	if strings.TrimSpace(finalResponse.Status) == "completed" {
 		logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, &usage, "response.completed", false)
@@ -907,6 +911,8 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	state.IncludeUsage = true
 
 	var usage OpenAIUsage
+	usageObserved := false
+	semanticOutputSeen := false
 	var firstTokenMs *int
 	clientDisconnected := false
 	clientOutputStarted := false
@@ -945,6 +951,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,
 			Usage:                         usage,
+			ObservedUsageOnError:          usageObserved,
 			Model:                         originalModel,
 			BillingModel:                  billingModel,
 			UpstreamModel:                 upstreamModel,
@@ -976,6 +983,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			return false
 		}
 		observer.ObserveOpenAI([]byte(payload), event.Type)
+		if _, observed := extractOpenAIUsageFromJSONBytes([]byte(payload)); observed {
+			usageObserved = true
+		}
+		if openAIStreamDataStartsClientOutput(payload, event.Type) || len(gjson.Get(payload, "response.output").Array()) > 0 {
+			semanticOutputSeen = true
+		}
 		if c.Request != nil {
 			regionalMeterObserveUsage(c.Request.Context(), []byte(payload), event.Type)
 		}
@@ -1030,9 +1043,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if strings.TrimSpace(event.Type) == "error" {
 				shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
 			}
-			if !clientOutputStarted && shouldFailover {
+			if !clientDisconnected && !clientOutputStarted && !semanticOutputSeen && !usageObserved && shouldFailover {
 				streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header)
 				return true
+			}
+			if openAIStreamFailureStatus(payloadBytes, message) == http.StatusUnauthorized {
+				s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payloadBytes, message, resp.Header, upstreamModel)
 			}
 			message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payloadBytes, message)
 			defaultStatus, defaultErrType, defaultMsg := http.StatusBadGateway, "upstream_error", message
