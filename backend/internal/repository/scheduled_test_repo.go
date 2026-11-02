@@ -99,11 +99,16 @@ func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.
 	}
 	// Importing configuration cannot implicitly undo account restrictions or
 	// discard their ownership. Incompatible live isolation still rejects below.
-	if !plan.PreserveQualityState && updated.PelicanConfig != nil && updated.PelicanConfig.Quality != nil &&
-		updated.PelicanConfig.Quality.Action == service.QualityActionIsolateModels &&
-		(state.Action == "remove_groups" || state.Action == "disable_scheduling") {
-		if err = restoreQualityAccountActionForIsolation(ctx, tx, updated, &state); err != nil {
-			return nil, err
+	if !plan.PreserveQualityState && updated.PelicanConfig != nil && updated.PelicanConfig.Quality != nil {
+		policy := updated.PelicanConfig.Quality
+		replacesAccountAction := (policy.Action == service.QualityActionIsolateModels || policy.Action == service.QualityActionMoveGroups) &&
+			(state.Action == "remove_groups" || state.Action == "disable_scheduling")
+		replacesMove := state.Action == service.QualityActionMoveGroups &&
+			(policy.Action != state.Action || !sameQualityScope(state.MoveGroupIDs, policy.MoveGroupIDs))
+		if replacesAccountAction || replacesMove {
+			if err = restoreQualityAccountActionForPolicy(ctx, tx, updated, &state); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err = checkQualityIsolationScope(updated, &state); err != nil {

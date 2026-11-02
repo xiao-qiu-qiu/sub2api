@@ -54,6 +54,13 @@ func sameQualityScope[T ~string | ~int64](a, b []T) bool {
 // action would leave persistent restrictions without their recovery path.
 func checkQualityIsolationScope(plan *service.ScheduledTestPlan, state *qualityState) error {
 	q := plan.PelicanConfig
+	if state.Action == service.QualityActionMoveGroups {
+		if q == nil || q.Quality == nil || q.Quality.Action != service.QualityActionMoveGroups || !sameQualityScope(state.MoveGroupIDs, q.Quality.MoveGroupIDs) {
+			return service.QualityScopeConflict("restore this rule's moved groups before changing its action or targets")
+		}
+	} else if state.Action != "" && q != nil && q.Quality != nil && q.Quality.Action == service.QualityActionMoveGroups {
+		return service.QualityScopeConflict("restore this rule's previous account action before moving groups")
+	}
 	if hasQualityCooldownOwnership(state) && (q == nil || q.Quality == nil || q.Quality.Action != service.QualityActionRemoveModel) {
 		return service.QualityScopeConflict("restore this rule's cooled models and concurrency before changing its action")
 	}
@@ -72,17 +79,17 @@ func checkQualityIsolationScope(plan *service.ScheduledTestPlan, state *qualityS
 // action. Restore only this rule's group/scheduling mutation, under the same
 // plan -> account lock order as detection. Do not fabricate a passing result or
 // require AutoRestore (which controls future probes, not this policy change).
-func restoreQualityAccountActionForIsolation(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, state *qualityState) error {
+func restoreQualityAccountActionForPolicy(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, state *qualityState) error {
 	var status string
 	err := tx.QueryRowContext(ctx, `SELECT status FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, plan.AccountID).Scan(&status)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("无法自动切换模型隔离：账号已删除")
+		return fmt.Errorf("无法切换质量处理规则：账号已删除")
 	}
 	if err != nil {
 		return err
 	}
 	if status != "active" {
-		return fmt.Errorf("无法自动切换模型隔离：账号不是正常状态，请先检查账号状态")
+		return fmt.Errorf("无法切换质量处理规则：账号不是正常状态，请先检查账号状态")
 	}
 	before, err := qualityGroups(ctx, tx, plan.AccountID)
 	if err != nil {
@@ -95,7 +102,15 @@ func restoreQualityAccountActionForIsolation(ctx context.Context, tx *sql.Tx, pl
 			return err
 		}
 		if conflict {
-			return fmt.Errorf("无法自动切换模型隔离：原分组已删除或分组归属已被人工修改，请先检查账号分组；本次修改未保存")
+			return fmt.Errorf("无法切换质量处理规则：原分组已删除或分组归属已被人工修改，请先检查账号分组；本次修改未保存")
+		}
+	case service.QualityActionMoveGroups:
+		conflict, err := restoreQualityMovedGroups(ctx, tx, plan.AccountID, state)
+		if err != nil {
+			return err
+		}
+		if conflict {
+			return fmt.Errorf("无法切换质量处理规则：分组归属已被人工修改或分组已删除，请先检查账号分组；本次修改未保存")
 		}
 	case "disable_scheduling":
 		result, err := tx.ExecContext(ctx, `UPDATE accounts SET schedulable=true,updated_at=clock_timestamp()
@@ -108,12 +123,13 @@ func restoreQualityAccountActionForIsolation(ctx context.Context, tx *sql.Tx, pl
 			return err
 		}
 		if n != 1 {
-			return fmt.Errorf("无法自动切换模型隔离：账号已过期，不能恢复调度；本次修改未保存")
+			return fmt.Errorf("无法切换质量处理规则：账号已过期，不能恢复调度；本次修改未保存")
 		}
 	default:
 		return fmt.Errorf("unsupported previous quality action: %s", state.Action)
 	}
-	if err = qualityGroupsChanged(ctx, tx, plan.AccountID, before, state.Removed); err != nil {
+	affected := append(append([]qualityGroup(nil), state.Removed...), state.Added...)
+	if err = qualityGroupsChanged(ctx, tx, plan.AccountID, before, affected); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM account_quality_states WHERE plan_id=$1`, plan.ID); err != nil {

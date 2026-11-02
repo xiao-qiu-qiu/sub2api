@@ -2749,8 +2749,9 @@ export interface QualityPolicy {
   admission?: import('@/utils/openaiTwoFAAdmission').OpenAITwoFAAdmissionConfig
   judge?: QualityJudgeConfig
   expected_answer: string
-  action: 'openai_two_fa_admission' | 'isolate_models' | 'remove_groups' | 'remove_models' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
+  action: 'openai_two_fa_admission' | 'isolate_models' | 'remove_groups' | 'move_groups' | 'remove_models' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
   remove_group_ids: number[]
+  move_group_ids?: number[]
   remove_models?: string[]
   recovery_concurrency?: number
   auto_restore: boolean

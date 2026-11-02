@@ -48,6 +48,61 @@ describe('quality operations', () => {
     pelican_config: { question_kind: 'state_probe', test_channel: 'account', prompt: '', reasoning_effort: 'high', parallel_count: 1,
       quality: { action: 'observe_only', expected_answer: '', remove_group_ids: [], auto_restore: false } }, created_at: '', updated_at: '' })
 
+  it('requires a move destination and saves it separately from groups to remove', async () => {
+    const plan = rules()[0]
+    vi.mocked(listQualityPlans).mockResolvedValue([plan])
+    const wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-plan-id="1"] .rule-actions button:nth-child(2)').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="quality-action-move-groups"]').setValue(true)
+    expect(wrapper.find('[data-testid="quality-target-group-21"]').exists()).toBe(false)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.update).not.toHaveBeenCalled()
+    expect(wrapper.get('.editor-error').text()).toContain('qualityOps.selectMoveGroups')
+    await wrapper.get('[data-testid="quality-move-group-21"]').setValue(true)
+    await wrapper.get('[data-testid="quality-auto-restore"]').setValue(true)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.update).toHaveBeenCalledWith(1, expect.objectContaining({
+      pelican_config: expect.objectContaining({ quality: expect.objectContaining({
+        action: 'move_groups', move_group_ids: [21], remove_group_ids: [], auto_restore: true,
+      }) }),
+    }))
+    wrapper.unmount()
+  })
+
+  it('loads saved move destinations into the editor and shows them in the rule list', async () => {
+    const plan = rules()[0]
+    plan.pelican_config!.quality = { action: 'move_groups', expected_answer: '', remove_group_ids: [], move_group_ids: [21], auto_restore: true }
+    vi.mocked(listQualityPlans).mockResolvedValue([plan])
+    const wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-plan-id="1"]').text()).toContain('Quality pool')
+    await wrapper.get('[data-plan-id="1"] .rule-actions button:nth-child(2)').trigger('click'); await flushPromises()
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-action-move-groups"]').element.checked).toBe(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-move-group-21"]').element.checked).toBe(true)
+    expect(wrapper.text()).toContain('qualityOps.moveRestoreHelp')
+    wrapper.unmount()
+  })
+
+  it('clears a previous isolation review block when opening a move rule', async () => {
+    const [isolated, moved] = rules()
+    isolated.pelican_config!.quality!.action = 'isolate_models'
+    moved.pelican_config!.quality = { action: 'move_groups', expected_answer: '', remove_group_ids: [], move_group_ids: [21], auto_restore: true }
+    vi.mocked(listQualityPlans).mockResolvedValue([isolated, moved])
+    const wrapper = mountView(); await flushPromises()
+    const vm = wrapper.vm as any
+    vm.edit(isolated); await flushPromises()
+    wrapper.getComponent({ name: 'QualityOwnershipReview' }).vm.$emit('blocked', true)
+    await flushPromises()
+    expect(vm.ownershipBlocked).toBe(true)
+    vm.showForm = false; await flushPromises()
+    vm.edit(moved); await flushPromises()
+    expect(vm.ownershipBlocked).toBe(false)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.update).toHaveBeenCalledWith(moved.id, expect.objectContaining({
+      pelican_config: expect.objectContaining({ quality: expect.objectContaining({ action: 'move_groups', move_group_ids: [21] }) }),
+    }))
+    wrapper.unmount()
+  })
+
   it.each([',', '，'])('preserves typed %s delimiters and saves distinct cooldown targets', async separator => {
     const plan = rules()[0]
     plan.pelican_config!.quality!.action = 'remove_models'
@@ -1002,13 +1057,14 @@ describe('quality operations', () => {
     wrapper.unmount()
   })
 
-  const templateCases = (['observe_only', 'remove_groups', 'isolate_models', 'disable_scheduling'] as const).flatMap(action =>
+  const templateCases = (['observe_only', 'remove_groups', 'move_groups', 'isolate_models', 'disable_scheduling'] as const).flatMap(action =>
     (['new', 'edit', 'bulk'] as const).flatMap(mode => (['preset', 'account'] as const).map(origin => ({ action, mode, origin }))))
   it.each(templateCases)('complete template roundtrip $action / $mode / $origin', async ({ action, mode, origin }) => {
     const targets = rules()
     const source = { ...rules()[0], id: 10, account_id: 90, model_id: 'model-a', enabled: false, max_results: 145, cron_expression: '7 */2 * * *' }
     source.pelican_config = { question_kind: 'candy', test_channel: 'account', prompt: 'Configured question', reasoning_effort: 'xhigh', parallel_count: 3, model_ids: ['model-a', 'model-b'],
       quality: { action, expected_answer: '42', remove_group_ids: action === 'remove_groups' || action === 'isolate_models' ? [21] : [], auto_restore: action !== 'observe_only', trigger_on_upstream_5xx: true,
+        ...(action === 'move_groups' ? { move_group_ids: [21] } : {}),
         judge: { kind: 'jev', group_id: 0, model_id: '', prompt: 'Compare values' } } }
     Object.assign(source, { running_until: '2099-01-01T00:00:00Z', last_run_at: '2026-01-01T00:00:00Z', credentials: 'synthetic-no-copy' })
     Object.assign(source.pelican_config, { quality_model_actions: { 'model-a': 'isolated' }, trigger_source: 'old-worker' })
@@ -1024,11 +1080,13 @@ describe('quality operations', () => {
     expect(wrapper.find('[data-testid="quality-action-isolate-models"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="quality-action-disable-scheduling"]').exists()).toBe(true)
     if (action === 'remove_groups' || action === 'isolate_models') expect((wrapper.get('[data-testid="quality-target-group-21"]').element as HTMLInputElement).checked).toBe(true)
+    if (action === 'move_groups') expect(wrapper.get<HTMLInputElement>('[data-testid="quality-move-group-21"]').element.checked).toBe(true)
     await wrapper.get('[data-testid="quality-preset-name"]').setValue(saved.name)
     await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
     expect(createQualityPreset).toHaveBeenCalledWith(expect.objectContaining({ name: saved.name, max_results: 145, enabled: false, cron_expression: source.cron_expression, pelican_config: expect.objectContaining({ model_ids: ['model-a', 'model-b'], question_kind: 'candy', parallel_count: 3, reasoning_effort: 'xhigh',
       quality: expect.objectContaining({ action, remove_group_ids: saved.pelican_config.quality!.remove_group_ids, auto_restore: action !== 'observe_only', trigger_on_upstream_5xx: true, judge: { kind: 'jev', group_id: 0, model_id: '', prompt: 'Compare values' } }) }) }))
     const stored = vi.mocked(createQualityPreset).mock.calls[0][0]
+    if (action === 'move_groups') expect(stored.pelican_config.quality!.move_group_ids).toEqual([21])
     expect(JSON.stringify(stored)).not.toContain('old-worker'); expect(JSON.stringify(stored)).not.toContain('quality_model_actions'); expect(JSON.stringify(stored)).not.toContain('synthetic-no-copy')
     expect(scheduledTests.create).not.toHaveBeenCalled(); expect(scheduledTests.update).not.toHaveBeenCalled(); expect(runQualityPlan).not.toHaveBeenCalled()
     if (mode === 'new') { vm.newPlan(); await flushPromises(); vm.selectedAccounts = [4]; vm.accountScope = 'manual' }
@@ -1050,6 +1108,10 @@ describe('quality operations', () => {
       pelican_config: expect.objectContaining({ model_ids: ['model-a', 'model-b'], parallel_count: 3, quality: expect.objectContaining({ action, remove_group_ids: saved.pelican_config.quality!.remove_group_ids, auto_restore: action !== 'observe_only', trigger_on_upstream_5xx: true }) }) })
     if (mode === 'new') expect(scheduledTests.create).toHaveBeenCalledWith(expected)
     else { expect(scheduledTests.update).toHaveBeenCalledWith(1, expected); if (mode === 'bulk') expect(scheduledTests.update).toHaveBeenCalledWith(2, expected) }
+    if (action === 'move_groups') {
+      const request = mode === 'new' ? vi.mocked(scheduledTests.create).mock.calls[0][0] : vi.mocked(scheduledTests.update).mock.calls[0][1]
+      expect(request.pelican_config!.quality!.move_group_ids).toEqual([21])
+    }
     expect(JSON.stringify(source)).toBe(original); expect(runQualityPlan).not.toHaveBeenCalled(); wrapper.unmount()
   })
 

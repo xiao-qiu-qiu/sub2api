@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildQualityRulePatch, copyQualityRuleConfig, qualityBPSError, qualityBPSForm, qualityBPSPayload, qualityJudgeConfigured, qualityRuleFieldValue, type QualityRuleDraft } from '../qualityRulePatch'
-import type { QualityBPSPolicy, ScheduledTestPlan } from '@/types'
+import { buildQualityRulePatch, copyQualityRuleConfig, qualityActionPayload, qualityBPSError, qualityBPSForm, qualityBPSPayload, qualityGroupTargets, qualityJudgeConfigured, qualityRuleFieldValue, qualityUsesGroups, type QualityRuleDraft } from '../qualityRulePatch'
+import type { QualityBPSPolicy, QualityPolicy, ScheduledTestPlan } from '@/types'
 
 const draft = (): QualityRuleDraft => ({
   model_id: 'new-model', cron_expression: '0 * * * *', enabled: false,
@@ -277,6 +277,143 @@ describe('composed model isolation', () => {
   })
 })
 
+
+describe('move group quality rules', () => {
+  it('builds an independent single-rule payload and clears settings from other actions', () => {
+    const quality: QualityPolicy = { ...draft().pelican_config.quality, action: 'move_groups', move_group_ids: [1, 101],
+      remove_models: ['old-model'], recovery_concurrency: 2, bps: bps() }
+    const original = JSON.stringify(quality)
+    const payload = qualityActionPayload(quality)
+    expect(payload).toMatchObject({ action: 'move_groups', move_group_ids: [1, 101], remove_group_ids: [], auto_restore: true })
+    for (const field of ['remove_models', 'recovery_concurrency', 'bps']) expect(payload).not.toHaveProperty(field)
+    payload.move_group_ids!.push(102)
+    expect(JSON.stringify(quality)).toBe(original)
+  })
+
+  it('accepts up to 100 target groups without limiting the IDs to 100', () => {
+    const targets = Array.from({ length: 100 }, (_, index) => index + 1001)
+    const quality: QualityPolicy = { ...draft().pelican_config.quality, action: 'move_groups', move_group_ids: targets }
+    expect(qualityActionPayload(quality).move_group_ids).toEqual(targets)
+    expect(() => qualityActionPayload({ ...quality, move_group_ids: [...targets, 2001] })).toThrow('qualityOps.invalidMoveGroups')
+  })
+
+  it.each([undefined, null, []])('requires targets instead of falling back to removal groups (%j)', (targets) => {
+    const quality: QualityPolicy = { ...draft().pelican_config.quality, action: 'move_groups' }
+    Object.assign(quality, { move_group_ids: targets })
+    expect(() => qualityActionPayload(quality)).toThrow('qualityOps.selectMoveGroups')
+  })
+
+  it.each([
+    { name: 'duplicates', targets: [21, 21] },
+    { name: 'zero', targets: [0] },
+    { name: 'negative IDs', targets: [-1] },
+    { name: 'fractions', targets: [1.5] },
+    { name: 'NaN', targets: [NaN] },
+    { name: 'infinity', targets: [Infinity] },
+    { name: 'unsafe integers', targets: [Number.MAX_SAFE_INTEGER + 1] },
+    { name: 'string IDs', targets: ['21'] },
+    { name: 'sparse arrays', targets: new Array<number>(2) },
+    { name: 'non-array targets', targets: '21' },
+  ])('rejects $name without silently correcting the targets', ({ targets }) => {
+    const quality: QualityPolicy = { ...draft().pelican_config.quality, action: 'move_groups' }
+    Object.assign(quality, { move_group_ids: targets })
+    expect(() => qualityActionPayload(quality)).toThrow('qualityOps.invalidMoveGroups')
+  })
+
+  it('copies reusable move targets for account rules and presets without sharing the array or runtime state', () => {
+    const source = draft().pelican_config
+    source.quality.action = 'move_groups'; source.quality.move_group_ids = [101, 202]
+    Object.assign(source.quality, { original_groups: [21], added_target_groups: [101], owner_plan_id: 7 })
+    const copy = copyQualityRuleConfig(source)
+    expect(copy.quality).toMatchObject({ action: 'move_groups', move_group_ids: [101, 202], remove_group_ids: [], auto_restore: true })
+    for (const field of ['original_groups', 'added_target_groups', 'owner_plan_id']) expect(copy.quality).not.toHaveProperty(field)
+    copy.quality.move_group_ids!.push(303)
+    expect(source.quality.move_group_ids).toEqual([101, 202])
+  })
+
+  it.each<QualityPolicy['action']>(['remove_groups', 'isolate_models', 'remove_models', 'disable_scheduling', 'enable_bps', 'observe_only'])(
+    'clears stale move targets when using %s in copies, single payloads and bulk action patches', (action) => {
+      const source = draft()
+      Object.assign(source.pelican_config.quality, { action, move_group_ids: [101], remove_models: ['old-model'], bps: bps() })
+      const own = probePlan()
+      own.pelican_config!.quality!.action = 'move_groups'; own.pelican_config!.quality!.move_group_ids = [202]
+      if (action === 'isolate_models') own.pelican_config!.question_kind = 'candy'
+      expect(copyQualityRuleConfig(source.pelican_config).quality).not.toHaveProperty('move_group_ids')
+      expect(qualityActionPayload(source.pelican_config.quality)).not.toHaveProperty('move_group_ids')
+      expect(buildQualityRulePatch(own, source, ['action']).pelican_config!.quality).not.toHaveProperty('move_group_ids')
+      expect(source.pelican_config.quality.move_group_ids).toEqual([101])
+    },
+  )
+
+  it('applies shared move targets to each bulk rule while preserving its own question, judge and restoration policy', () => {
+    const first = plan(), second = plan(), source = draft()
+    second.pelican_config!.quality!.judge!.model_id = 'second-judge'
+    second.pelican_config!.quality!.expected_answer = 'second-answer'
+    second.pelican_config!.quality!.auto_restore = true
+    source.pelican_config.quality.action = 'move_groups'; source.pelican_config.quality.move_group_ids = [101, 202]
+    const before = JSON.stringify([first, second, source])
+    for (const own of [first, second]) {
+      const updated = buildQualityRulePatch(own, source, ['action']).pelican_config!
+      expect(updated).toEqual({ ...own.pelican_config, quality: { ...own.pelican_config!.quality!,
+        action: 'move_groups', remove_group_ids: [], move_group_ids: [101, 202] } })
+      updated.quality!.move_group_ids!.push(303)
+    }
+    expect(JSON.stringify([first, second, source])).toBe(before)
+  })
+
+  it('validates move targets during bulk action updates', () => {
+    const source = draft()
+    source.pelican_config.quality.action = 'move_groups'
+    expect(() => buildQualityRulePatch(plan(), source, ['action'])).toThrow('qualityOps.selectMoveGroups')
+    source.pelican_config.quality.move_group_ids = [21, 21]
+    expect(() => buildQualityRulePatch(plan(), source, ['action'])).toThrow('qualityOps.invalidMoveGroups')
+    source.pelican_config.quality.move_group_ids = [21]
+    expect(buildQualityRulePatch(plan(), source, ['action', 'restore']).pelican_config!.quality).toMatchObject({ auto_restore: true, move_group_ids: [21] })
+  })
+
+  it('preserves each rule’s own move targets when only restoration is selected', () => {
+    for (const targets of [[101], [202, 303]]) {
+      const own = plan()
+      Object.assign(own.pelican_config!.quality!, { action: 'move_groups', remove_group_ids: [], move_group_ids: targets })
+      expect(buildQualityRulePatch(own, draft(), ['restore']).pelican_config!.quality).toEqual({ ...own.pelican_config!.quality!, auto_restore: true })
+    }
+  })
+
+  it('clears stale targets on partial configuration updates and when switching to BPS observation', () => {
+    const own = plan()
+    own.pelican_config!.quality!.move_group_ids = [101]
+    expect(buildQualityRulePatch(own, draft(), ['restore']).pelican_config!.quality).not.toHaveProperty('move_group_ids')
+    own.pelican_config!.quality!.action = 'move_groups'
+    const source = draft(); source.pelican_config.test_channel = 'bps'
+    const updated = buildQualityRulePatch(own, source, ['test', 'restore']).pelican_config!.quality!
+    expect(updated).toMatchObject({ action: 'observe_only', auto_restore: false, remove_group_ids: [] })
+    expect(updated).not.toHaveProperty('move_group_ids')
+    expect(own.pelican_config!.quality!.move_group_ids).toEqual([101])
+  })
+
+  it('includes active move targets in action diffs without treating them as restoration or test changes', () => {
+    const first = plan(), second = plan()
+    Object.assign(first.pelican_config!.quality!, { action: 'move_groups', remove_group_ids: [], move_group_ids: [101] })
+    Object.assign(second.pelican_config!.quality!, { action: 'move_groups', remove_group_ids: [], move_group_ids: [202] })
+    expect(qualityRuleFieldValue(first, 'action')).not.toEqual(qualityRuleFieldValue(second, 'action'))
+    for (const field of ['restore', 'test'] as const) expect(qualityRuleFieldValue(first, field)).toEqual(qualityRuleFieldValue(second, field))
+    first.pelican_config!.quality!.action = 'observe_only'; second.pelican_config!.quality!.action = 'observe_only'
+    expect(qualityRuleFieldValue(first, 'action')).toEqual(qualityRuleFieldValue(second, 'action'))
+  })
+
+  it('provides display targets while preserving the removal-only meaning of qualityUsesGroups', () => {
+    const quality = draft().pelican_config.quality
+    expect(qualityGroupTargets()).toEqual([])
+    for (const action of ['remove_groups', 'isolate_models'] as const) {
+      expect(qualityUsesGroups(action)).toBe(true)
+      expect(qualityGroupTargets({ ...quality, action, move_group_ids: [101] })).toEqual([21])
+    }
+    expect(qualityUsesGroups('move_groups')).toBe(false)
+    expect(qualityGroupTargets({ ...quality, action: 'move_groups', move_group_ids: [101, 202] })).toEqual([101, 202])
+    expect(qualityGroupTargets({ ...quality, action: 'move_groups' })).toEqual([])
+    expect(qualityGroupTargets({ ...quality, action: 'observe_only', move_group_ids: [101] })).toEqual([])
+  })
+})
 
 describe('complete template selected fields', () => {
   it('imports retention and 5xx trigger only with their explicit bulk checkboxes', () => {

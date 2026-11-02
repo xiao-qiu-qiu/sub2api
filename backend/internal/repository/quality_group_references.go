@@ -8,19 +8,23 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-// Group removal affects only the target account's existing memberships. A
-// reusable preset can legitimately name a group a future target has not joined;
-// it may not name deleted/nonexistent groups or an observer's ungranted group.
+// Group actions and reusable presets may name groups the account has not joined.
+// They may not name deleted/nonexistent groups or an observer's ungranted group.
 func validateQualityGroupReferences(ctx context.Context, q planRowQuerier, cfg *service.PelicanTestConfig) error {
 	if cfg == nil || cfg.Quality == nil {
 		return nil
 	}
 	policy := cfg.Quality
+	var groupIDs []int64
+	switch policy.Action {
+	case "remove_groups", service.QualityActionIsolateModels:
+		groupIDs = policy.RemoveGroupIDs
+	case service.QualityActionMoveGroups:
+		groupIDs = policy.MoveGroupIDs
+	}
 	ids := map[int64]bool{}
-	if policy.Action == "remove_groups" || policy.Action == service.QualityActionIsolateModels {
-		for _, id := range policy.RemoveGroupIDs {
-			ids[id] = true
-		}
+	for _, id := range groupIDs {
+		ids[id] = true
 	}
 	ordered := []int64{}
 	for id := range ids {

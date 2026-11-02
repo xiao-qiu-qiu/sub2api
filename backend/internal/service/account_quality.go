@@ -8,6 +8,7 @@ import (
 )
 
 const QualityActionObserveOnly = "observe_only"
+const QualityActionMoveGroups = "move_groups"
 const QualityActionRemoveModel = "remove_models"
 const QualityActionIsolateModels = "isolate_models"
 const QualityModelIsolationKey = "quality_model_isolation"
@@ -52,6 +53,7 @@ type QualityPolicy struct {
 	ExpectedAnswer       string                      `json:"expected_answer"`
 	Action               string                      `json:"action"`
 	RemoveGroupIDs       []int64                     `json:"remove_group_ids"`
+	MoveGroupIDs         []int64                     `json:"move_group_ids,omitempty"`
 	RemoveModels         []string                    `json:"remove_models,omitempty"`
 	// RecoveryConcurrency is the temporary OAuth concurrency cap applied when
 	// this rule quarantines an account. Zero keeps the safe default of five.
@@ -64,6 +66,9 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	q := plan.PelicanConfig.Quality
 	if q == nil {
 		return nil
+	}
+	if q.Action != QualityActionMoveGroups {
+		q.MoveGroupIDs = nil
 	}
 	if q.Action == QualityActionOpenAITwoFAAdmission {
 		if q.Admission == nil || !q.Admission.Enabled || q.Admission.Validate() != nil || plan.PelicanConfig.QuestionKind != "candy" || plan.PelicanConfig.ParallelCount != 1 || plan.ModelID != q.Admission.ModelID || plan.PelicanConfig.ReasoningEffort != q.Admission.ReasoningEffort || plan.PelicanConfig.TestChannel == "bps" || q.AutoRestore || plan.AutoRecover || plan.PelicanConfig.Prompt != CandyPrompt {
@@ -103,8 +108,21 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	} else if len(q.ExpectedAnswer) > 4000 {
 		return fmt.Errorf("expected answer must be 1–4000 bytes")
 	}
-	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels {
+	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionMoveGroups && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels {
 		return fmt.Errorf("invalid quality action")
+	}
+	if q.Action == QualityActionMoveGroups {
+		if len(q.MoveGroupIDs) == 0 || len(q.MoveGroupIDs) > 100 {
+			return fmt.Errorf("select 1-100 groups to move to")
+		}
+		seen := map[int64]bool{}
+		for _, id := range q.MoveGroupIDs {
+			if id <= 0 || seen[id] {
+				return fmt.Errorf("invalid or duplicate move target group ID")
+			}
+			seen[id] = true
+		}
+		q.RemoveGroupIDs = nil
 	}
 	if q.Action == QualityActionObserveOnly {
 		q.AutoRestore = false

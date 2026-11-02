@@ -47,6 +47,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
       expected_answer: source.question_kind === 'random_reasoning' ? '' : policy.expected_answer,
       action,
       remove_group_ids: qualityUsesGroups(action) ? [...(policy.remove_group_ids || [])] : [],
+      ...(action === 'move_groups' ? { move_group_ids: [...(policy.move_group_ids || [])] } : {}),
       remove_models: action === 'remove_models' ? [...(policy.remove_models || [])] : undefined,
       recovery_concurrency: action === 'remove_models' ? policy.recovery_concurrency : undefined,
       auto_restore: action === 'observe_only' ? false : policy.auto_restore ?? false,
@@ -94,6 +95,11 @@ export function qualityUsesGroups(action?: QualityPolicy['action']) {
   return action === 'remove_groups' || action === 'isolate_models'
 }
 
+export function qualityGroupTargets(policy?: QualityPolicy): number[] {
+  if (policy?.action === 'move_groups') return policy.move_group_ids || []
+  return qualityUsesGroups(policy?.action) ? policy?.remove_group_ids || [] : []
+}
+
 export function qualityUsesModelResults(action?: QualityPolicy['action']) {
   return action === 'remove_models' || action === 'isolate_models'
 }
@@ -101,8 +107,15 @@ export function qualityUsesModelResults(action?: QualityPolicy['action']) {
 // Used by single-account creation, templates and bulk editing. Action cleanup
 // and validation belong here so all entry points preserve the same semantics.
 export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
-  const next = { ...policy, remove_group_ids: qualityUsesGroups(policy.action) ? [...policy.remove_group_ids] : [] }
+  const next: QualityPolicy = { ...policy, remove_group_ids: qualityUsesGroups(policy.action) ? [...policy.remove_group_ids] : [] }
   if (qualityUsesGroups(next.action) && !next.remove_group_ids.length) throw new Error('qualityOps.selectGroups')
+  if (next.action === 'move_groups') {
+    const targets = policy.move_group_ids
+    if (targets == null || (Array.isArray(targets) && !targets.length)) throw new Error('qualityOps.selectMoveGroups')
+    if (!Array.isArray(targets) || targets.length > 100 || new Set(targets).size !== targets.length ||
+      [...targets].some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('qualityOps.invalidMoveGroups')
+    next.move_group_ids = [...targets]
+  } else delete next.move_group_ids
   if (next.action === 'remove_models') {
     next.remove_models = [...(policy.remove_models || [])]
     if (!next.remove_models.length) throw new Error('qualityOps.selectModels')
@@ -143,7 +156,7 @@ export function qualityRuleFieldValue(rule: Pick<ScheduledTestPlan, 'model_id' |
     case 'test': return [cfg?.question_kind, cfg?.test_channel || 'account', cfg?.prompt, cfg?.reasoning_effort, cfg?.parallel_count,
       q?.expected_answer, q?.judge?.kind || 'llm', q?.judge?.group_id, q?.judge?.model_id, q?.judge?.prompt]
     case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage]
-    case 'action': return [q?.action, q?.remove_group_ids || [], q?.remove_models || [], q?.recovery_concurrency,
+    case 'action': return [q?.action, q?.remove_group_ids || [], q?.action === 'move_groups' ? q.move_group_ids || [] : [], q?.remove_models || [], q?.recovery_concurrency,
       b ? [b.failure_threshold, b.usage_percent, b.require_all, b.all_models, b.models || [], b.omit_unsupported_tools,
         b.ignore_encrypted_content, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
         b.auto_move_on_403, b.target_group_id, b.session_proxy, b.proxy_source, b.cache_creation_as_input] : null]
@@ -205,13 +218,14 @@ export function buildQualityRulePatch(
   if (fields.includes('trigger')) config.quality.trigger_on_upstream_5xx = source.quality.trigger_on_upstream_5xx ?? false
   if (fields.includes('action')) {
     config.quality = qualityActionPayload({ ...config.quality,
-      action: source.quality.action, remove_group_ids: source.quality.remove_group_ids,
+      action: source.quality.action, remove_group_ids: source.quality.remove_group_ids, move_group_ids: source.quality.move_group_ids,
       remove_models: source.quality.remove_models, recovery_concurrency: source.quality.recovery_concurrency,
       bps: source.quality.bps })
   }
 
   // Explicit BPS observation includes giving up this rule's account actions.
   if (config.test_channel === 'bps') config.quality.action = 'observe_only'
+  if (config.quality.action !== 'move_groups') delete config.quality.move_group_ids
   if (config.quality.action === 'observe_only') {
     config.quality.remove_group_ids = []
     config.quality.auto_restore = false

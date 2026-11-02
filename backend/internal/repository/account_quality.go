@@ -59,6 +59,8 @@ type qualityState struct {
 	Action            string          `json:"action"`
 	AccountVersion    time.Time       `json:"account_version"`
 	Removed           []qualityGroup  `json:"removed"`
+	Added             []qualityGroup  `json:"added,omitempty"`
+	MoveGroupIDs      []int64         `json:"move_group_ids,omitempty"`
 	Remaining         json.RawMessage `json:"remaining"`
 	// 以下只用于「降智开 BPS」：连续降智轮数、开启后连续满血轮数，以及开启前 / 开启时 BPS 相关 Extra 的快照。
 	FailureStreak int                        `json:"failure_streak,omitempty"`
@@ -261,6 +263,16 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 			if changed {
 				action = "groups_removed"
 			}
+		case service.QualityActionMoveGroups:
+			var conflict bool
+			conflict, err = moveQualityGroups(ctx, tx, plan.AccountID, q.MoveGroupIDs, &state)
+			if conflict {
+				return "action_conflict", nil
+			}
+			changed = len(state.Removed) > 0 || len(state.Added) > 0
+			if changed {
+				action = "groups_moved"
+			}
 		}
 		if err != nil {
 			return "", err
@@ -302,6 +314,12 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 			if conflict {
 				return "restore_conflict", nil
 			}
+		case service.QualityActionMoveGroups:
+			var conflict bool
+			conflict, err = restoreQualityMovedGroups(ctx, tx, plan.AccountID, &state)
+			if conflict {
+				return "restore_conflict", nil
+			}
 		}
 		if err != nil {
 			return "", err
@@ -315,7 +333,8 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 		action = "passed"
 	}
 	if changed {
-		if err = qualityGroupsChanged(ctx, tx, plan.AccountID, groups, state.Removed); err != nil {
+		affected := append(append([]qualityGroup(nil), state.Removed...), state.Added...)
+		if err = qualityGroupsChanged(ctx, tx, plan.AccountID, groups, affected); err != nil {
 			return "", err
 		}
 	}

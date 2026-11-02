@@ -116,22 +116,27 @@ func TestQualityTemplateCompleteLegacyPresetDefaultsToObservation(t *testing.T) 
 	// source stays unchanged (fake repositories may return pointers they retain).
 	legacy := presetInput()
 	legacy.PelicanConfig.Quality.Action = ""
+	legacy.PelicanConfig.Quality.MoveGroupIDs = []int64{7}
 	legacy.ID = 42
 	repo.presets = append(repo.presets, legacy)
 	listed, err := svc.ListQualityPresets(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, QualityActionObserveOnly, listed[len(listed)-1].PelicanConfig.Quality.Action)
+	require.Nil(t, listed[len(listed)-1].PelicanConfig.Quality.MoveGroupIDs)
+	require.Equal(t, []int64{7}, legacy.PelicanConfig.Quality.MoveGroupIDs)
 	require.Empty(t, repo.templates)
 }
 
 func TestQualityTemplateCompletePolicyWhitelistAndDependencies(t *testing.T) {
-	for _, action := range []string{QualityActionObserveOnly, "remove_groups", QualityActionIsolateModels, "disable_scheduling", QualityActionRemoveModel, QualityActionEnableBPS} {
+	for _, action := range []string{QualityActionObserveOnly, "remove_groups", QualityActionMoveGroups, QualityActionIsolateModels, "disable_scheduling", QualityActionRemoveModel, QualityActionEnableBPS} {
 		t.Run(action, func(t *testing.T) {
 			input := presetInput()
 			q := input.PelicanConfig.Quality
 			q.Action = action
 			q.RemoveGroupIDs = []int64{21}
+			q.MoveGroupIDs = []int64{31, 32}
 			q.RemoveModels = []string{"test-model"}
+			q.BPS = &QualityBPSPolicy{FailureThreshold: 2, AllModels: true, PassThreshold: 3}
 			q.RecoveryConcurrency = 9
 			q.TriggerOnUpstream5xx = true
 			q.Judge = &QualityJudgeConfig{Kind: "jev", Prompt: "Grade", GroupID: 0}
@@ -157,6 +162,11 @@ func TestQualityTemplateCompletePolicyWhitelistAndDependencies(t *testing.T) {
 			} else {
 				require.Empty(t, cfg.Quality.RemoveGroupIDs)
 			}
+			if action == QualityActionMoveGroups {
+				require.Equal(t, []int64{31, 32}, cfg.Quality.MoveGroupIDs)
+			} else {
+				require.Nil(t, cfg.Quality.MoveGroupIDs)
+			}
 			if action != QualityActionRemoveModel {
 				require.Empty(t, cfg.Quality.RemoveModels)
 				require.Zero(t, cfg.Quality.RecoveryConcurrency)
@@ -164,8 +174,41 @@ func TestQualityTemplateCompletePolicyWhitelistAndDependencies(t *testing.T) {
 			if action == QualityActionEnableBPS {
 				require.Nil(t, cfg.Quality.Judge)
 			} else {
+				require.Nil(t, cfg.Quality.BPS)
 				require.Equal(t, "jev", cfg.Quality.Judge.Kind)
 			}
 		})
 	}
+}
+
+func TestQualityPresetMoveGroupsCopiesReusableTargets(t *testing.T) {
+	input := presetInput()
+	q := input.PelicanConfig.Quality
+	q.Action, q.MoveGroupIDs = QualityActionMoveGroups, []int64{7, 9}
+	q.RemoveGroupIDs, q.RemoveModels = []int64{0}, []string{"*"}
+	q.BPS = &QualityBPSPolicy{FailureThreshold: -1}
+	config, err := reusableQualityConfig(input.PelicanConfig)
+	require.NoError(t, err)
+	require.Equal(t, []int64{7, 9}, config.Quality.MoveGroupIDs)
+	require.Nil(t, config.Quality.RemoveGroupIDs)
+	require.Nil(t, config.Quality.RemoveModels)
+	require.Nil(t, config.Quality.BPS)
+	config.Quality.MoveGroupIDs[0] = 99
+	require.Equal(t, []int64{7, 9}, q.MoveGroupIDs)
+	require.Equal(t, []int64{0}, q.RemoveGroupIDs)
+	require.Equal(t, []string{"*"}, q.RemoveModels)
+	require.NotNil(t, q.BPS)
+
+	repo := newFakeTemplateRepo(newTemplatePlanRepo())
+	svc := ProvideScheduledTestService(nil, nil, repo, nil)
+	saved, err := svc.CreateQualityPreset(t.Context(), input)
+	require.NoError(t, err)
+	require.Equal(t, []int64{7, 9}, saved.PelicanConfig.Quality.MoveGroupIDs)
+	listed, err := svc.ListQualityPresets(t.Context())
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, []int64{7, 9}, listed[0].PelicanConfig.Quality.MoveGroupIDs)
+	listed[0].PelicanConfig.Quality.MoveGroupIDs[0] = 88
+	require.Equal(t, []int64{7, 9}, saved.PelicanConfig.Quality.MoveGroupIDs)
+	require.Equal(t, []int64{7, 9}, q.MoveGroupIDs)
 }
