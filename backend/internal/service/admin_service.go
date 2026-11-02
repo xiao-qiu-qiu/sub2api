@@ -655,7 +655,7 @@ type ProxyQualityCheckItem struct {
 	CFRay      string `json:"cf_ray,omitempty"`
 }
 
-// ProxyExitInfo represents proxy exit information from ip-api.com
+// ProxyExitInfo represents a probed exit IP with optional geolocation metadata.
 type ProxyExitInfo struct {
 	Timezone    string
 	IP          string

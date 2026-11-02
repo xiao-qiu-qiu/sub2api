@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -54,17 +55,17 @@ func NewProxyExitInfoProber(cfg *config.Config) service.ProxyExitInfoProber {
 
 const (
 	defaultProxyProbeTimeout          = 10 * time.Second
+	defaultProxyGeoLookupTimeout      = 3 * time.Second
 	defaultProxyProbeResponseMaxBytes = int64(1024 * 1024)
+	proxyGeoLookupBaseURL             = "https://ipwho.is/"
+	proxyGeoLookupQuery               = "?lang=zh-CN&fields=success,message,ip,city,region,country,country_code,timezone.id"
 )
 
 // probeURLs 按优先级排列的内置探测 URL 列表。
 // 某些 AI API 专用代理只允许访问特定域名，因此需要多个备选。
-var probeURLs = []struct {
-	url    string
-	parser string
-}{
-	{"http://ip-api.com/json/?lang=zh-CN", "ip-api"},
-	{"http://api64.ipify.org?format=json", "ipify"},
+var probeURLs = []configuredProbeTarget{
+	{proxyGeoLookupBaseURL + proxyGeoLookupQuery, "ipwhois"},
+	{"https://api64.ipify.org?format=json", "ipify"},
 }
 
 type configuredProbeTarget struct {
@@ -92,21 +93,20 @@ func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*s
 		return nil, 0, fmt.Errorf("failed to create proxy client: %w", err)
 	}
 
-	var lastErr error
+	targets := probeURLs
 	if len(s.configuredProbeURLs) > 0 {
-		for _, probe := range s.configuredProbeURLs {
-			exitInfo, latencyMs, err := s.probeWithURL(ctx, client, probe.url, probe.parser)
-			if err == nil {
-				return exitInfo, latencyMs, nil
-			}
-			lastErr = err
-		}
-		return nil, 0, fmt.Errorf("all probe URLs failed, last error: %w", lastErr)
+		targets = s.configuredProbeURLs
 	}
 
-	for _, probe := range probeURLs {
+	var lastErr error
+	geoAttempted := false
+	for _, probe := range targets {
+		geoAttempted = geoAttempted || probe.parser == "ipwhois"
 		exitInfo, latencyMs, err := s.probeWithURL(ctx, client, probe.url, probe.parser)
 		if err == nil {
+			if !geoAttempted && (exitInfo.City == "" || exitInfo.Region == "" || exitInfo.Country == "" || exitInfo.CountryCode == "" || exitInfo.Timezone == "") {
+				s.enrichExitInfo(ctx, client, exitInfo)
+			}
 			return exitInfo, latencyMs, nil
 		}
 		lastErr = err
@@ -116,6 +116,11 @@ func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*s
 }
 
 func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Client, url string, parser string) (*service.ProxyExitInfo, int64, error) {
+	if parser == "ipwhois" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultProxyGeoLookupTimeout)
+		defer cancel()
+	}
 	startTime := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -147,6 +152,8 @@ func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Clien
 	}
 
 	switch parser {
+	case "ipwhois":
+		return s.parseIPWhois(body, latencyMs)
 	case "ip-api":
 		return s.parseIPAPI(body, latencyMs)
 	case "ipify":
@@ -156,6 +163,69 @@ func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Clien
 	default:
 		return nil, latencyMs, fmt.Errorf("unknown parser: %s", parser)
 	}
+}
+
+// enrichExitInfo 经同一代理查询已探得的 IPv4/IPv6；归属失败不改变连通性和原始出口 IP。
+func (s *proxyProbeService) enrichExitInfo(ctx context.Context, client *http.Client, info *service.ProxyExitInfo) {
+	ip, err := netip.ParseAddr(info.IP)
+	if err != nil {
+		return
+	}
+	geo, _, err := s.probeWithURL(ctx, client, proxyGeoLookupBaseURL+ip.String()+proxyGeoLookupQuery, "ipwhois")
+	if err != nil {
+		return
+	}
+	geoIP, err := netip.ParseAddr(geo.IP)
+	if err != nil || geoIP.Unmap() != ip.Unmap() {
+		return
+	}
+	if info.City == "" {
+		info.City = geo.City
+	}
+	if info.Region == "" {
+		info.Region = geo.Region
+	}
+	if info.Country == "" {
+		info.Country = geo.Country
+	}
+	if info.CountryCode == "" {
+		info.CountryCode = geo.CountryCode
+	}
+	if info.Timezone == "" {
+		info.Timezone = geo.Timezone
+	}
+}
+
+func (s *proxyProbeService) parseIPWhois(body []byte, latencyMs int64) (*service.ProxyExitInfo, int64, error) {
+	var result struct {
+		Success     bool   `json:"success"`
+		Message     string `json:"message"`
+		IP          string `json:"ip"`
+		City        string `json:"city"`
+		Region      string `json:"region"`
+		Country     string `json:"country"`
+		CountryCode string `json:"country_code"`
+		Timezone    struct {
+			ID string `json:"id"`
+		} `json:"timezone"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, latencyMs, fmt.Errorf("failed to parse ipwhois response: %w", err)
+	}
+	if !result.Success {
+		return nil, latencyMs, fmt.Errorf("ipwhois request failed: %s", result.Message)
+	}
+	if _, err := netip.ParseAddr(result.IP); err != nil {
+		return nil, latencyMs, fmt.Errorf("ipwhois: invalid IP in response: %w", err)
+	}
+	return &service.ProxyExitInfo{
+		IP:          result.IP,
+		City:        result.City,
+		Region:      result.Region,
+		Country:     result.Country,
+		CountryCode: result.CountryCode,
+		Timezone:    result.Timezone.ID,
+	}, latencyMs, nil
 }
 
 func (s *proxyProbeService) parseIPAPI(body []byte, latencyMs int64) (*service.ProxyExitInfo, int64, error) {

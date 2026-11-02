@@ -126,6 +126,7 @@ describe('AccountTestModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
+    expect(wrapper.find('#account-test-inject-default-instructions').exists()).toBe(false)
     const promptInput = wrapper.find('textarea.textarea-stub')
     expect(promptInput.exists()).toBe(true)
     await promptInput.setValue('draw a tiny orange cat astronaut')
@@ -189,9 +190,95 @@ describe('AccountTestModal', () => {
     })
   })
 
-  it('OpenAI Compact 探测会携带 compact 测试模式', async () => {
+  it('OpenAI 常规文本测试默认发送 false，点击真实开关后发送 true 且开始测试不重置选择', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
+    global.fetch = vi.fn().mockImplementation(async () =>
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
+    const wrapper = mountModal({
+      id: 42, name: 'OpenAI OAuth', platform: 'openai', type: 'oauth', status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const toggle = wrapper.get('#account-test-inject-default-instructions[role="switch"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+    await start.trigger('click')
+    await flushPromises()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toMatchObject({
+      model_id: 'gpt-5.4', mode: 'default', inject_default_instructions: false
+    })
+
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    const retry = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.retry'))!
+    await retry.trigger('click')
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(JSON.parse((global.fetch as any).mock.calls[1][1].body)).toMatchObject({
+      model_id: 'gpt-5.4', mode: 'default', inject_default_instructions: true
+    })
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('OpenAI SIWC OAuth 测试隐藏内置提示词开关且不携带开关值', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
+    const wrapper = mountModal({
+      id: 42, name: 'OpenAI SIWC OAuth', platform: 'openai', type: 'oauth', status: 'active',
+      extra: { openai_siwc: true }
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    expect(wrapper.find('#account-test-inject-default-instructions').exists()).toBe(false)
+    const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+    await start.trigger('click')
+    await flushPromises()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const [, request] = (global.fetch as any).mock.calls[0]
+    const body = JSON.parse(request.body)
+    expect(body).toEqual({ model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default' })
+    expect(body).not.toHaveProperty('inject_default_instructions')
+    wrapper.unmount()
+  })
+
+  it('OpenAI 内置提示词开关在重新打开或更换账号后恢复关闭', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
+    const account = {
+      id: 42, name: 'OpenAI OAuth', platform: 'openai', type: 'oauth', status: 'active'
+    }
+    const wrapper = mountModal(account)
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await wrapper.get('#account-test-inject-default-instructions').trigger('click')
+    expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('true')
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('false')
+
+    await wrapper.get('#account-test-inject-default-instructions').trigger('click')
+    expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('true')
+    await wrapper.setProps({ account: { ...account, id: 43, name: 'Another OpenAI Account' } } as any)
+    await flushPromises()
+    expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('false')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { label: 'Compact', mode: 'compact', model: 'gpt-5.4', prompt: 'ciallo' },
+    { label: '图片', mode: 'default', model: 'gpt-image-1', prompt: 'draw a tiny orange cat astronaut' }
+  ])('OpenAI $label 测试隐藏内置提示词开关且不携带开关值', async ({ mode, model, prompt }) => {
     getAvailableModels.mockResolvedValue([
-      { id: 'gpt-5.4', display_name: 'GPT-5.4' }
+      { id: 'gpt-5.4', display_name: 'GPT-5.4' },
+      { id: 'gpt-image-1', display_name: 'GPT Image 1' }
     ])
     global.fetch = vi.fn().mockResolvedValue(
       createStreamResponse([
@@ -209,18 +296,25 @@ describe('AccountTestModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
-    ;(wrapper.vm as any).testMode = 'compact'
+    await wrapper.get('#account-test-inject-default-instructions[role="switch"]').trigger('click')
+    ;(wrapper.vm as any).selectedModelId = model
+    ;(wrapper.vm as any).testMode = mode
+    await flushPromises()
+    expect(wrapper.find('#account-test-inject-default-instructions').exists()).toBe(false)
+    if (model === 'gpt-image-1') {
+      await wrapper.get('textarea.textarea-stub').setValue(prompt)
+    }
     await (wrapper.vm as any).startTest()
     await flushPromises()
 
     expect(global.fetch).toHaveBeenCalledTimes(1)
     const [, request] = (global.fetch as any).mock.calls[0]
-    expect(JSON.parse(request.body)).toMatchObject({
-      model_id: 'gpt-5.4',
-      prompt: 'ciallo',
-      mode: 'compact'
+    expect(JSON.parse(request.body)).toEqual({
+      model_id: model,
+      prompt,
+      mode
     })
+    wrapper.unmount()
   })
 
   it.each([

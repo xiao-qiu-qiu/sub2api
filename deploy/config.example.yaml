@@ -238,10 +238,11 @@ security:
     # Allow skipping TLS verification for proxy probe (debug only)
     # 允许代理探测时跳过 TLS 证书验证（仅用于调试）
     insecure_skip_verify: false
-    # Optional ordered probe targets. Leave empty to use the built-in ip-api/ipify fallback.
-    # parser supports: ip-api, ipify, chatgpt-trace
-    # 可选的有序探测目标。留空时使用内置 ip-api/ipify 回退。
-    # parser 支持：ip-api、ipify、chatgpt-trace
+    # Optional ordered probe targets. Leave empty to use the built-in ipwhois/ipify fallback.
+    # parser supports: ipwhois, ip-api (legacy), ipify, chatgpt-trace
+    # 可选的有序探测目标。留空时使用内置 ipwhois/ipify 回退，均支持 IPv6。
+    # parser 支持：ipwhois、ip-api（兼容旧配置）、ipify、chatgpt-trace。
+    # CFtrace/ipify 成功后经同一代理补全归属，最多 3 秒，失败仍保留连通成功结果。
     urls: []
     # urls:
     #   - url: "https://chatgpt.com/cdn-cgi/trace"

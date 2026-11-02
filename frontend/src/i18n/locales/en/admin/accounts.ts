@@ -1975,6 +1975,8 @@ export default {
       textTestPromptLabel: 'Test prompt',
       textTestPromptPlaceholder: 'Defaults to ciallo. Enter a custom prompt.',
       textTestPromptHint: 'Click the prompt below to edit it. Leave empty to use ciallo.',
+      injectDefaultInstructions: 'Inject built-in instructions',
+      injectDefaultInstructionsHint: 'When enabled, appends built-in coding assistant instructions, which may affect the response style.',
       pelicanTest: {
         question: 'Question',
         candyQuestion: 'Candy logic test',

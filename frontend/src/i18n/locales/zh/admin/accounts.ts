@@ -2062,6 +2062,8 @@ export default {
       textTestPromptLabel: '测试提示词',
       textTestPromptPlaceholder: '默认 ciallo，可输入自定义内容',
       textTestPromptHint: '可点击下方提示词编辑；留空时使用 ciallo。',
+      injectDefaultInstructions: '注入内置提示词',
+      injectDefaultInstructionsHint: '开启后附加内置编程助手提示词，可能影响回复风格。',
       pelicanTest: {
         question: '题目',
         candyQuestion: '糖果逻辑测试',

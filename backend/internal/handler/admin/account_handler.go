@@ -1364,9 +1364,10 @@ func (h *AccountHandler) Delete(c *gin.Context) {
 
 // TestAccountRequest represents the request body for testing an account
 type TestAccountRequest struct {
-	ModelID string `json:"model_id"`
-	Prompt  string `json:"prompt"`
-	Mode    string `json:"mode"`
+	ModelID                   string `json:"model_id"`
+	Prompt                    string `json:"prompt"`
+	Mode                      string `json:"mode"`
+	InjectDefaultInstructions bool   `json:"inject_default_instructions"`
 	// Optional media for Grok (and future) real generation tests.
 	// ImageDataURL / AudioDataURL are data:<mime>;base64,... payloads.
 	ImageDataURL string `json:"image_data_url"`
@@ -1408,8 +1409,9 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	opts := service.AccountTestOptions{
-		ImageDataURL: req.ImageDataURL,
-		AudioDataURL: req.AudioDataURL,
+		ImageDataURL:              req.ImageDataURL,
+		AudioDataURL:              req.AudioDataURL,
+		InjectDefaultInstructions: req.InjectDefaultInstructions,
 	}
 
 	// Use AccountTestService to test the account with SSE streaming

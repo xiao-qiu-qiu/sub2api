@@ -866,7 +866,7 @@ type ProxyFallbackConfig struct {
 type ProxyProbeConfig struct {
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"` // 已禁用：禁止跳过 TLS 证书验证
 	// URLs 按优先级排列的自定义探测 URL 列表。
-	// 留空时使用内置默认列表（ip-api → ipify）。
+	// 留空时使用内置默认列表（ipwhois → ipify）；归属查询失败不否定其他探针的连通结果。
 	// 某些 AI API 专用代理只允许访问特定域名，配置多个备选可提高探测成功率。
 	URLs []ProbeURLConfig `mapstructure:"urls"`
 }
@@ -874,7 +874,7 @@ type ProxyProbeConfig struct {
 // ProbeURLConfig 描述一个探测端点及其响应解析方式。
 type ProbeURLConfig struct {
 	URL    string `mapstructure:"url"`
-	Parser string `mapstructure:"parser"` // "ip-api" / "ipify" / "chatgpt-trace"
+	Parser string `mapstructure:"parser"` // "ipwhois" / "ip-api" / "ipify" / "chatgpt-trace"
 }
 
 func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error) {
@@ -893,7 +893,7 @@ func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error)
 			return nil, fmt.Errorf("entry %d: parser is required", i)
 		}
 		switch parser {
-		case "ip-api", "ipify", "chatgpt-trace":
+		case "ipwhois", "ip-api", "ipify", "chatgpt-trace":
 		default:
 			return nil, fmt.Errorf("entry %d: unsupported parser %q", i, target.Parser)
 		}

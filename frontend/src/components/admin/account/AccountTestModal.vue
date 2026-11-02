@@ -93,6 +93,32 @@
         />
       </div>
 
+      <div
+        v-if="supportsDefaultInstructions"
+        class="flex items-center justify-between gap-4 rounded-xl border border-gray-200 px-3 py-2.5 dark:border-dark-500"
+      >
+        <div>
+          <label
+            id="account-test-inject-default-instructions-label"
+            for="account-test-inject-default-instructions"
+            class="text-sm font-medium text-gray-700 dark:text-gray-300"
+          >
+            {{ t('admin.accounts.injectDefaultInstructions') }}
+          </label>
+          <p id="account-test-inject-default-instructions-hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.injectDefaultInstructionsHint') }}
+          </p>
+        </div>
+        <Toggle
+          id="account-test-inject-default-instructions"
+          v-model="injectDefaultInstructions"
+          aria-labelledby="account-test-inject-default-instructions-label"
+          aria-describedby="account-test-inject-default-instructions-hint"
+          :disabled="status === 'connecting'"
+          class="disabled:cursor-not-allowed disabled:opacity-50"
+        />
+      </div>
+
       <div v-if="supportsPromptInput" class="space-y-1.5">
         <TextArea
           v-model="testPrompt"
@@ -412,6 +438,7 @@ import { consumeAccountTestStream } from '@/utils/accountTestStream'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import TextArea from '@/components/common/TextArea.vue'
+import Toggle from '@/components/common/Toggle.vue'
 import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildApiUrl } from '@/api/client'
@@ -455,6 +482,7 @@ const DEFAULT_TEXT_TEST_PROMPT = 'ciallo'
 const textTestPrompt = ref(DEFAULT_TEXT_TEST_PROMPT)
 const effectiveTextTestPrompt = computed(() => textTestPrompt.value.trim() || DEFAULT_TEXT_TEST_PROMPT)
 const showTextPromptEditor = ref(false)
+const injectDefaultInstructions = ref(false)
 const textPromptInput = ref<InstanceType<typeof TextArea> | null>(null)
 const loadingModels = ref(false)
 const modelLoadError = ref('')
@@ -563,6 +591,15 @@ const supportsPromptInput = computed(() => {
 const supportsTextTestPrompt = computed(
   () => !supportsImageTest.value && (!isGrokAccount.value || grokTestMode.value === 'text')
 )
+
+const supportsDefaultInstructions = computed(() => {
+  if (!isOpenAIAccount.value || testMode.value !== 'default' || !supportsTextTestPrompt.value) return false
+  const extra = props.account?.extra
+  if (extra?.openai_excel_bps === true || extra?.openai_prism_browser === true || extra?.openai_siwc === true) return false
+  if (props.account?.type !== 'apikey') return true
+  if (extra?.openai_responses_mode === 'force_chat_completions') return false
+  return extra?.openai_responses_mode === 'force_responses' || extra?.openai_responses_supported !== false
+})
 
 const toggleTextPromptEditor = async () => {
   showTextPromptEditor.value = !showTextPromptEditor.value
@@ -808,6 +845,7 @@ watch(
       testPrompt.value = ''
       textTestPrompt.value = DEFAULT_TEXT_TEST_PROMPT
       showTextPromptEditor.value = false
+      injectDefaultInstructions.value = false
       testMode.value = 'default'
       grokTestMode.value = 'text'
       resetState()
@@ -937,6 +975,7 @@ const startTest = async () => {
       model_id: string
       prompt: string
       mode?: string
+      inject_default_instructions?: boolean
       image_data_url?: string
       audio_data_url?: string
     } = {
@@ -947,6 +986,9 @@ const startTest = async () => {
     }
     if (isOpenAIAccount.value) {
       requestBody.mode = testMode.value
+    }
+    if (supportsDefaultInstructions.value) {
+      requestBody.inject_default_instructions = injectDefaultInstructions.value
     }
     if (isGrokAccount.value) {
       // Always send explicit Grok mode. search/tts/stt/realtime are standalone
