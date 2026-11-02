@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
@@ -19,16 +20,21 @@ var ErrAccountRotationUnavailable = errors.New("account is draining or resting")
 type AccountRotationPolicy struct {
 	Mode                                                        string
 	WorkSeconds, RestMinSeconds, RestMaxSeconds, StaggerPercent int
+	EarlyRestEnabled                                            bool
 	Revision                                                    string
 }
 
 type AccountRotationState struct {
-	Phase       string `json:"phase"`
-	StartedAt   int64  `json:"started_at"`
-	DrainAt     int64  `json:"drain_at"`
-	RestUntil   int64  `json:"rest_until"`
-	IdleSince   int64  `json:"idle_since"`
-	RestSeconds int    `json:"rest_seconds"`
+	Phase           string `json:"phase"`
+	StartedAt       int64  `json:"started_at"`
+	DrainAt         int64  `json:"drain_at"`
+	RestUntil       int64  `json:"rest_until"`
+	IdleSince       int64  `json:"idle_since"`
+	RestSeconds     int    `json:"rest_seconds"`
+	Reason          string `json:"reason,omitempty"`
+	Hold            bool   `json:"hold"`
+	WaitingCount    int    `json:"waiting_count"`
+	EarlyEligibleAt int64  `json:"early_eligible_at,omitempty"`
 }
 
 type AccountRotationCache interface {
@@ -37,12 +43,50 @@ type AccountRotationCache interface {
 	RefreshAccountRotationSlot(context.Context, int64, string) error
 }
 
+// Hold support is optional so other concurrency authorities can keep serving
+// normally when automatic rotation is disabled.
+type AccountRotationHoldCache interface {
+	AccountRotationCache
+	SetAccountRotationHold(context.Context, int64, int, AccountRotationPolicy) (*AccountRotationState, error)
+	CancelAccountRotationHold(context.Context, int64, AccountRotationPolicy) (*AccountRotationState, error)
+	RefreshAccountRotationWaiter(context.Context, int64, string) error
+	RemoveAccountRotationWaiter(context.Context, int64, string) error
+	AcquireAccountSlotWithRotationState(context.Context, int64, int, string, AccountRotationPolicy, bool, string) (bool, *AccountRotationState, error)
+}
+
+var ErrAccountRotationUnsupported = infraerrors.BadRequest("ACCOUNT_ROTATION_UNSUPPORTED", "account rest requires Redis concurrency authority")
+
 type accountRotationSettingsProvider interface {
 	GetAccountRotationSettings(context.Context) (*AccountRotationSettings, error)
 }
 
 type accountRotationStickyKey struct{}
 type accountRotationTrackingKey struct{}
+type accountRotationWaitContextKey struct{}
+
+// Ordinary capacity waits keep their own deadline. Only a confirmed HOLD may
+// wait longer, and it must still stop when the original request is canceled.
+func WithAccountRotationWaitContext(queueCtx, requestCtx context.Context) context.Context {
+	return context.WithValue(queueCtx, accountRotationWaitContextKey{}, requestCtx)
+}
+
+type accountRotationHoldContext struct {
+	context.Context
+	request context.Context
+}
+
+func (c accountRotationHoldContext) Deadline() (time.Time, bool) { return c.request.Deadline() }
+func (c accountRotationHoldContext) Done() <-chan struct{}       { return c.request.Done() }
+func (c accountRotationHoldContext) Err() error                  { return c.request.Err() }
+
+func accountRotationHoldingContext(ctx context.Context) context.Context {
+	if request, ok := ctx.Value(accountRotationWaitContextKey{}).(context.Context); ok {
+		// Preserve scheduler proof and tracing values, while removing only the
+		// ordinary queue's deadline/cancellation. The request remains the owner.
+		return accountRotationHoldContext{Context: context.WithoutCancel(ctx), request: request}
+	}
+	return ctx
+}
 
 func (s *ConcurrencyService) AccountRotationContext(ctx context.Context) context.Context {
 	policy, err := s.accountRotationPolicy(ctx)
@@ -139,7 +183,11 @@ func (s *ConcurrencyService) accountRotationPolicy(ctx context.Context) (*Accoun
 	if err != nil {
 		return nil, err
 	}
-	if settings == nil || !settings.Enabled {
+	if settings == nil {
+		return nil, nil
+	}
+	_, holdSupported := s.cache.(AccountRotationHoldCache)
+	if !settings.Enabled && !holdSupported {
 		return nil, nil
 	}
 	if _, ok := s.cache.(AccountRotationCache); !ok {
@@ -149,6 +197,12 @@ func (s *ConcurrencyService) accountRotationPolicy(ctx context.Context) (*Accoun
 		Mode: settings.Mode, WorkSeconds: settings.WorkMinutes * 60,
 		RestMinSeconds: settings.RestMinMinutes * 60, RestMaxSeconds: settings.RestMaxMinutes * 60,
 		StaggerPercent: settings.StaggerPercent, Revision: settings.Revision,
+		EarlyRestEnabled: settings.Enabled && settings.EarlyRestEnabled,
+	}
+	if !settings.Enabled {
+		// Keep real requests visible for a manual rest, including unlimited
+		// accounts, without starting an automatic work window.
+		policy.WorkSeconds = 0
 	}
 	if policy.Revision == "" {
 		policy.Revision = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%+v", *policy))))
@@ -157,7 +211,9 @@ func (s *ConcurrencyService) accountRotationPolicy(ctx context.Context) (*Accoun
 }
 
 func rotationStateAllows(state *AccountRotationState, mode string, sticky bool) bool {
-	if state == nil {
+	if state == nil || state.Hold {
+		// Hold accounts remain selectable. Their acquisition waits on the same
+		// account rather than sending the connection to a fallback account.
 		return true
 	}
 	switch state.Phase {
@@ -238,7 +294,52 @@ func (s *ConcurrencyService) GetAccountRotationStates(ctx context.Context, ids [
 	if policy == nil {
 		return map[int64]*AccountRotationState{}, nil
 	}
-	return s.accountRotationStates(ctx, ids, *policy)
+	states, err := s.accountRotationStates(ctx, ids, *policy)
+	if err == nil && policy.WorkSeconds == 0 {
+		for id, state := range states {
+			if state == nil || (!state.Hold && state.WaitingCount == 0) {
+				delete(states, id)
+			}
+		}
+	}
+	return states, err
+}
+
+func (s *ConcurrencyService) StartAccountManualRest(ctx context.Context, accountID int64, minutes int) (*AccountRotationState, error) {
+	if accountID <= 0 || minutes < 1 || minutes > 120 {
+		return nil, infraerrors.BadRequest("INVALID_ACCOUNT_REST", "rest minutes must be between 1 and 120")
+	}
+	cache, policy, err := s.accountRotationHoldPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cache.SetAccountRotationHold(ctx, accountID, minutes*60, *policy)
+}
+
+func (s *ConcurrencyService) CancelAccountManualRest(ctx context.Context, accountID int64) (*AccountRotationState, error) {
+	cache, policy, err := s.accountRotationHoldPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cache.CancelAccountRotationHold(ctx, accountID, *policy)
+}
+
+func (s *ConcurrencyService) accountRotationHoldPolicy(ctx context.Context) (AccountRotationHoldCache, *AccountRotationPolicy, error) {
+	if s == nil {
+		return nil, nil, ErrAccountRotationUnsupported
+	}
+	cache, ok := s.cache.(AccountRotationHoldCache)
+	if !ok {
+		return nil, nil, ErrAccountRotationUnsupported
+	}
+	policy, err := s.accountRotationPolicy(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if policy == nil {
+		return nil, nil, ErrAccountRotationUnsupported
+	}
+	return cache, policy, nil
 }
 
 type accountRotationPool struct {
@@ -277,14 +378,63 @@ func (s *ConcurrencyService) acquireAccountRotationSlot(ctx context.Context, acc
 		return nil, err
 	}
 	requestID := generateRequestID()
-	acquired, err := cache.AcquireAccountSlotWithRotation(ctx, accountID, maxConcurrency, requestID, policy, AccountRotationSticky(ctx, accountID), pool)
-	if err != nil {
-		return nil, err
-	}
-	if !acquired {
-		state, err := cache.CheckAccountRotation(ctx, accountID, policy)
+	waiting := false
+	holdCache, supportsHold := cache.(AccountRotationHoldCache)
+	defer func() {
+		if waiting {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := holdCache.RemoveAccountRotationWaiter(cleanupCtx, accountID, requestID); err != nil {
+				logger.LegacyPrintf("service.concurrency", "account rest waiter cleanup failed for %d: %v", accountID, err)
+			}
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var acquired bool
+		var state *AccountRotationState
+		if supportsHold {
+			acquired, state, err = holdCache.AcquireAccountSlotWithRotationState(ctx, accountID, maxConcurrency, requestID, policy, AccountRotationSticky(ctx, accountID), pool)
+		} else {
+			acquired, err = cache.AcquireAccountSlotWithRotation(ctx, accountID, maxConcurrency, requestID, policy, AccountRotationSticky(ctx, accountID), pool)
+			if err == nil && !acquired {
+				state, err = cache.CheckAccountRotation(ctx, accountID, policy)
+			}
+		}
 		if err != nil {
 			return nil, err
+		}
+		if acquired {
+			break
+		}
+		if supportsHold && ((state != nil && state.Hold) || waiting) {
+			if !waiting {
+				ctx = accountRotationHoldingContext(ctx)
+			}
+			// Waiters are leases of their own. They never occupy a real account
+			// slot, keep a work window alive, or move the rest deadline.
+			waiting = true
+			if err := holdCache.RefreshAccountRotationWaiter(ctx, accountID, requestID); err != nil {
+				return nil, err
+			}
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+			// Do not restore stale settings while a request waits for minutes.
+			next, err := s.accountRotationPolicy(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if next != nil {
+				policy = *next
+			}
+			continue
 		}
 		if !rotationStateAllows(state, policy.Mode, AccountRotationSticky(ctx, accountID)) {
 			return nil, ErrAccountRotationUnavailable

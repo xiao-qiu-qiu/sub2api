@@ -1458,6 +1458,9 @@ export async function getOpenAIRequestTimezones(): Promise<{ default: string; ti
 }
 
 export const accountsAPI = {
+  startManualRest,
+  cancelManualRest,
+  getAccountRestState,
   getOpenAIRequestTimezones,
   list,
   listWithEtag,
@@ -1540,6 +1543,21 @@ export const accountsAPI = {
 }
 
 export default accountsAPI
+
+export async function startManualRest(id: number, minutes = 1): Promise<{ account_rotation: NonNullable<Account['account_rotation']> }> {
+  const { data } = await apiClient.post(`/admin/accounts/${id}/rotation/rest`, { minutes })
+  return data
+}
+
+export async function cancelManualRest(id: number): Promise<{ account_rotation: NonNullable<Account['account_rotation']> }> {
+  const { data } = await apiClient.delete(`/admin/accounts/${id}/rotation/rest`)
+  return data
+}
+
+export async function getAccountRestState(id: number, signal?: AbortSignal): Promise<{ account_rotation: Account['account_rotation'] }> {
+  const { data } = await apiClient.get(`/admin/accounts/${id}/rotation/rest`, { signal })
+  return data
+}
 
 export async function getManagementCapabilities(): Promise<{ web_search_enabled: boolean; account_quota_notify_enabled: boolean; concurrency_upgrade_enabled?: boolean }> {
   const { data } = await apiClient.get('/admin/accounts/management-capabilities')

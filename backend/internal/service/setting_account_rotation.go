@@ -27,12 +27,13 @@ const (
 // existing sticky sessions until concurrency reaches zero. Rest begins at zero
 // concurrency and lasts a random duration in [RestMinMinutes, RestMaxMinutes].
 type AccountRotationSettings struct {
-	Enabled        bool   `json:"enabled"`
-	Mode           string `json:"mode"`
-	WorkMinutes    int    `json:"work_minutes"`
-	RestMinMinutes int    `json:"rest_min_minutes"`
-	RestMaxMinutes int    `json:"rest_max_minutes"`
-	StaggerPercent int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
+	Enabled          bool   `json:"enabled"`
+	EarlyRestEnabled bool   `json:"early_rest_enabled"`
+	Mode             string `json:"mode"`
+	WorkMinutes      int    `json:"work_minutes"`
+	RestMinMinutes   int    `json:"rest_min_minutes"`
+	RestMaxMinutes   int    `json:"rest_max_minutes"`
+	StaggerPercent   int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
 	// Revision is server-owned and changes only when policy content changes.
 	// Unsaved defaults and legacy records have no revision; schedulers may use
 	// a hash of policy content to identify those configurations.

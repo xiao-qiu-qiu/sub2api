@@ -11,6 +11,11 @@
       >
         <div class="py-1">
           <template v-if="account">
+            <button data-testid="manual-rest-action" @click="$emit('manual-rest', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-violet-700 hover:bg-violet-50 dark:text-violet-300 dark:hover:bg-violet-900/20">
+              <Icon :name="account.account_rotation?.hold && account.account_rotation.reason === 'manual' ? 'play' : 'clock'" size="sm" />
+              {{ t(account.account_rotation?.hold && account.account_rotation.reason === 'manual' ? 'admin.settings.accountRotation.endManual' : 'admin.settings.accountRotation.manual') }}
+            </button>
+            <div class="my-1 border-t border-gray-100 dark:border-dark-700"></div>
             <button @click="$emit('test', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-dark-700">
               <Icon name="play" size="sm" class="text-green-500" :stroke-width="2" />
               {{ t('admin.accounts.testConnection') }}
@@ -75,7 +80,7 @@ import type { Account } from '@/types'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 
 const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null }>()
-const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow'])
+const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'manual-rest'])
 const { t } = useI18n()
 const menuRef = ref<HTMLElement | null>(null)
 const { width: viewportWidth, height: viewportHeight } = useWindowSize()

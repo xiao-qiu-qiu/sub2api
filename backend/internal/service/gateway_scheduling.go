@@ -181,6 +181,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+			if err != nil && HasAccountRotationTracking(ctx) {
+				return nil, err
+			}
 			if err == nil && result.RotationBlocked {
 				localExcluded[account.ID] = struct{}{}
 				continue
@@ -377,6 +380,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 						if rpmPass { // 粘性会话窗口费用+RPM 检查
 							result, err := s.tryAcquireAccountSlot(ctx, stickyAccountID, stickyAccount.Concurrency)
+							if err != nil && HasAccountRotationTracking(ctx) {
+								return nil, err
+							}
 							if err == nil && result.RotationBlocked {
 								rotationBlocked[stickyAccountID] = true
 							}
@@ -496,6 +502,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// 4. 尝试获取槽位
 				for _, item := range routingAvailable {
 					result, err := s.tryAcquireAccountSlot(ctx, item.account.ID, item.account.Concurrency)
+					if err != nil && HasAccountRotationTracking(ctx) {
+						return nil, err
+					}
 					if err == nil && result.RotationBlocked {
 						rotationBlocked[item.account.ID] = true
 					}
@@ -588,6 +597,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable {
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+					if err != nil && HasAccountRotationTracking(ctx) {
+						return nil, err
+					}
 					if err == nil && result.RotationBlocked {
 						rotationBlocked[accountID] = true
 					}
@@ -776,6 +788,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			result, err := s.tryAcquireAccountSlot(ctx, selected.account.ID, selected.account.Concurrency)
+			if err != nil && HasAccountRotationTracking(ctx) {
+				return nil, err
+			}
 			if err == nil && result.RotationBlocked {
 				rotationBlocked[selected.account.ID] = true
 			}
@@ -829,6 +844,9 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
+		if err != nil && HasAccountRotationTracking(ctx) {
+			return nil, false, err
+		}
 		if err == nil && result.Acquired {
 			// 会话数量限制检查
 			if !s.checkAndRegisterSession(ctx, acc, sessionHash) {

@@ -1,17 +1,7 @@
 <template>
   <div class="flex flex-col items-start gap-1">
     <ExcelBPSCredentialStatus :state="account.excel_bps_credential_state" />
-    <span
-      v-if="account.account_rotation"
-      data-testid="account-rotation-status"
-      :class="['badge text-xs', ['draining', 'resting'].includes(account.account_rotation.phase) ? 'badge-warning' : 'badge-info']"
-      :title="account.account_rotation.phase === 'resting'
-        ? t('admin.settings.accountRotation.restUntil', { time: new Date(account.account_rotation.rest_until * 1000).toLocaleString() })
-        : account.account_rotation.drain_at > 0
-          ? t('admin.settings.accountRotation.drainAt', { time: new Date(account.account_rotation.drain_at * 1000).toLocaleString() }) : undefined"
-    >
-      {{ t(`admin.settings.accountRotation.${account.account_rotation.phase}`) }}
-    </span>
+    <AccountRotationBadge v-if="account.account_rotation" :state="account.account_rotation" />
     <span
       v-if="protocolEnabled && isExcelBPSEnabled"
       data-testid="bps-status-badge"
@@ -161,6 +151,7 @@
 
 <script setup lang="ts">
 import ExcelBPSCredentialStatus from './ExcelBPSCredentialStatus.vue'
+import AccountRotationBadge from './AccountRotationBadge.vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'

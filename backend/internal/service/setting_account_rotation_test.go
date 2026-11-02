@@ -179,12 +179,34 @@ func TestAccountRotationSettingsRevisionTracksContentOnly(t *testing.T) {
 		func() { settings.RestMinMinutes++ },
 		func() { settings.RestMaxMinutes++ },
 		func() { settings.StaggerPercent++ },
+		func() { settings.EarlyRestEnabled = true },
+		func() { settings.EarlyRestEnabled = false },
 	} {
 		change()
 		next := save()
 		require.NotEqual(t, previous.Revision, next.Revision)
 		previous = next
 	}
+}
+
+func TestAccountRotationSettingsLegacyEarlyRestDefaultsAndPersists(t *testing.T) {
+	repo := &accountRotationSettingRepo{values: map[string]string{
+		SettingKeyAccountRotationSettings: `{"enabled":true,"mode":"aggressive","work_minutes":300,"rest_min_minutes":10,"rest_max_minutes":30,"stagger_percent":10,"revision":"legacy-policy"}`,
+	}}
+	svc := NewSettingService(repo, &config.Config{})
+	settings, err := svc.GetAccountRotationSettings(t.Context())
+	require.NoError(t, err)
+	require.False(t, settings.EarlyRestEnabled)
+	require.Equal(t, "legacy-policy", settings.Revision)
+	settings.EarlyRestEnabled = true
+	require.NoError(t, svc.UpdateSettings(t.Context(), &SystemSettings{AccountRotationSettings: settings}))
+	persisted, err := NewSettingService(repo, &config.Config{}).GetAccountRotationSettings(t.Context())
+	require.NoError(t, err)
+	require.True(t, persisted.EarlyRestEnabled)
+	require.NotEqual(t, settings.Revision, persisted.Revision)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyAccountRotationSettings]), &raw))
+	require.Equal(t, true, raw["early_rest_enabled"])
 }
 
 func TestAccountRotationSettingsLegacyRevisionRemainsEmptyUntilContentChanges(t *testing.T) {

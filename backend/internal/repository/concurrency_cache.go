@@ -373,23 +373,6 @@ var (
 		return 1
 	`)
 
-	refreshLiveLeaseScript = redis.NewScript(`
-		redis.replicate_commands()
-		local ttl = tonumber(ARGV[1])
-		local leaseID = ARGV[2]
-		local now = tonumber(redis.call('TIME')[1])
-		local expireBefore = now - ttl
-		for _, key in ipairs(KEYS) do
-			redis.call('ZREMRANGEBYSCORE', key, '-inf', expireBefore)
-			if redis.call('ZSCORE', key, leaseID) == false then return 0 end
-		end
-		for _, key in ipairs(KEYS) do
-			redis.call('ZADD', key, now, leaseID)
-			redis.call('EXPIRE', key, ttl)
-		end
-		return 1
-	`)
-
 	// trackSlotScript 记录 stats-only 槽位，不做并发上限判断。
 	// KEYS[1] = 有序集合键
 	// ARGV[1] = TTL（秒）
@@ -1474,12 +1457,7 @@ func (c *concurrencyCache) RefreshLiveLease(ctx context.Context, accountID, user
 	if c == nil || c.rdb == nil || leaseID == "" {
 		return false, nil
 	}
-	result, err := refreshLiveLeaseScript.Run(ctx, c.rdb, []string{
-		liveAccountSlotKey(accountID),
-		liveUserSlotKey(userID),
-		liveAPIKeySlotKey(apiKeyID),
-	}, liveLeaseTTLSeconds, leaseID).Int()
-	return result == 1, err
+	return c.refreshAccountRotationLiveLease(ctx, accountID, userID, apiKeyID, leaseID)
 }
 
 func (c *concurrencyCache) ReleaseLiveLease(ctx context.Context, accountID, userID, apiKeyID int64, leaseID string) error {

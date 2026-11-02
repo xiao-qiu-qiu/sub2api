@@ -866,7 +866,13 @@ describe("admin SettingsView payment visible method controls", () => {
     await editor.get('input[type="number"]').setValue('240');
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240 });
+    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240, early_rest_enabled: false });
+    const earlyToggle = editor.get('#account-rotation-early-toggle');
+    await earlyToggle.setValue(true);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings?.early_rest_enabled).toBe(true);
+    wrapper.unmount();
   });
 
   it("leaves the monitor mode alone unless it was changed here", async () => {

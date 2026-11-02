@@ -517,6 +517,9 @@ func (h *ConcurrencyHelper) waitForSlotWithPing(c *gin.Context, slotType string,
 func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
+	if slotType == "account" {
+		ctx = service.WithAccountRotationWaitContext(ctx, c.Request.Context())
+	}
 
 	acquireSlot := func() (*service.AcquireResult, error) {
 		if slotType == "user" {

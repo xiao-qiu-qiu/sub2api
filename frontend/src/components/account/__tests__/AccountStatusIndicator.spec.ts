@@ -58,9 +58,10 @@ describe('AccountStatusIndicator', () => {
       } }) },
       global: { stubs: { Icon: true } }
     })
-    expect(wrapper.get('[data-testid="account-rotation-status"]').text()).toBe('admin.settings.accountRotation.resting')
+    expect(wrapper.get('[data-testid="account-rotation-status"]').text()).toContain('admin.settings.accountRotation.resting')
     expect(wrapper.text()).toContain('admin.accounts.status.paused')
     expect(wrapper.get('[data-testid="account-rotation-status"]').attributes('title')).toBe('admin.settings.accountRotation.restUntil')
+    wrapper.unmount()
   })
   it('keeps quality cooldown visible after its deadline without a credits bypass', () => {
     const wrapper = mount(AccountStatusIndicator, {

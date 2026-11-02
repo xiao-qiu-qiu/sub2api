@@ -1284,6 +1284,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			effectiveExcludedIDs[account.ID] = struct{}{}
 		}
 		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		if err != nil && HasAccountRotationTracking(ctx) {
+			return nil, err
+		}
 		if result != nil && result.RotationBlocked {
 			if effectiveExcludedIDs == nil {
 				effectiveExcludedIDs = make(map[int64]struct{})
@@ -1380,6 +1383,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 					} else {
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+						if err != nil && HasAccountRotationTracking(ctx) {
+							return nil, err
+						}
 						if err == nil && result != nil && result.Acquired {
 							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc, result.RequestID)
 							if selectErr != nil {
@@ -1587,6 +1593,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				continue
 			}
 			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			if err != nil && HasAccountRotationTracking(ctx) {
+				return nil, true, err
+			}
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc, result.RequestID)
 				if selectErr != nil {
@@ -1627,6 +1636,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				continue
 			}
 			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			if err != nil && HasAccountRotationTracking(ctx) {
+				return nil, err
+			}
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc, result.RequestID)
 				if selectErr != nil {

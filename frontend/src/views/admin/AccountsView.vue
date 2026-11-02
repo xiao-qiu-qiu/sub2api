@@ -475,7 +475,8 @@
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <IQTestModal :show="showIQTest" :account="iqTestingAcc" :accounts="accounts" @close="closeIQTestModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @iq-test="handleIQTest" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @iq-test="handleIQTest" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" @manual-rest="manualRestAcc = $event" />
+    <ManualAccountRestDialog v-if="manualRestAcc" :account="manualRestAcc" @close="manualRestAcc = null" @updated="handleManualRestUpdated" />
     <SyncFromCrsModal v-if="authStore.isAdmin" :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -533,6 +534,7 @@ import AccountTableFilters from '@/components/admin/account/AccountTableFilters.
 import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
 import BulkExport2FADialog from '@/components/admin/account/BulkExport2FADialog.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
+import ManualAccountRestDialog from '@/components/admin/account/ManualAccountRestDialog.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
@@ -659,6 +661,8 @@ const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
 const creatingShadowAcc = ref<Account | null>(null)
 const reAuthAcc = ref<Account | null>(null)
+const manualRestAcc = ref<Account | null>(null)
+let restStateAbortController: AbortController | null = null
 const testingAcc = ref<Account | null>(null)
 const statsAcc = ref<Account | null>(null)
 const iqTestingAcc = ref<Account | null>(null)
@@ -1456,6 +1460,7 @@ watch(accounts, (rows) => {
 
 const isAnyModalOpen = computed(() => {
   return (
+    manualRestAcc.value !== null ||
     newAPIConfigAccount.value !== null ||
     showCreate.value ||
     showEdit.value ||
@@ -2629,6 +2634,49 @@ const handleToggleSchedulable = async (a: Account) => {
     togglingSchedulable.value = null
   }
 }
+const handleManualRestUpdated = (state: NonNullable<Account['account_rotation']>, ended: boolean) => {
+  if (!manualRestAcc.value) return
+  restStateAbortController?.abort()
+  const account = accounts.value.find(row => row.id === manualRestAcc.value!.id) ?? manualRestAcc.value
+  patchAccountInList({ ...account, account_rotation: state })
+  enterAutoRefreshSilentWindow()
+  appStore.showSuccess(t(ended ? 'admin.settings.accountRotation.manualEnded' : 'admin.settings.accountRotation.manualStarted'))
+}
+
+// Refresh only rotation state while a visible account is due to change. This
+// keeps the rest badge current even when full-table auto refresh is disabled.
+useIntervalFn(async () => {
+  if (document.hidden || loading.value || isAnyModalOpen.value || restStateAbortController) return
+  const now = Date.now() / 1000
+  const candidates = accounts.value.filter(account => {
+    const state = account.account_rotation
+    if (!state) return false
+    if (state.hold || (state.waiting_count ?? 0) > 0 || state.phase === 'draining' || state.phase === 'resting') return true
+    if (state.phase !== 'working') return false
+    const earlyAt = state.early_eligible_at ?? 0
+    return (earlyAt > 0 && earlyAt <= now) || (state.drain_at > 0 && state.drain_at <= now)
+  })
+  if (candidates.length === 0) return
+  const controller = new AbortController()
+  restStateAbortController = controller
+  try {
+    // Bound concurrent reads when several accounts share a rest window.
+    for (let offset = 0; offset < candidates.length && !controller.signal.aborted; offset += 4) {
+      const batch = candidates.slice(offset, offset + 4)
+      const results = await Promise.allSettled(batch.map(account => adminAPI.accounts.getAccountRestState(account.id, controller.signal)))
+      if (controller.signal.aborted) return
+      results.forEach((result, index) => {
+        if (result.status !== 'fulfilled') return
+        const account = accounts.value.find(row => row.id === batch[index]!.id)
+        if (account && JSON.stringify(account.account_rotation) !== JSON.stringify(result.value.account_rotation)) {
+          patchAccountInList({ ...account, account_rotation: result.value.account_rotation })
+        }
+      })
+    }
+  } finally {
+    if (restStateAbortController === controller) restStateAbortController = null
+  }
+}, 5000)
 const handleShowTempUnsched = (a: Account) => { tempUnschedAcc.value = a; showTempUnsched.value = true }
 const handleTempUnschedReset = async (updated: Account) => {
   showTempUnsched.value = false
@@ -2727,6 +2775,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  restStateAbortController?.abort()
   clearTimeout(timerListRefresh)
   concurrencyUpgradeRequest++
   upstreamBillingRateAbortController?.abort()

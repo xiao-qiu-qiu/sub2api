@@ -33,13 +33,14 @@ func TestAccountRotationAdminRejectsInvalidSettingsWithoutWriting(t *testing.T) 
 		cases[field+" missing"], cases[field+" null"] = missing, null
 	}
 	for field, values := range map[string][]any{
-		"enabled":          {"true", 1},
-		"mode":             {"", "AGGRESSIVE", " sticky ", "invalid", 1},
-		"work_minutes":     {0, -1, 1441, 1.5, "300"},
-		"rest_min_minutes": {0, -1, 121, 31, 1.5},
-		"rest_max_minutes": {0, -1, 9, 121, 1.5},
-		"stagger_percent":  {-1, 31, 1.5},
-		"unknown":          {true},
+		"enabled":            {"true", 1},
+		"early_rest_enabled": {nil, "true", 1, []any{}, map[string]any{}},
+		"mode":               {"", "AGGRESSIVE", " sticky ", "invalid", 1},
+		"work_minutes":       {0, -1, 1441, 1.5, "300"},
+		"rest_min_minutes":   {0, -1, 121, 31, 1.5},
+		"rest_max_minutes":   {0, -1, 9, 121, 1.5},
+		"stagger_percent":    {-1, 31, 1.5},
+		"unknown":            {true},
 	} {
 		for index, value := range values {
 			object := make(map[string]any)
@@ -78,7 +79,7 @@ func TestAccountRotationAdminRoundTripBoundariesAndOmission(t *testing.T) {
 	require.False(t, initial.Enabled)
 	for _, settings := range []*service.AccountRotationSettings{
 		{Enabled: true, Mode: "aggressive", WorkMinutes: 1, RestMinMinutes: 1, RestMaxMinutes: 1, StaggerPercent: 0},
-		{Enabled: true, Mode: "sticky", WorkMinutes: 1440, RestMinMinutes: 120, RestMaxMinutes: 120, StaggerPercent: 30},
+		{Enabled: true, EarlyRestEnabled: true, Mode: "sticky", WorkMinutes: 1440, RestMinMinutes: 120, RestMaxMinutes: 120, StaggerPercent: 30},
 		service.DefaultAccountRotationSettings(),
 	} {
 		rec := doUpdateSettings(t, h, map[string]any{"account_rotation_settings": settings}, nil)
@@ -104,6 +105,24 @@ func TestAccountRotationAdminRoundTripBoundariesAndOmission(t *testing.T) {
 	h.GetSettings(c)
 	require.Equal(t, http.StatusOK, get.Code, get.Body.String())
 	require.JSONEq(t, stored, gjson.GetBytes(get.Body.Bytes(), "data.account_rotation_settings").Raw)
+}
+
+func TestAccountRotationAdminLegacyClientDefaultsEarlyRestToFalse(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	settings := service.DefaultAccountRotationSettings()
+	settings.Enabled, settings.EarlyRestEnabled = true, true
+	first := doUpdateSettings(t, h, map[string]any{"account_rotation_settings": settings}, nil)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	firstRevision := gjson.GetBytes(first.Body.Bytes(), "data.account_rotation_settings.revision").String()
+	legacy := map[string]any{
+		"enabled": true, "mode": "aggressive", "work_minutes": 300,
+		"rest_min_minutes": 10, "rest_max_minutes": 30, "stagger_percent": 10,
+	}
+	second := doUpdateSettings(t, h, map[string]any{"account_rotation_settings": legacy}, nil)
+	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+	require.False(t, gjson.GetBytes(second.Body.Bytes(), "data.account_rotation_settings.early_rest_enabled").Bool())
+	require.NotEqual(t, firstRevision, gjson.GetBytes(second.Body.Bytes(), "data.account_rotation_settings.revision").String())
+	require.False(t, gjson.Get(repo.values[service.SettingKeyAccountRotationSettings], "early_rest_enabled").Bool())
 }
 
 func TestAccountRotationAdminIgnoresClientRevision(t *testing.T) {

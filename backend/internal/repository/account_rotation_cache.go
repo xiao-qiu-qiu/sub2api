@@ -7,16 +7,20 @@ import (
 	"fmt"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	accountRotationKeyPrefix  = "concurrency:rotation:account:"
-	accountRotationPoolPrefix = "concurrency:rotation:pool:"
+	accountRotationKeyPrefix        = "concurrency:rotation:account:"
+	accountRotationPoolPrefix       = "concurrency:rotation:pool:"
+	accountRotationWaiterPrefix     = "concurrency:rotation:waiters:"
+	accountRotationWaiterTTLSeconds = 60
 )
 
 var _ service.AccountRotationCache = (*concurrencyCache)(nil)
+var _ service.AccountRotationHoldCache = (*concurrencyCache)(nil)
 
 // Every operation uses the same Redis clock and state machine, including slot
 // removal. In particular, there is no release -> check gap in which a new sticky
@@ -33,12 +37,13 @@ var _ service.AccountRotationCache = (*concurrencyCache)(nil)
 // The duration is sampled once per work cycle and reused when draining ends.
 var accountRotationScript = redis.NewScript(`
 redis.replicate_commands()
-local stateKey, regularKey, liveKey = KEYS[1], KEYS[2], KEYS[3]
+local stateKey, regularKey, liveKey, waiterKey = KEYS[1], KEYS[2], KEYS[3], KEYS[5]
 local op, ttl, liveTTL = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
 local accountID, requestID = ARGV[4], ARGV[5]
 local time = redis.call('TIME')
 local now = tonumber(time[1])
 local idleResetSeconds, scanLimit, candidateLimit = 300, 128, 49
+local waiterTTL = 60
 local poolPrefix = 'concurrency:rotation:pool:'
 local cleanedPools = {}
 local values = redis.call('HGETALL', stateKey)
@@ -48,9 +53,12 @@ if #values > 0 then
     for i = 1, #values, 2 do s[values[i]] = values[i + 1] end
     for _, field in ipairs({'started_at', 'drain_at', 'rest_until', 'idle_since',
         'rest_seconds', 'work_seconds', 'rest_min_seconds', 'rest_max_seconds',
-        'stagger_percent', 'cycle', 'lease_until', 'planned_start', 'planned_end'}) do
+        'stagger_percent', 'cycle', 'lease_until', 'planned_start', 'planned_end',
+        'early_rest_enabled', 'hold', 'scheduled_rest_seconds'}) do
         s[field] = tonumber(s[field]) or 0
     end
+    s.reason = s.reason or ''
+    if s.reason == '' and (s.phase == 'draining' or s.phase == 'resting') then s.reason = 'scheduled' end
 end
 
 local function forgetPlan()
@@ -165,6 +173,14 @@ end
 local function clearWindow()
     forgetPlan()
     s.phase, s.started_at, s.drain_at, s.rest_until, s.rest_seconds = 'working', 0, 0, 0, 0
+    s.reason, s.hold, s.scheduled_rest_seconds = '', 0, 0
+end
+
+local function applyPolicy()
+    s.mode, s.work_seconds = ARGV[9], tonumber(ARGV[10])
+    s.rest_min_seconds, s.rest_max_seconds = tonumber(ARGV[11]), tonumber(ARGV[12])
+    s.stagger_percent, s.revision = tonumber(ARGV[13]), ARGV[14]
+    s.early_rest_enabled = tonumber(ARGV[15]) or 0
 end
 
 local function newPolicy()
@@ -173,12 +189,12 @@ local function newPolicy()
     s = {phase = 'working', started_at = 0, drain_at = 0, rest_until = 0,
         idle_since = 0, rest_seconds = 0, cycle = cycle, lease_until = 0,
         planned_start = 0, planned_end = 0, pool = ARGV[8] or '',
-        mode = ARGV[9], work_seconds = tonumber(ARGV[10]),
-        rest_min_seconds = tonumber(ARGV[11]), rest_max_seconds = tonumber(ARGV[12]),
-        stagger_percent = tonumber(ARGV[13]), revision = ARGV[14]}
+        reason = '', hold = 0, scheduled_rest_seconds = 0}
+    applyPolicy()
 end
 
 local function startWindow()
+    if s.work_seconds <= 0 then return end
     s.cycle = s.cycle + 1
     s.phase, s.started_at, s.idle_since, s.rest_until = 'working', now, 0, 0
     s.rest_seconds = s.rest_min_seconds + hashNumber('rest') % (s.rest_max_seconds - s.rest_min_seconds + 1)
@@ -193,15 +209,23 @@ local function save()
         'mode', s.mode, 'work_seconds', s.work_seconds, 'rest_min_seconds', s.rest_min_seconds,
         'rest_max_seconds', s.rest_max_seconds, 'stagger_percent', s.stagger_percent,
         'revision', s.revision, 'pool', s.pool, 'cycle', s.cycle, 'lease_until', s.lease_until,
-        'planned_start', s.planned_start, 'planned_end', s.planned_end)
+        'planned_start', s.planned_start, 'planned_end', s.planned_end,
+        'reason', s.reason, 'hold', s.hold, 'early_rest_enabled', s.early_rest_enabled,
+        'scheduled_rest_seconds', s.scheduled_rest_seconds)
 end
 
 local function snapshot()
     local phase = s and s.phase or 'ready'
     if s and phase == 'working' and s.started_at == 0 then phase = 'ready' end
+    local eligibleAt = 0
+    if s and s.early_rest_enabled == 1 and s.work_seconds > 0 and s.started_at > 0 and s.drain_at > 0 then
+        eligibleAt = math.max(s.started_at, s.drain_at - 1200)
+    end
     return cjson.encode({phase = phase, started_at = s and s.started_at or 0,
         drain_at = s and s.drain_at or 0, rest_until = s and s.rest_until or 0,
-        idle_since = s and s.idle_since or 0, rest_seconds = s and s.rest_seconds or 0})
+        idle_since = s and s.idle_since or 0, rest_seconds = s and s.rest_seconds or 0,
+        reason = s and s.reason or '', hold = s ~= nil and s.hold == 1,
+        waiting_count = redis.call('ZCARD', waiterKey), early_eligible_at = eligibleAt})
 end
 
 -- Delete and inspect in one invocation, including user/key members for Live.
@@ -210,19 +234,56 @@ if op == 'release' then
     removed = redis.call('ZREM', regularKey, requestID)
 elseif op == 'release_live' then
     removed = redis.call('ZREM', liveKey, requestID)
-    if #KEYS >= 6 then
-        redis.call('ZREM', KEYS[5], requestID)
+    if #KEYS >= 7 then
         redis.call('ZREM', KEYS[6], requestID)
+        redis.call('ZREM', KEYS[7], requestID)
     end
 end
 if not s and (op == 'release' or op == 'release_live') then return 1 end
 
 redis.call('ZREMRANGEBYSCORE', regularKey, '-inf', now - ttl)
 redis.call('ZREMRANGEBYSCORE', liveKey, '-inf', now - liveTTL)
+redis.call('ZREMRANGEBYSCORE', waiterKey, '-inf', now - waiterTTL)
+if op == 'wait_refresh' then
+    redis.call('ZADD', waiterKey, now, requestID)
+    redis.call('EXPIRE', waiterKey, waiterTTL)
+elseif op == 'wait_remove' then
+    redis.call('ZREM', waiterKey, requestID)
+end
+local liveRefreshed = 0
+if op == 'refresh_live' then
+    -- Renew the joint lease and advance rotation in one invocation. A lone
+    -- long-lived Live request must detect the early window on its heartbeat,
+    -- without incoming requests or an administrator polling account status.
+    local intact = redis.call('ZSCORE', liveKey, requestID) ~= false
+    for _, key in ipairs({KEYS[6], KEYS[7]}) do
+        redis.call('ZREMRANGEBYSCORE', key, '-inf', now - liveTTL)
+        if redis.call('ZSCORE', key, requestID) == false then intact = false end
+    end
+    if intact then
+        for _, key in ipairs({liveKey, KEYS[6], KEYS[7]}) do
+            redis.call('ZADD', key, now, requestID)
+            redis.call('EXPIRE', key, liveTTL)
+        end
+        liveRefreshed = 1
+    end
+end
 local count = redis.call('ZCARD', regularKey) + redis.call('ZCARD', liveKey)
-if op == 'check' or op == 'acquire' then
-    if s and s.revision ~= ARGV[14] then newPolicy() end
-    if not s and count > 0 then newPolicy() end
+-- A manual action must not reset an automatic rest through a newer policy
+-- revision, and a no-op cancel must not change an unrelated work window.
+local noManualCancel = op == 'hold_cancel' and (not s or s.hold ~= 1 or s.reason ~= 'manual')
+local automaticRestConflict = op == 'hold_start' and s and s.reason ~= 'manual'
+    and (s.phase == 'draining' or (s.phase == 'resting' and now < s.rest_until))
+if not noManualCancel and not automaticRestConflict
+    and (op == 'check' or op == 'acquire' or op == 'hold_start' or op == 'hold_cancel') then
+    if s and (s.revision ~= ARGV[14] or s.work_seconds ~= tonumber(ARGV[10])
+        or s.early_rest_enabled ~= (tonumber(ARGV[15]) or 0)) then
+        -- Configuration changes affect the next cycle, never release requests
+        -- already waiting for a manually or opportunistically forced gap.
+        if s.hold == 1 and (s.phase == 'draining' or s.phase == 'resting') then applyPolicy()
+        else newPolicy() end
+    end
+    if not s and (count > 0 or op == 'hold_start') then newPolicy() end
 end
 
 if op == 'refresh' and redis.call('ZSCORE', regularKey, requestID) ~= false then
@@ -231,6 +292,7 @@ if op == 'refresh' and redis.call('ZSCORE', regularKey, requestID) ~= false then
     redis.call('ZADD', KEYS[4], now + ttl, accountID)
 end
 
+local holdConflict = false
 if s then
     if s.phase == 'resting' and now >= s.rest_until then
         clearWindow()
@@ -265,14 +327,50 @@ if s then
         local firstPool = s.pool == ''
         forgetPlan()
         s.pool = ARGV[8]
-        if s.started_at > 0 and s.phase == 'working' and firstPool and now < s.drain_at then
+        if s.work_seconds > 0 and s.started_at > 0 and s.phase == 'working' and firstPool and now < s.drain_at then
             planWindow()
-        elseif s.started_at > 0 then
+        elseif s.started_at > 0 and s.rest_seconds > 0 then
             local startAt = s.phase == 'resting' and s.rest_until - s.rest_seconds or s.drain_at
             indexPlan(startAt, startAt + s.rest_seconds)
         end
     end
-    if s.phase == 'working' and s.started_at > 0 and now >= s.drain_at then s.phase = 'draining' end
+    if op == 'hold_start' then
+        if s.hold == 1 and s.reason == 'manual' then
+            -- Repeated clicks/retries cannot resample or extend this gap.
+        elseif s.phase ~= 'working' or (s.work_seconds > 0 and s.started_at > 0 and now >= s.drain_at) then
+            holdConflict = true
+        else
+            forgetPlan()
+            s.scheduled_rest_seconds = s.rest_seconds
+            s.phase, s.reason, s.hold = 'draining', 'manual', 1
+            s.rest_seconds, s.rest_until = tonumber(ARGV[16]), 0
+        end
+    elseif op == 'hold_cancel' and s.hold == 1 and s.reason == 'manual' then
+        forgetPlan()
+        s.phase, s.reason, s.hold, s.rest_until = 'working', '', 0, 0
+        s.rest_seconds, s.scheduled_rest_seconds = s.scheduled_rest_seconds, 0
+        -- Cancellation did not complete a gap. Keep the original work clock
+        -- and its sampled scheduled rest, including an already due deadline.
+        -- Forced idle does not count as a natural break; start measuring any
+        -- new natural idle period only after cancellation releases admission.
+        s.idle_since = count == 0 and now or 0
+        if s.work_seconds <= 0 then
+            clearWindow()
+        elseif s.started_at > 0 then
+            indexPlan(s.drain_at, s.drain_at + s.rest_seconds)
+        end
+        if count > 0 and s.started_at == 0 then startWindow() end
+    end
+    if s.phase == 'working' and s.work_seconds > 0 and s.started_at > 0 then
+        if now >= s.drain_at then
+            s.phase, s.reason, s.hold = 'draining', 'scheduled', 0
+        elseif s.early_rest_enabled == 1 and now >= s.drain_at - 1200 and count < 2 then
+            forgetPlan()
+            s.scheduled_rest_seconds = s.rest_seconds
+            s.phase, s.reason, s.hold = 'draining', 'early', 1
+            s.rest_seconds, s.rest_until = 120, 0
+        end
+    end
     if s.phase == 'draining' then
         if count == 0 then
             s.phase, s.rest_until = 'resting', now + s.rest_seconds
@@ -287,22 +385,25 @@ if op == 'acquire' then
     -- A retry of an existing member is not a new slot, even during draining.
     local exists = redis.call('ZSCORE', regularKey, requestID) ~= false
     local allowed = not s or s.phase == 'working' or (s.phase == 'draining'
-        and s.mode == 'sticky' and ARGV[7] == '1' and count > 0)
+        and s.hold == 0 and s.mode == 'sticky' and ARGV[7] == '1' and count > 0)
     if exists or (allowed and (tonumber(ARGV[6]) <= 0 or count < tonumber(ARGV[6]))) then
         redis.call('ZADD', regularKey, now, requestID)
         redis.call('EXPIRE', regularKey, ttl)
         redis.call('ZADD', KEYS[4], now + ttl, accountID)
         if not s then newPolicy() end
-        if s.started_at == 0 then startWindow() end
+        if s.phase == 'working' and s.started_at == 0 then startWindow() end
         s.idle_since, s.lease_until = 0, math.max(s.lease_until, now + ttl)
         save()
-        return {1, now}
+        return {1, snapshot()}
     end
     save()
-    return {0, now}
+    return {0, snapshot()}
 end
 save()
 if op == 'check' then return snapshot() end
+if op == 'hold_start' then return {holdConflict and -1 or 1, snapshot()} end
+if op == 'hold_cancel' then return snapshot() end
+if op == 'refresh_live' then return liveRefreshed end
 return 1
 `)
 
@@ -314,8 +415,12 @@ func accountRotationPoolKey(pool string) string {
 	return fmt.Sprintf("%s%x", accountRotationPoolPrefix, sha256.Sum256([]byte(pool)))
 }
 
+func accountRotationWaiterKey(accountID int64) string {
+	return fmt.Sprintf("%s%d", accountRotationWaiterPrefix, accountID)
+}
+
 func accountRotationKeys(accountID int64) []string {
-	return []string{accountRotationKey(accountID), accountSlotKey(accountID), liveAccountSlotKey(accountID), accountActiveIndexKey}
+	return []string{accountRotationKey(accountID), accountSlotKey(accountID), liveAccountSlotKey(accountID), accountActiveIndexKey, accountRotationWaiterKey(accountID)}
 }
 
 func (c *concurrencyCache) accountRotationArgs(op string, accountID int64, requestID string, limit int, sticky bool, pool string, policy service.AccountRotationPolicy) []any {
@@ -323,17 +428,21 @@ func (c *concurrencyCache) accountRotationArgs(op string, accountID int64, reque
 	if sticky {
 		stickyArg = 1
 	}
+	earlyArg := 0
+	if policy.EarlyRestEnabled {
+		earlyArg = 1
+	}
 	poolHash := ""
 	if op == "acquire" {
 		poolHash = fmt.Sprintf("%x", sha256.Sum256([]byte(pool)))
 	}
 	return []any{op, c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, requestID, limit, stickyArg, poolHash,
-		policy.Mode, policy.WorkSeconds, policy.RestMinSeconds, policy.RestMaxSeconds, policy.StaggerPercent, policy.Revision}
+		policy.Mode, policy.WorkSeconds, policy.RestMinSeconds, policy.RestMaxSeconds, policy.StaggerPercent, policy.Revision, earlyArg}
 }
 
 func validateAccountRotationPolicy(policy service.AccountRotationPolicy) error {
-	if (policy.Mode != "aggressive" && policy.Mode != "sticky") || policy.WorkSeconds <= 0 ||
-		policy.RestMinSeconds <= 0 || policy.RestMaxSeconds < policy.RestMinSeconds ||
+	if (policy.Mode != "aggressive" && policy.Mode != "sticky") || policy.WorkSeconds < 0 ||
+		(policy.WorkSeconds > 0 && (policy.RestMinSeconds <= 0 || policy.RestMaxSeconds < policy.RestMinSeconds)) ||
 		policy.StaggerPercent < 0 || policy.StaggerPercent > 100 {
 		return fmt.Errorf("invalid account rotation policy")
 	}
@@ -416,17 +525,97 @@ func (c *concurrencyCache) CheckAccountRotationBatch(ctx context.Context, accoun
 }
 
 func (c *concurrencyCache) AcquireAccountSlotWithRotation(ctx context.Context, accountID int64, maxConcurrency int, requestID string, policy service.AccountRotationPolicy, sticky bool, pool string) (bool, error) {
+	acquired, _, err := c.AcquireAccountSlotWithRotationState(ctx, accountID, maxConcurrency, requestID, policy, sticky, pool)
+	return acquired, err
+}
+
+// The admission decision and its snapshot come from one Redis invocation. A
+// separate check could observe the gap ending and misclassify a held request as
+// an ordinary capacity rejection, causing the caller to select another account.
+func (c *concurrencyCache) AcquireAccountSlotWithRotationState(ctx context.Context, accountID int64, maxConcurrency int, requestID string, policy service.AccountRotationPolicy, sticky bool, pool string) (bool, *service.AccountRotationState, error) {
 	if err := validateAccountRotationPolicy(policy); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	acquired, _, err := runScriptInt64Pair(ctx, c.rdb, accountRotationScript, accountRotationKeys(accountID),
+	acquired, state, err := c.runAccountRotationStatePair(ctx, accountID,
 		c.accountRotationArgs("acquire", accountID, requestID, maxConcurrency, sticky, pool, policy)...)
-	return acquired == 1, err
+	return acquired == 1, state, err
+}
+
+func (c *concurrencyCache) runAccountRotationStatePair(ctx context.Context, accountID int64, args ...any) (int64, *service.AccountRotationState, error) {
+	values, err := accountRotationScript.Run(ctx, c.rdb, accountRotationKeys(accountID), args...).Slice()
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(values) != 2 {
+		return 0, nil, fmt.Errorf("invalid account rotation result length: %d", len(values))
+	}
+	result, ok := values[0].(int64)
+	if !ok {
+		return 0, nil, fmt.Errorf("invalid account rotation admission result: %T", values[0])
+	}
+	raw, ok := values[1].(string)
+	if !ok {
+		return 0, nil, fmt.Errorf("invalid account rotation snapshot: %T", values[1])
+	}
+	state, err := decodeAccountRotationState(raw)
+	return result, state, err
+}
+
+func (c *concurrencyCache) SetAccountRotationHold(ctx context.Context, accountID int64, seconds int, policy service.AccountRotationPolicy) (*service.AccountRotationState, error) {
+	if err := validateAccountRotationPolicy(policy); err != nil {
+		return nil, err
+	}
+	if seconds <= 0 {
+		return nil, fmt.Errorf("account rest seconds must be positive")
+	}
+	args := c.accountRotationArgs("hold_start", accountID, "", 0, false, "", policy)
+	result, state, err := c.runAccountRotationStatePair(ctx, accountID, append(args, seconds)...)
+	if err != nil {
+		return nil, err
+	}
+	if result == -1 {
+		return nil, infraerrors.Conflict("ACCOUNT_ALREADY_RESTING", "account is already draining or resting automatically")
+	}
+	return state, nil
+}
+
+func (c *concurrencyCache) CancelAccountRotationHold(ctx context.Context, accountID int64, policy service.AccountRotationPolicy) (*service.AccountRotationState, error) {
+	if err := validateAccountRotationPolicy(policy); err != nil {
+		return nil, err
+	}
+	raw, err := accountRotationScript.Run(ctx, c.rdb, accountRotationKeys(accountID),
+		c.accountRotationArgs("hold_cancel", accountID, "", 0, false, "", policy)...).Text()
+	if err != nil {
+		return nil, err
+	}
+	return decodeAccountRotationState(raw)
+}
+
+func (c *concurrencyCache) RefreshAccountRotationWaiter(ctx context.Context, accountID int64, waiterID string) error {
+	if waiterID == "" {
+		return fmt.Errorf("account rest waiter ID must not be empty")
+	}
+	return accountRotationScript.Run(ctx, c.rdb, accountRotationKeys(accountID),
+		"wait_refresh", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, waiterID).Err()
+}
+
+func (c *concurrencyCache) RemoveAccountRotationWaiter(ctx context.Context, accountID int64, waiterID string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return accountRotationScript.Run(ctx, c.rdb, accountRotationKeys(accountID),
+		"wait_remove", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, waiterID).Err()
 }
 
 func (c *concurrencyCache) RefreshAccountRotationSlot(ctx context.Context, accountID int64, requestID string) error {
 	return accountRotationScript.Run(ctx, c.rdb, accountRotationKeys(accountID),
 		"refresh", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, requestID).Err()
+}
+
+func (c *concurrencyCache) refreshAccountRotationLiveLease(ctx context.Context, accountID, userID, apiKeyID int64, leaseID string) (bool, error) {
+	keys := append(accountRotationKeys(accountID), liveUserSlotKey(userID), liveAPIKeySlotKey(apiKeyID))
+	result, err := accountRotationScript.Run(ctx, c.rdb, keys,
+		"refresh_live", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, leaseID).Int()
+	return result == 1, err
 }
 
 // For the Live migration path, release only this account's member while keeping

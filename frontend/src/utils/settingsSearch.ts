@@ -38,7 +38,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { tab: 'gateway', id: 'upstream-billing-probe', titleKey: 'admin.settings.upstreamBillingProbe.title' },
   { tab: 'gateway', id: 'ollama-cloud-usage', titleKey: 'admin.settings.ollamaCloudUsage.title' },
   { tab: 'gateway', id: 'opencode-go-usage', titleKey: 'admin.settings.opencodeGoUsage.title' },
-  { tab: 'gateway', id: 'scheduling', titleKey: 'admin.settings.scheduling.title', keywordKeys: ['admin.settings.accountRotation.title', 'admin.settings.accountRotation.resting'] },
+  { tab: 'gateway', id: 'scheduling', titleKey: 'admin.settings.scheduling.title', keywordKeys: ['admin.settings.accountRotation.title', 'admin.settings.accountRotation.resting', 'admin.settings.accountRotation.earlyRest'] },
   { tab: 'gateway', id: 'gateway-forwarding', titleKey: 'admin.settings.gatewayForwarding.title' },
   { tab: 'gateway', id: 'web-search-emulation', titleKey: 'admin.settings.webSearchEmulation.title' },
   { tab: 'gateway', id: 'usage-records', titleKey: 'admin.settings.usageRecords.title', keywordKeys: ['admin.settings.cache_rate.label', 'admin.settings.cache_rate_to_users.label'] },

@@ -71,3 +71,40 @@ func TestLiveLeaseExpiresWithoutRefresh(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, refreshed)
 }
+
+func TestLiveLeaseRefreshDoesNotReviveIncompleteJointLease(t *testing.T) {
+	for _, missing := range []string{"account", "user", "key", "expired"} {
+		t.Run(missing, func(t *testing.T) {
+			f := newAccountRotationCacheFixture(t)
+			ctx := context.Background()
+			acquired, err := f.cache.AcquireLiveLease(ctx, 1, 1, 2, 1, 3, 0, "joint-live", false)
+			require.NoError(t, err)
+			require.True(t, acquired)
+			f.advance(20)
+			refreshed, err := f.cache.RefreshLiveLease(ctx, 1, 2, 3, "joint-live")
+			require.NoError(t, err)
+			require.True(t, refreshed)
+			require.False(t, f.server.Exists(accountRotationKey(1)), "refreshing an untracked Live lease cannot create a work window")
+			lastRenewedAt := f.now
+			keys := map[string]string{"account": liveAccountSlotKey(1), "user": liveUserSlotKey(2), "key": liveAPIKeySlotKey(3)}
+			if missing == "expired" {
+				f.advance(liveLeaseTTLSeconds)
+			} else {
+				f.advance(10)
+				require.NoError(t, f.client.ZRem(ctx, keys[missing], "joint-live").Err())
+			}
+			refreshed, err = f.cache.RefreshLiveLease(ctx, 1, 2, 3, "joint-live")
+			require.NoError(t, err)
+			require.False(t, refreshed)
+			for scope, key := range keys {
+				if missing == "expired" || scope == missing {
+					require.False(t, f.server.Exists(key), "missing/expired joint lease members must not be revived")
+				} else {
+					score, err := f.client.ZScore(ctx, key, "joint-live").Result()
+					require.NoError(t, err)
+					require.Equal(t, float64(lastRenewedAt), score, "an incomplete joint lease must not be partially renewed")
+				}
+			}
+		})
+	}
+}

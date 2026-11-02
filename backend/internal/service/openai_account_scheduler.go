@@ -774,7 +774,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if result != nil && result.RotationBlocked {
 		return nil, false, nil
 	}
-	if acquireErr != nil && req.DisableStickyEscape {
+	if acquireErr != nil && (req.DisableStickyEscape || HasAccountRotationTracking(ctx)) {
 		return nil, false, acquireErr
 	}
 	if acquireErr == nil && result != nil && result.Acquired {

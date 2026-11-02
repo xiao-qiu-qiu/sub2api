@@ -510,6 +510,9 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 	}
 
 	result, acquireErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+	if acquireErr != nil && HasAccountRotationTracking(ctx) {
+		return nil, acquireErr
+	}
 	if result != nil && result.RotationBlocked {
 		return nil, nil
 	}

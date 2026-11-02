@@ -36,6 +36,15 @@
         {{ t('admin.settings.accountRotation.timing') }}
         {{ t(value.mode === 'aggressive' ? 'admin.settings.accountRotation.aggressiveHint' : 'admin.settings.accountRotation.stickyHint') }}
       </p>
+      <div class="mt-4 rounded-xl bg-gray-50 p-4 dark:bg-dark-900/50">
+        <div class="flex items-center justify-between gap-4">
+          <label for="account-rotation-early-toggle" class="text-sm font-medium text-gray-900 dark:text-white">
+            {{ t('admin.settings.accountRotation.earlyRest') }}
+          </label>
+          <Toggle id="account-rotation-early-toggle" v-model="value.early_rest_enabled" />
+        </div>
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.accountRotation.earlyHint') }}</p>
+      </div>
     </template>
   </div>
 </template>

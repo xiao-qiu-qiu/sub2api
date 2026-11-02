@@ -1473,6 +1473,10 @@ export interface Account {
     rest_until: number
     idle_since: number
     rest_seconds: number
+    reason?: 'manual' | 'early' | 'scheduled' | ''
+    hold?: boolean
+    waiting_count?: number
+    early_eligible_at?: number
   } | null
   scheduler_score?: {
     base_score: number
