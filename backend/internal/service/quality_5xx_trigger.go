@@ -147,9 +147,9 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 		}
 		plan.TriggerSource = quality5xxSource
 		plan.TriggerObservedAt = &observedAt
-		if qualitySignalCovered(plan, observedAt) {
-			continue // An overlapping scheduled/event test already covered this signal.
-		}
+		// A run's completion time does not prove it covered a signal that arrived
+		// during the probe. Only acknowledge the queue entry actually processed;
+		// the queue's compare-and-delete preserves newer signals for another run.
 		if plan.RunningUntil != nil && plan.RunningUntil.After(time.Now()) {
 			return fmt.Errorf("quality plan %d is still running", plan.ID)
 		}
@@ -165,9 +165,6 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 			}
 			if current.RunningUntil != nil && current.RunningUntil.After(time.Now()) {
 				return fmt.Errorf("quality plan %d is still running", plan.ID)
-			}
-			if qualitySignalCovered(current, observedAt) {
-				continue
 			}
 			return fmt.Errorf("quality plan %d could not be claimed", plan.ID)
 		}
@@ -247,11 +244,4 @@ func quality5xxTestConfig(account *Account, model string, cfg PelicanTestConfig)
 		applyOutcome = policy.Action != QualityActionEnableBPS && !cfg.BPSRecoveryPending
 	}
 	return cfg, applyOutcome
-}
-
-func qualitySignalCovered(plan *ScheduledTestPlan, observedAt time.Time) bool {
-	if plan.PelicanConfig != nil && plan.PelicanConfig.Quality != nil && plan.PelicanConfig.Quality.Action == QualityActionRemoveModel {
-		return false
-	}
-	return plan.LastRunAt != nil && !plan.LastRunAt.Before(observedAt)
 }

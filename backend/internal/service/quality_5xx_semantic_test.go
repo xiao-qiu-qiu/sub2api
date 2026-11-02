@@ -167,19 +167,24 @@ func TestQuality5xxDoesNotSkipRecentlyCompletedPlan(t *testing.T) {
 	require.True(t, future.Equal(plans.next), "event test must keep the future cron")
 }
 
-func TestQuality5xxCoalescesWithOverlappingCron(t *testing.T) {
+func TestQuality5xxRetriesAfterOverlappingCron(t *testing.T) {
 	plan := pelicanPlan()
 	plan.PelicanConfig = stateProbePlanConfig()
 	plan.PelicanConfig.Quality = &QualityPolicy{Action: "disable_scheduling", TriggerOnUpstream5xx: true}
 	observed, until := time.Now(), time.Now().Add(time.Minute)
 	plan.RunningUntil = &until
 	plans := &qualityRecentPlanRepo{plan: plan}
-	runner := &ScheduledTestRunnerService{planRepo: plans}
+	results := &pelicanResults{}
+	runner := &ScheduledTestRunnerService{planRepo: plans, scheduledSvc: NewScheduledTestService(plans, results)}
+	runner.runPelican = func(context.Context, int64, string, *PelicanTestConfig) (*ScheduledTestResult, error) {
+		return &ScheduledTestResult{Status: "success", QualityJudgment: &QualityJudgment{Verdict: "correct"}}, nil
+	}
 	require.Error(t, runner.runQualityTriggeredAccount(context.Background(), plan.AccountID, observed))
 	finished := observed.Add(time.Second)
 	plan.LastRunAt, plan.RunningUntil = &finished, nil
 	require.NoError(t, runner.runQualityTriggeredAccount(context.Background(), plan.AccountID, observed))
-	require.False(t, plans.claimed, "cron completion must consume the old signal without a second test")
+	require.True(t, plans.claimed, "cron completion cannot prove it covered a signal received during the probe")
+	require.Len(t, results.results, 1)
 }
 
 func qualityTestMembers(t *testing.T, server *miniredis.Miniredis) []string {

@@ -244,13 +244,25 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	qualityAction := ""
 	if plan.PelicanConfig.Quality != nil {
 		qualityAction = "inconclusive"
+		outcome := qualityRoundOutcome(results)
 		freshSignal := true
 		if plan.TriggerSource == quality5xxSource && plan.TriggerObservedAt != nil && s.qualityTrigger != nil {
 			freshSignal = s.qualityTrigger.signalIsCurrent(plan.AccountID, *plan.TriggerObservedAt)
 		}
-		if applyTriggeredQuality && freshSignal && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission) {
+		if !freshSignal {
+			// A newer failure invalidates recovery evidence, not a confirmed
+			// degradation. Mixed model rounds must not restore their passed models
+			// while applying restrictions to the models that failed.
+			qualityAction = "stale_run"
+			for model, modelOutcome := range plan.QualityModelOutcomes {
+				if modelOutcome == "passed" {
+					plan.QualityModelOutcomes[model] = "inconclusive"
+				}
+			}
+		}
+		if applyTriggeredQuality && (freshSignal || outcome == "failed") && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission) {
 			var actionErr error
-			qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, qualityRoundOutcome(results))
+			qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, outcome)
 			if actionErr != nil {
 				qualityAction = "action_error"
 				logger.LegacyPrintf("service.scheduled_test_runner", "quality plan=%d action failed: %v", plan.ID, actionErr)

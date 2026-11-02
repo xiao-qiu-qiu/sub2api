@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestQuality5xxClaimKeepsCronAndCoalescesScheduledRun(t *testing.T) {
+func TestQuality5xxClaimKeepsCronAndRetainsOverlappingSignal(t *testing.T) {
 	ctx := context.Background()
 	var account int64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable) VALUES('5xx trigger','openai','oauth','active',true) RETURNING id`).Scan(&account))
@@ -41,7 +41,8 @@ func TestQuality5xxClaimKeepsCronAndCoalescesScheduledRun(t *testing.T) {
 	stored.TriggerObservedAt = &now
 	ok, err = plans.ClaimPelican(ctx, stored, now.Add(time.Second), until, future)
 	require.NoError(t, err)
-	require.False(t, ok, "completed cron covers an earlier signal atomically")
+	require.True(t, ok, "completion time cannot prove the probe covered an earlier pending signal")
+	require.NoError(t, plans.FinishPelican(ctx, plan.ID, until, now.Add(time.Second)))
 	newSignal := now.Add(time.Second)
 	stored.TriggerObservedAt = &newSignal
 	ok, err = plans.ClaimPelican(ctx, stored, now.Add(time.Second), until, future)

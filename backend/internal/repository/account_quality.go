@@ -144,10 +144,17 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 	if err != nil {
 		return "", err
 	}
-	// Checked under the same account/plan locks as restoration. A 5xx that
-	// arrives during a probe invalidates that probe even across replicas.
+	// Check again under the account/plan locks: a 5xx can arrive after the
+	// runner reads Redis. New episodes invalidate recovery, not degradation.
 	if state.Quality5xxEpisode != plan.Quality5xxEpisode {
-		return "stale_run", nil
+		if outcome != "failed" {
+			return "stale_run", nil
+		}
+		for model, modelOutcome := range plan.QualityModelOutcomes {
+			if modelOutcome == "passed" {
+				plan.QualityModelOutcomes[model] = "inconclusive"
+			}
+		}
 	}
 	defer func() {
 		diagnostic := plan.QualityRestoreDiagnostic

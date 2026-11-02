@@ -9,7 +9,6 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 	"testing"
-	"time"
 )
 
 type immediateQualityAccountRepo struct {
@@ -39,15 +38,6 @@ func TestQuality5xxProductionProviderAppliesBeforeReturning(t *testing.T) {
 	svc.observeQualityStatus(context.Background(), &Account{ID: 12, Type: AccountTypeOAuth}, 429)
 	require.Equal(t, 1, repo.calls)
 }
-func TestQuality5xxPendingRemoveModelsNotCoveredByOlderFinish(t *testing.T) {
-	p := pelicanPlan()
-	now := time.Now()
-	finished := now.Add(time.Second)
-	p.LastRunAt = &finished
-	p.PelicanConfig.Quality = &QualityPolicy{TriggerOnUpstream5xx: true, Action: QualityActionRemoveModel, RemoveModels: []string{"target"}}
-	require.False(t, qualitySignalCovered(p, now), "old probe finishing after new signal must not acknowledge it")
-}
-
 func TestQuality5xxWorkerProviderHasQueue(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := queuetest.NewClient(mr.Addr())
