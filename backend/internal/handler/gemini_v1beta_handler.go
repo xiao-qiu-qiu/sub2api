@@ -116,6 +116,11 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 	defer keyRelease()
+	accountRelease, admitted := h.acquireGeminiRotationMetadataSlot(c, account)
+	if !admitted {
+		return
+	}
+	defer accountRelease()
 	res, err := h.geminiCompatService.ForwardListModels(c.Request.Context(), account)
 	if err != nil {
 		googleError(c, http.StatusBadGateway, err.Error())
@@ -321,6 +326,11 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		return
 	}
 	defer keyRelease()
+	accountRelease, admitted := h.acquireGeminiRotationMetadataSlot(c, account)
+	if !admitted {
+		return
+	}
+	defer accountRelease()
 	res, err := h.geminiCompatService.ForwardGetModel(c.Request.Context(), account, modelName)
 	if err != nil {
 		googleError(c, http.StatusBadGateway, err.Error())
@@ -553,6 +563,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					geminiDigestChain,
 				)
 				if found {
+					c.Request = c.Request.WithContext(service.WithAccountRotationSticky(c.Request.Context(), foundAccountID))
 					matchedDigestChain = foundMatchedChain
 					sessionBoundAccountID = foundAccountID
 					geminiSessionUUID = foundUUID
@@ -590,7 +601,8 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		// 缓存只存在于绑定账号：排除分组内其余账号，失败不换号。
 		maxAccountSwitches = 0
 		sessionBoundAccountID = cachedContentBinding.AccountID
-		c.Request = c.Request.WithContext(service.WithGeminiCachedContentBound(c.Request.Context()))
+		ctx := service.WithGeminiCachedContentBound(c.Request.Context())
+		c.Request = c.Request.WithContext(service.WithAccountRotationSticky(ctx, cachedContentBinding.AccountID))
 		cachedContentExclusions, err = h.gatewayService.GeminiExplicitCacheExclusions(c.Request.Context(), apiKey.GroupID, cachedContentBinding.AccountID)
 		if err != nil {
 			reqLog.Warn("gemini.cached_content.list_accounts_failed", zap.Error(err))
@@ -661,6 +673,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				return
 			}
 		}
+		c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
@@ -726,6 +739,14 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				&streamStarted,
 			)
 			if err != nil {
+				if errors.Is(err, service.ErrAccountRotationUnavailable) {
+					if accountWaitCounted {
+						geminiConcurrency.DecrementAccountWaitCount(c.Request.Context(), account.ID)
+						accountWaitCounted = false
+					}
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
 				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				googleConcurrencyError(c, err, "account")
 				return
@@ -1127,4 +1148,27 @@ func isAntigravityGeminiModel(model string) bool {
 	}
 	detected, ok := service.DetectModelPlatform(trimmed)
 	return ok && detected == service.PlatformGemini
+}
+
+// Metadata calls join account activity only while experimental rotation is enabled.
+func (h *GatewayHandler) acquireGeminiRotationMetadataSlot(c *gin.Context, account *service.Account) (func(), bool) {
+	ctx := c.Request.Context()
+	var concurrency *service.ConcurrencyService
+	if h.concurrencyHelper != nil {
+		concurrency = h.concurrencyHelper.concurrencyService
+	}
+	ctx = concurrency.AccountRotationContext(ctx)
+	ctx = service.ContextWithAccountRotationSelection(ctx, account)
+	c.Request = c.Request.WithContext(ctx)
+	release, err := concurrency.AcquireAccountRotationOnly(ctx, account)
+	if errors.Is(err, service.ErrAccountRotationUnavailable) {
+		markOpsRoutingCapacityLimited(c)
+		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
+		return nil, false
+	}
+	if err != nil {
+		googleConcurrencyError(c, err, "account")
+		return nil, false
+	}
+	return release, true
 }

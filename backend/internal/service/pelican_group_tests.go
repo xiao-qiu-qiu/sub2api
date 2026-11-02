@@ -636,6 +636,7 @@ func (r *gatewayPelicanGroupRouter) route(ctx context.Context, group *Group, mod
 // holdSlot returns the slot the scheduler acquired, or waits for one like a queued user
 // request would, up to slotWait.
 func (r *gatewayPelicanGroupRouter) holdSlot(ctx context.Context, selection *AccountSelectionResult) (func(), error) {
+	ctx = ContextWithSelectionProfitGate(ctx, selection)
 	if selection.Acquired || selection.WaitPlan == nil || r.concurrency == nil {
 		return releaseOnce(selection.ReleaseFunc), nil
 	}
@@ -647,6 +648,9 @@ func (r *gatewayPelicanGroupRouter) holdSlot(ctx context.Context, selection *Acc
 	deadline := time.Now().Add(wait)
 	for {
 		acquired, err := r.concurrency.AcquireAccountSlot(ctx, plan.AccountID, plan.MaxConcurrency)
+		if errors.Is(err, ErrAccountRotationUnavailable) {
+			return nil, errPelicanGroupAccountBusy
+		}
 		if err == nil && acquired != nil && acquired.Acquired {
 			return releaseOnce(acquired.ReleaseFunc), nil
 		}

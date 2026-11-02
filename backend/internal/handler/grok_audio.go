@@ -371,7 +371,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		account := selection.Account
 		var started bool
 		release, status := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &started, reqLog)
-		if status == openAISlotAcquireProfitVetoed {
+		if status == openAISlotAcquireProfitVetoed || status == openAISlotAcquireRotationBlocked {
 			failed[account.ID] = struct{}{}
 			continue
 		}

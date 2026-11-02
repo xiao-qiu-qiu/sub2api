@@ -529,8 +529,9 @@ func ProvideDeferredService(accountRepo AccountRepository, timingWheel *TimingWh
 }
 
 // ProvideConcurrencyService creates ConcurrencyService and starts slot cleanup worker.
-func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountRepository, cfg *config.Config) *ConcurrencyService {
+func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountRepository, cfg *config.Config, rotationSettings *SettingService) *ConcurrencyService {
 	svc := NewConcurrencyService(cache)
+	svc.SetAccountRotation(rotationSettings, accountRepo)
 	if runtime, ok := cache.(interface{ RunRegionalRuntime(context.Context) }); ok {
 		go runtime.RunRegionalRuntime(svc.apiKeyQueueStopContext())
 	}
@@ -552,6 +553,17 @@ func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountReposi
 			svc.StartSlotCleanupWorker(accountRepo, cfg.Gateway.Scheduling.SlotCleanupInterval)
 		}
 	}
+	return svc
+}
+
+func ProvideGeminiMessagesCompatService(
+	accounts AccountRepository, groups GroupRepository, cache GatewayCache,
+	snapshot *SchedulerSnapshotService, tokens *GeminiTokenProvider,
+	limits *RateLimitService, upstream HTTPUpstream, antigravity *AntigravityGatewayService,
+	cfg *config.Config, concurrency *ConcurrencyService,
+) *GeminiMessagesCompatService {
+	svc := NewGeminiMessagesCompatService(accounts, groups, cache, snapshot, tokens, limits, upstream, antigravity, cfg)
+	svc.SetConcurrencyService(concurrency)
 	return svc
 }
 
@@ -1059,7 +1071,7 @@ var ProviderSet = wire.NewSet(
 	NewAntigravityOAuthService,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
-	NewGeminiMessagesCompatService,
+	ProvideGeminiMessagesCompatService,
 	ProvideAntigravityTokenProvider,
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,

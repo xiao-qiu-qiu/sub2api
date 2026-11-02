@@ -352,6 +352,10 @@ func (h *OpenAIGatewayHandler) admitOpenAIWSTurnForPricing(
 	reqLog *zap.Logger,
 	turnPricing *openAIWSTurnPricing,
 ) (func(), func(), error) {
+	// A later turn on this established connection has a verified existing owner.
+	if turn > 1 {
+		ctx = service.WithAccountRotationSticky(ctx, account.ID)
+	}
 	userRelease, userAcquired, err := admitOpenAIWSTurn(h.concurrencyHelper, ctx, c, userID, userConcurrency, apiKey.ID, apiKey.ConcurrencyLimit)
 	if err != nil {
 		return nil, nil, mapOpenAIWSTurnAdmissionError(err)
@@ -363,6 +367,9 @@ func (h *OpenAIGatewayHandler) admitOpenAIWSTurnForPricing(
 	if err != nil {
 		if userRelease != nil {
 			userRelease()
+		}
+		if errors.Is(err, service.ErrAccountRotationUnavailable) {
+			return nil, nil, service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is resting; reconnect with complete context", err)
 		}
 		return nil, nil, service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire account concurrency slot", err)
 	}
@@ -1087,7 +1094,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
-		if slotResult == openAISlotAcquireProfitVetoed {
+		if slotResult == openAISlotAcquireProfitVetoed || slotResult == openAISlotAcquireRotationBlocked {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
@@ -1743,7 +1750,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
-		if slotResult == openAISlotAcquireProfitVetoed {
+		if slotResult == openAISlotAcquireProfitVetoed || slotResult == openAISlotAcquireRotationBlocked {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
@@ -2504,6 +2511,8 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
+	// No request has been sent; callers exclude this account and select again.
+	openAISlotAcquireRotationBlocked
 )
 
 // openAIWSTurnPricing 持有 WebSocket 连接内「当前 turn」的计费定价时刻。
@@ -2700,7 +2709,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	// 门只存在于调度栈的局部 ctx，必须经选号结果重放到本函数的 ctx 上。
 	ctx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
 	ctx = service.ContextWithSelectionPriorityRequest(ctx, selection)
-	c.Request = c.Request.WithContext(service.ContextWithSelectionPriorityRequest(c.Request.Context(), selection))
+	c.Request = c.Request.WithContext(ctx)
 	checkLatency := func(release func()) bool {
 		if denied := h.gatewayService.CheckPriorityLatencySelection(ctx, selection); denied != nil {
 			if release != nil {
@@ -2752,6 +2761,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		if errors.Is(err, service.ErrAccountRotationUnavailable) {
+			return nil, openAISlotAcquireRotationBlocked
+		}
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
@@ -2809,6 +2821,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		if errors.Is(err, service.ErrAccountRotationUnavailable) {
+			return nil, openAISlotAcquireRotationBlocked
+		}
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
@@ -3369,12 +3384,16 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return
 			}
 			fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
-				ctx,
+				admissionCtx,
 				account.ID,
 				selection.WaitPlan.MaxConcurrency,
 			)
 			if err != nil {
 				reqLog.Warn("openai.websocket_account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				if errors.Is(err, service.ErrAccountRotationUnavailable) {
+					failedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
 				closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire account concurrency slot")
 				return
 			}

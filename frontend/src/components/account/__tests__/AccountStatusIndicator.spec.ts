@@ -51,6 +51,17 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('keeps manual pause visible while showing the rotation phase', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: { account: makeAccount({ schedulable: false, account_rotation: {
+        phase: 'resting', started_at: 100, drain_at: 200, rest_until: 9999999999, idle_since: 200, rest_seconds: 1200
+      } }) },
+      global: { stubs: { Icon: true } }
+    })
+    expect(wrapper.get('[data-testid="account-rotation-status"]').text()).toBe('admin.settings.accountRotation.resting')
+    expect(wrapper.text()).toContain('admin.accounts.status.paused')
+    expect(wrapper.get('[data-testid="account-rotation-status"]').attributes('title')).toBe('admin.settings.accountRotation.restUntil')
+  })
   it('keeps quality cooldown visible after its deadline without a credits bypass', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

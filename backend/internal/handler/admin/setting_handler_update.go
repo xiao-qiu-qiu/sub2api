@@ -25,6 +25,7 @@ import (
 
 // UpdateSettingsRequest 更新设置请求
 type UpdateSettingsRequest struct {
+	AccountRotationSettings           *service.AccountRotationSettings `json:"account_rotation_settings"`
 	ExcelBPSEnabled                   *bool                            `json:"excel_bps_enabled"`
 	OpenAICodexTicketHarvestScope     *service.CodexTicketHarvestScope `json:"openai_codex_ticket_harvest_scope"`
 	OpenAICodexTicketStrictResponse   *bool                            `json:"openai_codex_ticket_strict_response"`
@@ -553,6 +554,14 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
+	}
+	if raw, sent := sentFields[service.SettingKeyAccountRotationSettings]; sent {
+		settings, err := decodeAccountRotationSettings(raw)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		req.AccountRotationSettings = settings
 	}
 	if req.OpenAICodexTicketHarvestScope != nil && req.OpenAICodexTicketHarvestScope.Mode == "" {
 		response.BadRequest(c, "harvest scope mode is required")
@@ -1669,6 +1678,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 
 	settings := &service.SystemSettings{
+		AccountRotationSettings: req.AccountRotationSettings,
 		// 系统全局 platform quota 默认值（整体替换语义）
 		DefaultPlatformQuotas:       req.DefaultPlatformQuotas,
 		AccountSchedulingThresholds: req.AccountSchedulingThresholds,
@@ -2588,6 +2598,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	passkeyConfigured, passkeyRPID, passkeyRPOrigins := h.settingService.PasskeyConfiguration()
 
 	payload := dto.SystemSettings{
+		AccountRotationSettings:                                updatedSettings.AccountRotationSettings,
 		RegistrationEnabled:                                    updatedSettings.RegistrationEnabled,
 		LoginRateLimitEnabled:                                  updatedSettings.LoginRateLimitEnabled,
 		RegistrationIPLimitEnabled:                             updatedSettings.RegistrationIPLimitEnabled,

@@ -498,8 +498,15 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 	if accountID <= 0 || account == nil || store == nil {
 		return nil, nil
 	}
+	ctx = s.concurrencyService.AccountRotationContext(WithAccountRotationSticky(ctx, accountID))
+	if !s.concurrencyService.AccountRotationAllowed(ctx, account, true) {
+		return nil, nil
+	}
 
 	result, acquireErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+	if result != nil && result.RotationBlocked {
+		return nil, nil
+	}
 	if acquireErr == nil && result.Acquired {
 		logOpenAIWSBindResponseAccountWarn(
 			derefGroupID(groupID),

@@ -391,6 +391,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			}
+			c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 			account := selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
@@ -454,6 +455,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					&streamStarted,
 				)
 				if err != nil {
+					if errors.Is(err, service.ErrAccountRotationUnavailable) {
+						releaseWait()
+						fs.FailedAccountIDs[account.ID] = struct{}{}
+						continue
+					}
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
 					h.handleConcurrencyError(c, err, "account", streamStarted)
@@ -723,6 +729,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			}
+			c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 			account := selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
@@ -796,6 +803,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					&streamStarted,
 				)
 				if err != nil {
+					if errors.Is(err, service.ErrAccountRotationUnavailable) {
+						releaseWait()
+						fs.FailedAccountIDs[account.ID] = struct{}{}
+						continue
+					}
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
 					h.handleConcurrencyError(c, err, "account", streamStarted)
@@ -2128,7 +2140,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
 	// 校验 billing eligibility（订阅/余额）
-	// count_tokens 不占用户/账号槽，API key 限额仍约束上游请求。
+	// count_tokens 保留原用户并发策略；启用轮休时另行追踪账号活动。
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		status, code, message, retryAfter := billingErrorDetails(err)
 		if retryAfter > 0 {
@@ -2167,6 +2179,20 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 
 	// 转发请求（不记录使用量）
+	c.Request = c.Request.WithContext(service.ContextWithAccountRotationSelection(c.Request.Context(), account))
+	accountRelease, acquireErr := h.concurrencyHelper.concurrencyService.AcquireAccountRotationOnly(c.Request.Context(), account)
+	if errors.Is(acquireErr, service.ErrAccountRotationUnavailable) {
+		h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionHash)
+		markOpsRoutingCapacityLimited(c)
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
+		return
+	}
+	if acquireErr != nil {
+		h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionHash)
+		h.handleConcurrencyError(c, acquireErr, "account", false)
+		return
+	}
+	defer accountRelease()
 	if err := h.gatewayService.ForwardCountTokens(c.Request.Context(), c, account, parsedReq); err != nil {
 		reqLog.Error("gateway.count_tokens_forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		// 错误响应已在 ForwardCountTokens 中处理

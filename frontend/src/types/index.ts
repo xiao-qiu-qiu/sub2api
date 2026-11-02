@@ -1466,6 +1466,14 @@ export interface Account {
   concurrency: number
   load_factor?: number | null
   current_concurrency?: number // Real-time concurrency count from Redis
+  account_rotation?: {
+    phase: 'ready' | 'working' | 'draining' | 'resting'
+    started_at: number
+    drain_at: number
+    rest_until: number
+    idle_since: number
+    rest_seconds: number
+  } | null
   scheduler_score?: {
     base_score: number
     sticky_score?: number

@@ -200,7 +200,7 @@ func wrapReleaseOnDone(ctx context.Context, releaseFunc func()) func() {
 	}
 	// Enforced leases must outlive cancellation until the forwarding owner joins
 	// upstream. Releasing on ctx.Done would admit a replacement during shutdown.
-	if service.HasAPIKeyAdmissionOwner(ctx) {
+	if service.HasAPIKeyAdmissionOwner(ctx) || service.HasAccountRotationTracking(ctx) {
 		return sync.OnceFunc(releaseFunc)
 	}
 	var once sync.Once

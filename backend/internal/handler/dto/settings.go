@@ -30,6 +30,8 @@ type CustomEndpoint struct {
 
 // SystemSettings represents the admin settings API response payload.
 type SystemSettings struct {
+	AccountRotationSettings *service.AccountRotationSettings `json:"account_rotation_settings"`
+
 	OpenAICodexTicketHarvestScope       service.CodexTicketHarvestScope `json:"openai_codex_ticket_harvest_scope"`
 	OpenAICodexTicketStrictResponse     bool                            `json:"openai_codex_ticket_strict_response,omitempty"`
 	OpenAICodexTicketCandyObservation   bool                            `json:"openai_codex_ticket_candy_observation"`

@@ -39,6 +39,10 @@ func (s *SettingService) UpdateSettings(ctx context.Context, settings *SystemSet
 // UpdateSettingsOmitting persists system settings, leaving the keys in omitted
 // at their stored value.
 func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) error {
+	if settings != nil && settings.AccountRotationSettings != nil {
+		s.accountRotationSettingsWriteMu.Lock()
+		defer s.accountRotationSettingsWriteMu.Unlock()
+	}
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -65,6 +69,10 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaults(ctx context.Contex
 // auth-source defaults in a single write, leaving the keys in omitted at their
 // stored value.
 func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx context.Context, settings *SystemSettings, authDefaults *AuthSourceDefaultSettings, omitted OmittedSettingKeys) error {
+	if settings != nil && settings.AccountRotationSettings != nil {
+		s.accountRotationSettingsWriteMu.Lock()
+		defer s.accountRotationSettingsWriteMu.Unlock()
+	}
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -95,6 +103,9 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 // it omitted, so in that case the caches are rebuilt from storage rather than
 // from the request struct.
 func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) {
+	if _, skip := omitted[SettingKeyAccountRotationSettings]; !skip && settings.AccountRotationSettings != nil {
+		s.InvalidateAccountRotationSettingsCache()
+	}
 	if len(omitted) == 0 {
 		s.refreshCachedSettings(settings)
 		return
@@ -223,6 +234,13 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	}
 
 	updates := make(map[string]string)
+	if settings.AccountRotationSettings != nil {
+		value, err := s.marshalAccountRotationSettingsUpdate(ctx, settings.AccountRotationSettings)
+		if err != nil {
+			return nil, err
+		}
+		updates[SettingKeyAccountRotationSettings] = value
+	}
 
 	// 注册设置
 	updates[SettingKeyRegistrationEnabled] = strconv.FormatBool(settings.RegistrationEnabled)

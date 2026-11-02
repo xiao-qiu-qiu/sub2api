@@ -5125,6 +5125,8 @@
                 <Toggle v-model="form.allow_ungrouped_key_scheduling" />
               </div>
 
+              <AccountRotationSettingsEditor v-model="form.account_rotation_settings" />
+
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
                 <div class="mb-3">
                   <label class="font-medium text-gray-900 dark:text-white">
@@ -9554,6 +9556,8 @@ import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
 import RequestTimezoneSettings from "@/components/settings/RequestTimezoneSettings.vue";
 import Toggle from "@/components/common/Toggle.vue";
+import AccountRotationSettingsEditor from "@/components/admin/settings/AccountRotationSettings.vue";
+import { defaultAccountRotationSettings, type AccountRotationSettings } from "@/api/admin/settings";
 import ProxySelector from "@/components/common/ProxySelector.vue";
 import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
@@ -10289,6 +10293,7 @@ type SettingsForm = Omit<
   // 系统全局平台限额 map；form 内始终归一化为全部平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
+  account_rotation_settings: AccountRotationSettings;
   prism_browser_api_key: string;
 };
 
@@ -10305,6 +10310,7 @@ function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] 
 }
 
 const form = reactive<SettingsForm>({
+  account_rotation_settings: defaultAccountRotationSettings(),
   excel_bps_enabled: true,
   prism_browser_enabled: false,
   prism_browser_base_url: "http://127.0.0.1:8319/v1",
@@ -11692,6 +11698,7 @@ async function loadSettings() {
     );
     form.payment_recharge_bonus_notice = settings.payment_recharge_bonus_notice || "";
     form.default_platform_quotas = normalizePlatformQuotasMap(settings.default_platform_quotas);
+    form.account_rotation_settings = { ...defaultAccountRotationSettings(), ...settings.account_rotation_settings };
     form.account_scheduling_thresholds = normalizeAccountSchedulingThresholdsMap(
       settings.account_scheduling_thresholds,
     );
@@ -12289,6 +12296,7 @@ async function saveSettings() {
       min_claude_code_version: form.min_claude_code_version,
       max_claude_code_version: form.max_claude_code_version,
       allow_ungrouped_key_scheduling: form.allow_ungrouped_key_scheduling,
+      account_rotation_settings: { ...form.account_rotation_settings },
       openai_ttft_mode:
         form.openai_ttft_mode === "visible" ? "visible" : "semantic",
       enable_fingerprint_unification: form.enable_fingerprint_unification,

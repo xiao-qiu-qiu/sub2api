@@ -137,6 +137,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 	passkeyConfigured, passkeyRPID, passkeyRPOrigins := h.settingService.PasskeyConfiguration()
 
 	payload := dto.SystemSettings{
+		AccountRotationSettings:                                settings.AccountRotationSettings,
 		RegistrationEnabled:                                    settings.RegistrationEnabled,
 		LoginRateLimitEnabled:                                  settings.LoginRateLimitEnabled,
 		RegistrationIPLimitEnabled:                             settings.RegistrationIPLimitEnabled,

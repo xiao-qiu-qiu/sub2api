@@ -130,6 +130,12 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 	}
 
 	setOpsSelectedAccount(c, account.ID, account.Platform)
+	rotationRelease, rotationErr := h.concurrencyHelper.concurrencyService.AcquireAccountRotationOnly(c.Request.Context(), account)
+	if rotationErr != nil {
+		h.errorResponse(c, http.StatusServiceUnavailable, "temporarily_unavailable", "Account is resting; retry the request")
+		return
+	}
+	defer rotationRelease()
 	if err := h.gatewayService.ForwardResponsesInputTokens(c.Request.Context(), c, account, forwardBody); err != nil {
 		reqLog.Error("openai_input_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
@@ -313,6 +319,12 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	forwardBody := mappedBodyForMessages(channelMapping.Mapped, channelMapping.MappedModel)
 	defaultMappedModel := preferredMappedModel
+	rotationRelease, rotationErr := h.concurrencyHelper.concurrencyService.AcquireAccountRotationOnly(c.Request.Context(), account)
+	if rotationErr != nil {
+		h.anthropicErrorResponse(c, http.StatusServiceUnavailable, "temporarily_unavailable", "Account is resting; retry the request")
+		return
+	}
+	defer rotationRelease()
 
 	if err := h.gatewayService.ForwardCountTokensAsAnthropic(c.Request.Context(), c, account, forwardBody, defaultMappedModel); err != nil {
 		reqLog.Error("openai_count_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,6 +101,9 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 			break
 		}
 		slot, err := s.slots.AcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		if errors.Is(err, ErrAccountRotationUnavailable) {
+			continue
+		}
 		if err != nil {
 			result.Reason = "judge_capacity_unavailable"
 			return result

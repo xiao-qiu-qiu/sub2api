@@ -40,7 +40,7 @@ func (s *GatewayService) ProbeAPIKeyGroup(ctx context.Context, group *Group, mod
 	eligible := make([]AccountWithConcurrency, 0, len(accounts))
 	for i := range accounts {
 		account := &accounts[i]
-		if !s.isAccountSchedulableForSelection(account) || !s.isGatewayAccountProfitEligible(ctx, account) ||
+		if !s.isAccountSchedulableForSelection(ctx, account) || !s.isGatewayAccountProfitEligible(ctx, account) ||
 			(group.RequirePrivacySet && !account.IsPrivacySet()) ||
 			(model != "" && !s.isModelSupportedByAccountInGroup(ctx, account, &group.ID, model)) ||
 			!s.isAccountSchedulableForModelSelection(ctx, account, model) ||

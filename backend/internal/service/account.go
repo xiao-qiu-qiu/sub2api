@@ -23,6 +23,8 @@ import (
 )
 
 type Account struct {
+	rotationSticky         bool
+	rotationTracked        bool
 	AuthConnectionID       string
 	AuthConnectionRevision int64
 	InitialAdmissionPlan   *ScheduledTestPlan `json:"-"`

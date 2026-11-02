@@ -583,9 +583,11 @@ type AccountWaitPlan struct {
 }
 
 type AccountSelectionResult struct {
-	Account     *Account
-	Acquired    bool
-	ReleaseFunc func()
+	rotationSticky  bool
+	rotationTracked bool
+	Account         *Account
+	Acquired        bool
+	ReleaseFunc     func()
 	// AccountRequestID is the exact Redis member acquired for Acquired results.
 	// Live transfer moves it into the Live lease instead of double counting.
 	AccountRequestID string

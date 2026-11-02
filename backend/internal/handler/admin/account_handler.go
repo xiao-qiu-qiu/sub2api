@@ -224,10 +224,11 @@ type CheckMixedChannelRequest struct {
 // AccountWithConcurrency extends Account with real-time concurrency info
 type AccountWithConcurrency struct {
 	*dto.Account
-	simpleMode         bool                         `json:"-"`
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	simpleMode         bool                          `json:"-"`
+	CurrentConcurrency int                           `json:"current_concurrency"`
+	AccountRotation    *service.AccountRotationState `json:"account_rotation,omitempty"`
+	SchedulerScore     *AccountSchedulerScore        `json:"scheduler_score,omitempty"`
+	SchedulerScores    []AccountSchedulerGroupScore  `json:"scheduler_scores,omitempty"`
 	// 以下字段仅在对应账号启用运行时容量控制时返回；OpenAI OAuth 仅使用 RPM 字段
 	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
 	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
@@ -241,14 +242,15 @@ type AccountWithConcurrency struct {
 // so groups/account_groups never appear in the list payload.
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
-	CurrentWindowCost  *float64                     `json:"current_window_cost,omitempty"`
-	ActiveSessions     *int                         `json:"active_sessions,omitempty"`
-	CurrentRPM         *int                         `json:"current_rpm,omitempty"`
-	RPMPaused          bool                         `json:"rpm_paused,omitempty"`
-	RPMResetAt         *int64                       `json:"rpm_reset_at,omitempty"`
+	CurrentConcurrency int                           `json:"current_concurrency"`
+	AccountRotation    *service.AccountRotationState `json:"account_rotation,omitempty"`
+	SchedulerScore     *AccountSchedulerScore        `json:"scheduler_score,omitempty"`
+	SchedulerScores    []AccountSchedulerGroupScore  `json:"scheduler_scores,omitempty"`
+	CurrentWindowCost  *float64                      `json:"current_window_cost,omitempty"`
+	ActiveSessions     *int                          `json:"active_sessions,omitempty"`
+	CurrentRPM         *int                          `json:"current_rpm,omitempty"`
+	RPMPaused          bool                          `json:"rpm_paused,omitempty"`
+	RPMResetAt         *int64                        `json:"rpm_reset_at,omitempty"`
 }
 
 type simpleModeGroupReference struct {
@@ -421,6 +423,9 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	if h.concurrencyService != nil {
 		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
 			item.CurrentConcurrency = counts[account.ID]
+		}
+		if states, err := h.concurrencyService.GetAccountRotationStates(ctx, []int64{account.ID}); err == nil {
+			item.AccountRotation = states[account.ID]
 		}
 	}
 
@@ -763,6 +768,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	}
 
 	concurrencyCounts := make(map[int64]int)
+	var rotationStates map[int64]*service.AccountRotationState
 	var windowCosts map[int64]float64
 	var activeSessions map[int64]int
 	var rpmCounts map[int64]int
@@ -785,6 +791,9 @@ func (h *AccountHandler) List(c *gin.Context) {
 	if h.concurrencyService != nil {
 		if cc, ccErr := h.concurrencyService.GetAccountConcurrencyBatch(c.Request.Context(), accountIDs); ccErr == nil && cc != nil {
 			concurrencyCounts = cc
+		}
+		if states, err := h.concurrencyService.GetAccountRotationStates(c.Request.Context(), accountIDs); err == nil {
+			rotationStates = states
 		}
 	}
 
@@ -872,6 +881,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 			Account:            accountResponse,
 			simpleMode:         h.isSimpleMode(),
 			CurrentConcurrency: concurrencyCounts[acc.ID],
+			AccountRotation:    rotationStates[acc.ID],
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
 		}
@@ -922,6 +932,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 			compact[i] = AccountListItemWithConcurrency{
 				AccountListItem:    dto.AccountListItemFromAccount(item.Account),
 				CurrentConcurrency: item.CurrentConcurrency,
+				AccountRotation:    item.AccountRotation,
 				SchedulerScore:     item.SchedulerScore,
 				SchedulerScores:    item.SchedulerScores,
 				CurrentWindowCost:  item.CurrentWindowCost,

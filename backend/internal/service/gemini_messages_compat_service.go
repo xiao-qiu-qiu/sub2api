@@ -60,6 +60,7 @@ type GeminiMessagesCompatService struct {
 	accountRepo               AccountRepository
 	groupRepo                 GroupRepository
 	cache                     GatewayCache
+	concurrencyService        *ConcurrencyService
 	schedulerSnapshot         *SchedulerSnapshotService
 	tokenProvider             *GeminiTokenProvider
 	rateLimitService          *RateLimitService
@@ -111,11 +112,17 @@ func (s *GeminiMessagesCompatService) GetTokenProvider() *GeminiTokenProvider {
 	return s.tokenProvider
 }
 
+// SetConcurrencyService installs shared account admission during startup.
+func (s *GeminiMessagesCompatService) SetConcurrencyService(concurrency *ConcurrencyService) {
+	s.concurrencyService = concurrency
+}
+
 func (s *GeminiMessagesCompatService) SelectAccountForModel(ctx context.Context, groupID *int64, sessionHash string, requestedModel string) (*Account, error) {
 	return s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, nil)
 }
 
 func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+	ctx = s.concurrencyService.AccountRotationContext(ctx)
 	// 1. 确定目标平台和调度模式
 	// Determine target platform and scheduling mode
 	platform, useMixedScheduling, hasForcePlatform, err := s.resolvePlatformAndSchedulingMode(ctx, groupID)
@@ -124,6 +131,11 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 	}
 
 	cacheKey := "gemini:" + sessionHash
+	if sessionHash != "" && s.cache != nil {
+		if accountID, cacheErr := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), cacheKey); cacheErr == nil && accountID > 0 {
+			ctx = WithAccountRotationSticky(ctx, accountID)
+		}
+	}
 
 	// 2. 尝试粘性会话命中
 	// Try sticky session hit
@@ -156,13 +168,18 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 		return nil, errors.New("no available Gemini accounts")
 	}
 
+	selected, err = s.hydrateSelectedAccount(ctx, selected)
+	if err != nil {
+		return nil, err
+	}
+
 	// 5. 设置粘性会话绑定
 	// Set sticky session binding
 	if sessionHash != "" {
 		_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, selected.ID, geminiStickySessionTTL)
 	}
 
-	return s.hydrateSelectedAccount(ctx, selected)
+	return selected, nil
 }
 
 // resolvePlatformAndSchedulingMode 解析目标平台和调度模式。
@@ -221,6 +238,7 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	if _, excluded := excludedIDs[accountID]; excluded {
 		return nil
 	}
+	ctx = WithAccountRotationSticky(ctx, accountID)
 
 	account, err := s.getSchedulableAccount(ctx, accountID)
 	if err != nil {
@@ -237,6 +255,10 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	// 验证账号是否可用于当前请求
 	// Verify account is usable for current request
 	if !s.isAccountUsableForRequest(ctx, account, groupID, requestedModel, platform, useMixedScheduling) {
+		return nil
+	}
+	account, err = s.hydrateSelectedAccount(ctx, account)
+	if err != nil {
 		return nil
 	}
 
@@ -269,6 +291,9 @@ func (s *GeminiMessagesCompatService) isAccountUsableForRequestWithPrecheck(
 	useMixedScheduling bool,
 	precheckResult map[int64]bool,
 ) bool {
+	if account == nil || !s.concurrencyService.AccountRotationAllowed(ctx, account, AccountRotationSticky(ctx, account.ID)) {
+		return false
+	}
 	// 检查模型调度能力
 	// Check model scheduling capability
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
@@ -451,20 +476,35 @@ func (s *GeminiMessagesCompatService) getSchedulableAccount(ctx context.Context,
 }
 
 func (s *GeminiMessagesCompatService) hydrateSelectedAccount(ctx context.Context, account *Account) (*Account, error) {
-	if account == nil || s.schedulerSnapshot == nil {
+	if account == nil {
 		return account, nil
 	}
-	hydrated, err := s.schedulerSnapshot.GetAccount(ctx, account.ID)
-	if err != nil {
-		return nil, err
+	hydrated := account
+	if s.schedulerSnapshot != nil {
+		var err error
+		hydrated, err = s.schedulerSnapshot.GetAccount(ctx, account.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if hydrated == nil {
 		return nil, fmt.Errorf("selected gemini account %d not found during hydration", account.ID)
 	}
-	return hydrated, nil
+	if !s.concurrencyService.AccountRotationAllowed(ctx, hydrated, AccountRotationSticky(ctx, hydrated.ID)) {
+		return nil, ErrNoAvailableAccounts
+	}
+	return MarkAccountRotationSelection(ctx, hydrated), nil
 }
 
 func (s *GeminiMessagesCompatService) listSchedulableAccountsOnce(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, error) {
+	accounts, err := s.listSchedulableAccountsBeforeRotation(ctx, groupID, platform, hasForcePlatform)
+	if err != nil {
+		return nil, err
+	}
+	return s.concurrencyService.FilterAccountRotation(ctx, accounts)
+}
+
+func (s *GeminiMessagesCompatService) listSchedulableAccountsBeforeRotation(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, error) {
 	if s.schedulerSnapshot != nil {
 		accounts, _, err := s.schedulerSnapshot.ListSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
 		return accounts, err

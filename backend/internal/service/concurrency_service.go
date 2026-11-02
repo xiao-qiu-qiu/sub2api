@@ -230,7 +230,10 @@ const (
 
 // ConcurrencyService 管理账号和用户的并发限制。
 type ConcurrencyService struct {
-	cache ConcurrencyCache
+	cache            ConcurrencyCache
+	rotationSettings accountRotationSettingsProvider
+	rotationAccounts AccountRepository
+	rotationPools    sync.Map
 
 	accountLoadCacheTTL atomic.Int64
 	accountLoadCacheMu  sync.RWMutex
@@ -314,8 +317,9 @@ func (s *ConcurrencyService) SetAccountLoadBatchCacheTTL(ttl time.Duration) {
 
 // AcquireResult represents the result of acquiring a concurrency slot
 type AcquireResult struct {
-	Acquired    bool
-	ReleaseFunc func() // Must be called when done (typically via defer)
+	Acquired        bool
+	RotationBlocked bool
+	ReleaseFunc     func() // Must be called when done (typically via defer)
 	// RequestID is the exact Redis member owned by this result. Live transfer
 	// uses it to move the reservation atomically instead of counting it twice.
 	RequestID string
@@ -349,6 +353,13 @@ type UserLoadInfo struct {
 // If the account is at max concurrency, it waits until a slot is available or timeout.
 // Returns a release function that MUST be called when the request completes.
 func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {
+	policy, err := s.accountRotationPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if policy != nil {
+		return s.acquireAccountRotationSlot(ctx, accountID, maxConcurrency, *policy)
+	}
 	// If maxConcurrency is 0 or negative, no limit
 	if maxConcurrency <= 0 {
 		return &AcquireResult{

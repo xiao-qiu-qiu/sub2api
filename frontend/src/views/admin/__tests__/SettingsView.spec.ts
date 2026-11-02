@@ -852,6 +852,23 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
+  it("loads account rotation and saves an edited work window without losing its mode", async () => {
+    const rotation = { enabled: true, mode: 'sticky', work_minutes: 300, rest_min_minutes: 10, rest_max_minutes: 30, stagger_percent: 10 };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, account_rotation_settings: rotation });
+    const wrapper = mountView();
+    await flushPromises();
+    const gatewayTab = wrapper.findAll('button').find((node) => node.text().includes('admin.settings.tabs.gateway'));
+    expect(gatewayTab).toBeDefined();
+    await gatewayTab!.trigger('click');
+    const editor = wrapper.findComponent({ name: 'AccountRotationSettings' });
+    expect(editor.exists()).toBe(true);
+    expect(editor.get('select').element.value).toBe('sticky');
+    await editor.get('input[type="number"]').setValue('240');
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240 });
+  });
+
   it("leaves the monitor mode alone unless it was changed here", async () => {
     getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: "v3" });
     const wrapper = mountView();

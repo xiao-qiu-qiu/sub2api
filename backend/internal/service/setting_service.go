@@ -194,6 +194,10 @@ type SettingService struct {
 	openAIQuotaAutoPauseSettingsCache atomic.Value // *cachedOpenAIQuotaAutoPauseSettings
 	openAIQuotaAutoPauseSettingsSF    singleflight.Group
 	openAIAPIKeyHealthBreakerCache    atomic.Value // *cachedOpenAIAPIKeyHealthBreakerSettings
+	accountRotationSettingsCache      atomic.Value // *cachedAccountRotationSettings
+	accountRotationSettingsMu         sync.Mutex
+	accountRotationSettingsGen        uint64 // guarded by Mu; saves supersede in-flight reads
+	accountRotationSettingsWriteMu    sync.Mutex
 
 	// openAIResponseHeaderTimeoutCache lets the HTTP upstream client read the
 	// admin-configurable OpenAI response-header timeout without a DB hit per

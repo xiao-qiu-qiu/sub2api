@@ -373,6 +373,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		}
 	}
 	result := &SystemSettings{
+		AccountRotationSettings:                parseAccountRotationSettings(settings[SettingKeyAccountRotationSettings]),
 		RegistrationEnabled:                    settings[SettingKeyRegistrationEnabled] == "true",
 		LoginRateLimitEnabled:                  settings[SettingKeyLoginRateLimitEnabled] != "false",
 		RegistrationIPLimitEnabled:             settings[SettingKeyRegistrationIPLimitEnabled] != "false",

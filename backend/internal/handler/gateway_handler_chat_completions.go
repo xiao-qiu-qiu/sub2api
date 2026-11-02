@@ -232,6 +232,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 		}
+		c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
@@ -252,6 +253,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				&streamStarted,
 			)
 			if err != nil {
+				if errors.Is(err, service.ErrAccountRotationUnavailable) {
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
 				reqLog.Warn("gateway.cc.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				h.handleConcurrencyError(c, err, "account", streamStarted)
 				return

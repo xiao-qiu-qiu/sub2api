@@ -844,13 +844,7 @@ func (c *concurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int
 }
 
 func (c *concurrencyCache) ReleaseAccountSlot(ctx context.Context, accountID int64, requestID string) error {
-	key := accountSlotKey(accountID)
-	if err := c.rdb.ZRem(ctx, key, requestID).Err(); err != nil {
-		return err
-	}
-	// 释放后用真实负载刷新索引；若没有槽位和等待计数，会移除索引 member。
-	c.refreshAccountActiveIndex(ctx, accountID)
-	return nil
+	return c.releaseAccountRotationSlot(ctx, accountID, requestID, 0, 0, false)
 }
 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {
@@ -1415,7 +1409,7 @@ func (c *concurrencyCache) ReleaseLiveLeaseAccount(ctx context.Context, accountI
 	if c == nil || c.rdb == nil || accountID <= 0 || leaseID == "" {
 		return nil
 	}
-	return c.rdb.ZRem(ctx, liveAccountSlotKey(accountID), leaseID).Err()
+	return c.releaseAccountRotationLiveSlot(ctx, accountID, leaseID)
 }
 
 // AbortLiveLeaseTransfer fences a handoff whose acknowledgement was lost and
@@ -1492,12 +1486,7 @@ func (c *concurrencyCache) ReleaseLiveLease(ctx context.Context, accountID, user
 	if c == nil || c.rdb == nil || leaseID == "" {
 		return nil
 	}
-	pipe := c.rdb.TxPipeline()
-	pipe.ZRem(ctx, liveAccountSlotKey(accountID), leaseID)
-	pipe.ZRem(ctx, liveUserSlotKey(userID), leaseID)
-	pipe.ZRem(ctx, liveAPIKeySlotKey(apiKeyID), leaseID)
-	_, err := pipe.Exec(ctx)
-	return err
+	return c.releaseAccountRotationSlot(ctx, accountID, leaseID, userID, apiKeyID, true)
 }
 
 func (c *concurrencyCache) GetAPIKeyConcurrencyBatch(ctx context.Context, apiKeyIDs []int64) (map[int64]int, error) {

@@ -148,6 +148,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				return
 			}
 		}
+		c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 		account := selection.Account
 
 		accountRelease := selection.ReleaseFunc
@@ -159,6 +160,10 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 			}
 			accountRelease, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, selection.WaitPlan.Timeout, false, &streamStarted)
 			if err != nil {
+				if errors.Is(err, service.ErrAccountRotationUnavailable) {
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
 				reqLog.Warn("systemone.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				h.handleConcurrencyError(c, err, "account", false)
 				return

@@ -20,6 +20,25 @@ export interface DefaultSubscriptionSetting {
   validity_days: number;
 }
 
+export interface AccountRotationSettings {
+  enabled: boolean;
+  mode: 'aggressive' | 'sticky';
+  work_minutes: number;
+  rest_min_minutes: number;
+  rest_max_minutes: number;
+  stagger_percent: number;
+  revision?: string;
+}
+
+export const defaultAccountRotationSettings = (): AccountRotationSettings => ({
+  enabled: false,
+  mode: 'aggressive',
+  work_minutes: 300,
+  rest_min_minutes: 10,
+  rest_max_minutes: 30,
+  stagger_percent: 10,
+});
+
 // ── 平台限额类型 ──────────────────────────────────────────────────
 /** 可设置默认限额的平台：平台清单中的全部具体平台（与后端 AllowedQuotaPlatforms 同源）。 */
 export type PlatformType = AccountPlatform
@@ -619,6 +638,7 @@ export interface SystemSettings {
 
   // Per-platform account auto-pause thresholds (100 = disabled)
   account_scheduling_thresholds: AccountSchedulingThresholdsMap;
+  account_rotation_settings?: AccountRotationSettings;
 
   // Identity patch configuration (Claude -> Gemini)
   enable_identity_patch: boolean;
@@ -1007,6 +1027,7 @@ export interface UpdateSettingsRequest {
   grok_default_base_url_mode?: string;
   grok_video_source_url_enabled?: boolean;
   account_scheduling_thresholds?: AccountSchedulingThresholdsMap;
+  account_rotation_settings?: AccountRotationSettings;
   enable_identity_patch?: boolean;
   identity_patch_prompt?: string;
   ops_monitoring_enabled?: boolean;

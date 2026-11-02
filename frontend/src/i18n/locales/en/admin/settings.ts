@@ -520,6 +520,25 @@ export default {
         maxVersionHint:
           'Reject Claude Code clients above this version (semver format). Leave empty to allow any version.'
       },
+      accountRotation: {
+        title: 'Experimental account rotation',
+        mode: 'Drain mode',
+        aggressive: 'Aggressive: move all new requests',
+        sticky: 'Gentle: allow existing sticky sessions',
+        work: 'Work window (minutes)',
+        stagger: 'Window flexibility (±%)',
+        restMin: 'Minimum rest (minutes)',
+        restMax: 'Maximum rest (minutes)',
+        timing: 'The clock starts on admission and resets after more than 5 idle minutes. Accounts sharing a platform and group membership stagger their windows, then drain and rest for a random interval.',
+        aggressiveHint: 'Aggressive mode waits only for in-flight requests before resting.',
+        stickyHint: 'Gentle mode allows existing sticky continuations until concurrency reaches zero.',
+        ready: 'Rotation ready',
+        working: 'Work window active',
+        draining: 'Draining for rest',
+        resting: 'Resting',
+        drainAt: 'Planned drain: {time}',
+        restUntil: 'Resume admission: {time}',
+      },
       scheduling: {
         title: 'Gateway Scheduling Settings',
         description: 'Control API Key scheduling behavior',

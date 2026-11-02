@@ -2,6 +2,17 @@
   <div class="flex flex-col items-start gap-1">
     <ExcelBPSCredentialStatus :state="account.excel_bps_credential_state" />
     <span
+      v-if="account.account_rotation"
+      data-testid="account-rotation-status"
+      :class="['badge text-xs', ['draining', 'resting'].includes(account.account_rotation.phase) ? 'badge-warning' : 'badge-info']"
+      :title="account.account_rotation.phase === 'resting'
+        ? t('admin.settings.accountRotation.restUntil', { time: new Date(account.account_rotation.rest_until * 1000).toLocaleString() })
+        : account.account_rotation.drain_at > 0
+          ? t('admin.settings.accountRotation.drainAt', { time: new Date(account.account_rotation.drain_at * 1000).toLocaleString() }) : undefined"
+    >
+      {{ t(`admin.settings.accountRotation.${account.account_rotation.phase}`) }}
+    </span>
+    <span
       v-if="protocolEnabled && isExcelBPSEnabled"
       data-testid="bps-status-badge"
       class="inline-flex items-center rounded bg-[#217346] px-1.5 py-0.5 text-[10px] font-semibold leading-3 text-white"

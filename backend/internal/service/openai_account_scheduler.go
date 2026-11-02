@@ -331,11 +331,12 @@ type defaultOpenAIAccountScheduler struct {
 }
 
 type openAISelectionProbeBudget struct {
-	acquires      int
-	rechecks      int
-	attempted     map[int64]struct{}
-	limited       bool
-	latencyDenied error
+	acquires        int
+	rechecks        int
+	attempted       map[int64]struct{}
+	rotationBlocked map[int64]struct{}
+	limited         bool
+	latencyDenied   error
 }
 
 // Keep a late policy rejection while trying healthy alternatives. It takes
@@ -421,6 +422,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	ctx = s.service.withAccountRotationSession(ctx, req.GroupID, req.SessionHash)
+	ctx = WithAccountRotationSticky(ctx, req.StickyAccountID, req.StickyPreviousAccountID)
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
 		req.RequirePrivacySet = true
 	}
@@ -766,7 +769,11 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		)
 		return nil, true, nil
 	}
+	ctx = WithAccountRotationSticky(ctx, accountID)
 	result, acquireErr := s.service.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+	if result != nil && result.RotationBlocked {
+		return nil, false, nil
+	}
 	if acquireErr != nil && req.DisableStickyEscape {
 		return nil, false, acquireErr
 	}
@@ -1480,6 +1487,11 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 		if candidate.account == nil {
 			continue
 		}
+		if budget != nil {
+			if _, blocked := budget.rotationBlocked[candidate.account.ID]; blocked {
+				continue
+			}
+		}
 		if denied := s.service.priorityLatencyAdmission(req, candidate.account); denied != nil {
 			if budget != nil {
 				budget.latencyDenied = denied
@@ -1561,10 +1573,16 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAIAccountSlot(
 	maxConcurrency int,
 	budget *openAISelectionProbeBudget,
 ) (*AcquireResult, bool, error) {
-	if s.service.concurrencyService != nil && maxConcurrency > 0 && !budget.recordAcquire(accountID) {
+	if s.service.concurrencyService != nil && (maxConcurrency > 0 || HasAccountRotationTracking(ctx)) && !budget.recordAcquire(accountID) {
 		return nil, false, nil
 	}
 	result, err := s.service.tryAcquireAccountSlot(ctx, accountID, maxConcurrency)
+	if budget != nil && result != nil && result.RotationBlocked {
+		if budget.rotationBlocked == nil {
+			budget.rotationBlocked = make(map[int64]struct{})
+		}
+		budget.rotationBlocked[accountID] = struct{}{}
+	}
 	return result, true, err
 }
 
@@ -1651,6 +1669,9 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		if result != nil && result.RotationBlocked {
+			continue
+		}
 		if acquireErr != nil {
 			return nil, acquireErr
 		}
@@ -2052,6 +2073,25 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 		}
 	}
 
+	// A work window can close during either acquisition pass. Remove its account
+	// before rebuilding TopK so it cannot crowd out a healthy peer. Share the
+	// probe budget across these shrinking pools, even if fresh load lookup failed.
+	if budget != nil && len(budget.rotationBlocked) > 0 {
+		remaining := make([]*Account, 0, len(filtered))
+		for _, account := range filtered {
+			if _, blocked := budget.rotationBlocked[account.ID]; !blocked {
+				remaining = append(remaining, account)
+			}
+		}
+		if len(remaining) < len(filtered) {
+			budget.enableLimit()
+			if len(remaining) == 0 {
+				return attempt
+			}
+			return s.trySelectByLoadBalancePool(ctx, req, remaining, loadMap, budget)
+		}
+	}
+
 	return attempt
 }
 
@@ -2208,6 +2248,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	ctx = withOpenAIProxyQuarantineTransport(ctx, req.RequiredTransport)
 	if account == nil {
 		return false, "account_nil"
+	}
+	if s != nil && s.service != nil && !s.service.concurrencyService.AccountRotationAllowed(ctx, account, AccountRotationSticky(ctx, account.ID)) {
+		return false, "account_rotation"
 	}
 	if account.IsExcelOAuth() && s != nil && s.service != nil && !s.service.excelBPSGloballyEnabled(ctx) {
 		return false, "excel_bps_disabled"

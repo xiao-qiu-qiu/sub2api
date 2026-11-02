@@ -184,7 +184,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		release, acquireOK, acquireErr := h.acquireWebSearchAccountSlot(c, selected)
 		if !acquireOK {
 			// First hop: surface concurrency errors; later hops try another account.
-			if attempt == 0 && acquireErr != nil {
+			if attempt == 0 && acquireErr != nil && !errors.Is(acquireErr, service.ErrAccountRotationUnavailable) {
 				h.handleConcurrencyError(c, acquireErr, "account", false)
 				return
 			}
@@ -294,6 +294,7 @@ func (h *GatewayHandler) acquireWebSearchAccountSlot(
 	if selected == nil || selected.Account == nil {
 		return nil, false, nil
 	}
+	c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selected))
 	if selected.Acquired {
 		return selected.ReleaseFunc, true, nil
 	}

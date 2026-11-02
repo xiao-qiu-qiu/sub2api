@@ -193,7 +193,11 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 			ttlRejectedLimit = max(ttlRejectedLimit, account.GeminiExplicitCacheUpstreamMaxTTL())
 			continue
 		}
-		accountReleaseFunc, ok := h.acquireGeminiCachedContentAccountSlot(c, reqLog, geminiConcurrency, selection)
+		accountReleaseFunc, ok, acquireErr := h.acquireGeminiCachedContentAccountSlot(c, reqLog, geminiConcurrency, selection)
+		if errors.Is(acquireErr, service.ErrAccountRotationUnavailable) {
+			excluded[account.ID] = struct{}{}
+			continue
+		}
 		if !ok {
 			return
 		}
@@ -234,13 +238,21 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 			return
 		}
 
+		rotationTracked := service.HasAccountRotationTracking(c.Request.Context())
+		if rotationTracked {
+			// Creation can require a compensating upstream DELETE before returning.
+			defer accountReleaseFunc()
+		}
 		upstream, err := svc.CreateUpstream(c.Request.Context(), account, req, mappedModel, publicID, ttl)
-		accountReleaseFunc()
+		if !rotationTracked {
+			accountReleaseFunc()
+		}
 		if err != nil {
 			var upErr *service.GeminiCachedContentUpstreamError
 			if errors.As(err, &upErr) {
 				reqLog.Info("gemini.cached_content.upstream_create_failed", zap.Int64("account_id", account.ID), zap.Int("status", upErr.StatusCode))
 				if upErr.RetryableOnOtherAccount() {
+					accountReleaseFunc()
 					lastUpstreamErr = upErr
 					excluded[account.ID] = struct{}{}
 					continue
@@ -262,6 +274,7 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 				return
 			}
 			reqLog.Warn("gemini.cached_content.upstream_create_error", zap.Int64("account_id", account.ID), zap.Error(err))
+			accountReleaseFunc()
 			excluded[account.ID] = struct{}{}
 			continue
 		}
@@ -421,6 +434,12 @@ func (h *GatewayHandler) GeminiCachedContentsPatch(c *gin.Context) {
 		googleError(c, http.StatusServiceUnavailable, geminiCachedContentUnavailableMessage)
 		return
 	}
+	c.Request = c.Request.WithContext(service.WithAccountRotationSticky(c.Request.Context(), account.ID))
+	accountRelease, admitted := h.acquireGeminiRotationMetadataSlot(c, account)
+	if !admitted {
+		return
+	}
+	defer accountRelease()
 	ttl, err := service.ParseGeminiCachedContentPatchRequest(body, c.Query("updateMask"), svc.Now(), svc.MaxTTLForAccount(account))
 	if err != nil {
 		googleError(c, http.StatusBadRequest, err.Error())
@@ -537,6 +556,12 @@ func (h *GatewayHandler) GeminiCachedContentsDelete(c *gin.Context) {
 		return
 	}
 	if account != nil {
+		c.Request = c.Request.WithContext(service.WithAccountRotationSticky(c.Request.Context(), account.ID))
+		accountRelease, admitted := h.acquireGeminiRotationMetadataSlot(c, account)
+		if !admitted {
+			return
+		}
+		defer accountRelease()
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		if err := svc.DeleteUpstream(c.Request.Context(), account, record); err != nil {
 			var upErr *service.GeminiCachedContentUpstreamError
@@ -616,27 +641,28 @@ func (h *GatewayHandler) resolveGeminiCachedContentBinding(c *gin.Context, reqLo
 	return record, rewritten, true
 }
 
-// acquireGeminiCachedContentAccountSlot 获取选中账号的并发槽（含等待计划）；返回 false 表示已写出错误响应。
-func (h *GatewayHandler) acquireGeminiCachedContentAccountSlot(c *gin.Context, reqLog *zap.Logger, helper *ConcurrencyHelper, selection *service.AccountSelectionResult) (func(), bool) {
+// acquireGeminiCachedContentAccountSlot leaves rotation refusals to the failover loop.
+func (h *GatewayHandler) acquireGeminiCachedContentAccountSlot(c *gin.Context, reqLog *zap.Logger, helper *ConcurrencyHelper, selection *service.AccountSelectionResult) (func(), bool, error) {
+	c.Request = c.Request.WithContext(service.ContextWithSelectionProfitGate(c.Request.Context(), selection))
 	if selection.Acquired {
 		release := selection.ReleaseFunc
 		if release == nil {
 			release = func() {}
 		}
-		return wrapReleaseOnDone(c.Request.Context(), release), true
+		return wrapReleaseOnDone(c.Request.Context(), release), true, nil
 	}
 	account := selection.Account
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
 		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
-		return nil, false
+		return nil, false, nil
 	}
 	canWait, err := helper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
 	if err != nil {
 		reqLog.Warn("gemini.cached_content.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	} else if !canWait {
 		googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
-		return nil, false
+		return nil, false, nil
 	}
 	streamStarted := false
 	release, acquireErr := helper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, selection.WaitPlan.Timeout, false, &streamStarted)
@@ -644,14 +670,17 @@ func (h *GatewayHandler) acquireGeminiCachedContentAccountSlot(c *gin.Context, r
 		helper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
 	}
 	if acquireErr != nil {
+		if errors.Is(acquireErr, service.ErrAccountRotationUnavailable) {
+			return nil, false, acquireErr
+		}
 		reqLog.Warn("gemini.cached_content.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(acquireErr))
 		googleConcurrencyError(c, acquireErr, "account")
-		return nil, false
+		return nil, false, nil
 	}
 	if release == nil {
 		release = func() {}
 	}
-	return wrapReleaseOnDone(c.Request.Context(), release), true
+	return wrapReleaseOnDone(c.Request.Context(), release), true, nil
 }
 
 // submitGeminiCachedContentUsage 记录缓存创建 / 延长的计费：inputTokens 按输入价计，storageTokenHours 按计费模型的存储单价计；
