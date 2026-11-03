@@ -79,6 +79,8 @@ func (r *accountTokenGuardV2TestRepo) ClaimAccount(context.Context, int64, strin
 func (r *accountTokenGuardV2TestRepo) CompleteProbe(_ context.Context, _ int64, _ string, result AccountTokenGuardV2ProbeCompletion) error {
 	r.completion = &result
 	if r.record != nil {
+		r.record.UnauthorizedRetryAt = result.UnauthorizedRetryAt
+		r.record.UnauthorizedCredentialsHash = result.UnauthorizedCredentialsHash
 		r.record.ProbeState = result.ProbeState
 		r.record.ProbeDetail = result.ProbeDetail
 		r.record.FailStreak = result.FailStreak
@@ -214,6 +216,11 @@ func TestAccountTokenGuardV2SecondAuthFailureQueuesRelogin(t *testing.T) {
 		AccountID: 42, Enabled: true, AutoReloginEnabled: true, FailStreak: 1, NextProbeAt: time.Now(),
 	}}
 	guardRepo.createTask = reauthRepo.CreateTask
+	hash, err := hashReauthCredentials(reader.account.Credentials)
+	require.NoError(t, err)
+	retryAt := time.Now().Add(-time.Second)
+	guardRepo.record.UnauthorizedRetryAt = &retryAt
+	guardRepo.record.UnauthorizedCredentialsHash = hash
 	svc := NewAccountTokenGuardV2Service(guardRepo, nil, reader, accountTokenGuardV2TestProber{err: &codexModelsManifestUpstreamError{
 		err: errors.New("unauthorized"), statusCode: http.StatusUnauthorized,
 	}}, reauth)
@@ -284,7 +291,7 @@ func TestAccountTokenGuardV2RulesDefaultAndPersistence(t *testing.T) {
 		ProbeIntervalSeconds: 900, RetryIntervalSeconds: 60,
 		ReloginCooldownSeconds: 7200, FailStreakThreshold: 3,
 	}
-	want = NormalizeReloginBudgetRules(want)
+	want = normalizeAccountTokenGuardV2Rules(want)
 	saved, err := svc.SaveRules(context.Background(), want)
 	require.NoError(t, err)
 	require.Equal(t, want, saved)

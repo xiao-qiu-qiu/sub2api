@@ -24,37 +24,51 @@ const (
 	AccountTokenGuardV2ProbeTransient = "transient"
 	accountTokenGuardV2PolicyBlocked  = "upstream request or policy denied (403); automatic re-login blocked"
 
-	AccountTokenGuardV2ProbeInterval   = 30 * time.Minute
-	AccountTokenGuardV2RetryInterval   = 5 * time.Minute
-	accountTokenGuardV2LeaseDuration   = 2 * time.Minute
-	AccountTokenGuardV2ReloginCooldown = 30 * time.Minute
-	AccountTokenGuardV2FailThreshold   = 2
+	AccountTokenGuardV2ProbeInterval             = 30 * time.Minute
+	AccountTokenGuardV2RetryInterval             = 5 * time.Minute
+	AccountTokenGuardV2UnauthorizedRetryInterval = 30 * time.Second
+	accountTokenGuardV2LeaseDuration             = 2 * time.Minute
+	AccountTokenGuardV2ReloginCooldown           = 30 * time.Minute
+	AccountTokenGuardV2FailThreshold             = 2
 
 	accountTokenGuardV2RulesSettingKey = "account_token_guard_v2_rules"
 )
 
 type AccountTokenGuardV2Rules struct {
-	ReloginBackoffMaxSeconds int `json:"relogin_backoff_max_seconds"`
-	ReloginMaxFailures       int `json:"relogin_max_failures"`
-	ProbeIntervalSeconds     int `json:"probe_interval_seconds"`
-	RetryIntervalSeconds     int `json:"retry_interval_seconds"`
-	ReloginCooldownSeconds   int `json:"relogin_cooldown_seconds"`
-	FailStreakThreshold      int `json:"fail_streak_threshold"`
+	UnauthorizedRetryIntervalSeconds int `json:"unauthorized_retry_interval_seconds"`
+	ReloginBackoffMaxSeconds         int `json:"relogin_backoff_max_seconds"`
+	ReloginMaxFailures               int `json:"relogin_max_failures"`
+	ProbeIntervalSeconds             int `json:"probe_interval_seconds"`
+	RetryIntervalSeconds             int `json:"retry_interval_seconds"`
+	ReloginCooldownSeconds           int `json:"relogin_cooldown_seconds"`
+	FailStreakThreshold              int `json:"fail_streak_threshold"`
 }
 
 func defaultAccountTokenGuardV2Rules() AccountTokenGuardV2Rules {
 	return AccountTokenGuardV2Rules{
-		ReloginBackoffMaxSeconds: DefaultReloginBackoffMax,
-		ReloginMaxFailures:       DefaultReloginMaxFailures,
-		ProbeIntervalSeconds:     int(AccountTokenGuardV2ProbeInterval.Seconds()),
-		RetryIntervalSeconds:     int(AccountTokenGuardV2RetryInterval.Seconds()),
-		ReloginCooldownSeconds:   int(AccountTokenGuardV2ReloginCooldown.Seconds()),
-		FailStreakThreshold:      AccountTokenGuardV2FailThreshold,
+		UnauthorizedRetryIntervalSeconds: int(AccountTokenGuardV2UnauthorizedRetryInterval.Seconds()),
+		ReloginBackoffMaxSeconds:         DefaultReloginBackoffMax,
+		ReloginMaxFailures:               DefaultReloginMaxFailures,
+		ProbeIntervalSeconds:             int(AccountTokenGuardV2ProbeInterval.Seconds()),
+		RetryIntervalSeconds:             int(AccountTokenGuardV2RetryInterval.Seconds()),
+		ReloginCooldownSeconds:           int(AccountTokenGuardV2ReloginCooldown.Seconds()),
+		FailStreakThreshold:              AccountTokenGuardV2FailThreshold,
 	}
 }
 
-func ValidateAccountTokenGuardV2Rules(rules AccountTokenGuardV2Rules) error {
+func normalizeAccountTokenGuardV2Rules(rules AccountTokenGuardV2Rules) AccountTokenGuardV2Rules {
 	rules = NormalizeReloginBudgetRules(rules)
+	if rules.UnauthorizedRetryIntervalSeconds == 0 {
+		rules.UnauthorizedRetryIntervalSeconds = int(AccountTokenGuardV2UnauthorizedRetryInterval.Seconds())
+	}
+	return rules
+}
+
+func ValidateAccountTokenGuardV2Rules(rules AccountTokenGuardV2Rules) error {
+	rules = normalizeAccountTokenGuardV2Rules(rules)
+	if rules.UnauthorizedRetryIntervalSeconds < 1 || rules.UnauthorizedRetryIntervalSeconds > 86400 {
+		return errors.New("unauthorized_retry_interval_seconds must be between 1 and 86400")
+	}
 	if rules.ReloginMaxFailures < 1 || rules.ReloginMaxFailures > 20 {
 		return errors.New("relogin_max_failures must be between 1 and 20")
 	}
@@ -77,37 +91,41 @@ func ValidateAccountTokenGuardV2Rules(rules AccountTokenGuardV2Rules) error {
 }
 
 type AccountTokenGuardV2Record struct {
-	RefreshFailureCode   string
-	LastRefreshFailureAt *time.Time
-	ReloginFailStreak    int
-	LastCountedTaskID    int64
-	AutoReloginExhausted bool
-	AccountID            int64
-	Enabled              bool
-	AutoReloginEnabled   bool
-	ProbeState           string
-	ProbeDetail          string
-	FailStreak           int
-	LastProbeAt          *time.Time
-	LastReauthAt         *time.Time
-	NextProbeAt          time.Time
-	CooldownUntil        *time.Time
-	BlockedReason        string
-	LeaseOwner           string
-	LeaseUntil           *time.Time
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	UnauthorizedRetryAt         *time.Time
+	UnauthorizedCredentialsHash string
+	RefreshFailureCode          string
+	LastRefreshFailureAt        *time.Time
+	ReloginFailStreak           int
+	LastCountedTaskID           int64
+	AutoReloginExhausted        bool
+	AccountID                   int64
+	Enabled                     bool
+	AutoReloginEnabled          bool
+	ProbeState                  string
+	ProbeDetail                 string
+	FailStreak                  int
+	LastProbeAt                 *time.Time
+	LastReauthAt                *time.Time
+	NextProbeAt                 time.Time
+	CooldownUntil               *time.Time
+	BlockedReason               string
+	LeaseOwner                  string
+	LeaseUntil                  *time.Time
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
 }
 
 type AccountTokenGuardV2ProbeCompletion struct {
-	ProbeState    string
-	ProbeDetail   string
-	FailStreak    int
-	LastProbeAt   time.Time
-	LastReauthAt  *time.Time
-	NextProbeAt   time.Time
-	CooldownUntil *time.Time
-	BlockedReason string
+	UnauthorizedRetryAt         *time.Time
+	UnauthorizedCredentialsHash string
+	ProbeState                  string
+	ProbeDetail                 string
+	FailStreak                  int
+	LastProbeAt                 time.Time
+	LastReauthAt                *time.Time
+	NextProbeAt                 time.Time
+	CooldownUntil               *time.Time
+	BlockedReason               string
 }
 
 type AccountTokenGuardV2Repository interface {
@@ -220,7 +238,7 @@ func (s *AccountTokenGuardV2Service) GetRules(ctx context.Context) (AccountToken
 			return rules, err
 		}
 	}
-	rules = NormalizeReloginBudgetRules(rules)
+	rules = normalizeAccountTokenGuardV2Rules(rules)
 	if err := ValidateAccountTokenGuardV2Rules(rules); err != nil {
 		return rules, err
 	}
@@ -228,7 +246,7 @@ func (s *AccountTokenGuardV2Service) GetRules(ctx context.Context) (AccountToken
 }
 
 func (s *AccountTokenGuardV2Service) SaveRules(ctx context.Context, rules AccountTokenGuardV2Rules) (AccountTokenGuardV2Rules, error) {
-	rules = NormalizeReloginBudgetRules(rules)
+	rules = normalizeAccountTokenGuardV2Rules(rules)
 	if err := ValidateAccountTokenGuardV2Rules(rules); err != nil {
 		return rules, infraerrors.BadRequest("TOKEN_GUARD_V2_RULES_INVALID", err.Error())
 	}
@@ -255,16 +273,20 @@ func (s *AccountTokenGuardV2Service) Start() {
 	s.startOnce.Do(func() {
 		go func() {
 			defer close(s.doneCh)
-			ticker := time.NewTicker(time.Minute)
+			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
+			var nextMaintenance time.Time
 			runCycle := func() {
 				ctx, cancel := context.WithTimeout(s.rootCtx, 90*time.Second)
 				defer cancel()
-				if rows, err := s.repo.ListAccounts(ctx); err == nil && len(rows) > 0 {
-					s.reauth.EnsureWorker()
-				}
-				if err := s.reauth.QueueMissingExcelAuthorizations(ctx); err != nil {
-					slog.Warn("openai_excel_authorization_cycle_failed", "error", err)
+				if now := s.clockNow(); !now.Before(nextMaintenance) {
+					nextMaintenance = now.Add(time.Minute)
+					if rows, err := s.repo.ListAccounts(ctx); err == nil && len(rows) > 0 {
+						s.reauth.EnsureWorker()
+					}
+					if err := s.reauth.QueueMissingExcelAuthorizations(ctx); err != nil {
+						slog.Warn("openai_excel_authorization_cycle_failed", "error", err)
+					}
 				}
 				if _, err := s.RunDue(ctx); err != nil {
 					slog.Warn("account_token_guard_v2_cycle_failed", "error", err)
@@ -415,11 +437,17 @@ func (s *AccountTokenGuardV2Service) RunDue(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	var probes sync.WaitGroup
+	defer probes.Wait()
 	for i := range records {
 		if err := ctx.Err(); err != nil {
 			return i, err
 		}
-		s.runProbe(ctx, records[i])
+		probes.Add(1)
+		go func(record AccountTokenGuardV2Record) {
+			defer probes.Done()
+			s.runProbe(ctx, record)
+		}(records[i])
 	}
 	return len(records), nil
 }
@@ -479,9 +507,17 @@ func (s *AccountTokenGuardV2Service) runProbe(ctx context.Context, record Accoun
 		s.completeProbe(ctx, record.AccountID, completion)
 		return
 	}
+	probeCredentialsHash, hashErr := hashReauthCredentials(account.Credentials)
 	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	state, detail := s.probeAccount(probeCtx, account)
+	// Inspection must observe the current parent credential, not a cached
+	// model catalog or an independently authorized Excel/BPS credential.
+	prober := s.prober
+	if fresh, ok := prober.(accountTokenGuardV2RecoveryProber); ok {
+		prober = immediateOAuthFreshProbe{fresh}
+	}
+	state, detail, status := (&AccountTokenGuardV2Service{prober: prober}).probeAccountResult(probeCtx, account)
 	cancel()
+	completedAt := s.clockNow()
 	completion.ProbeState = state
 	completion.ProbeDetail = detail
 	completion.BlockedReason = ""
@@ -516,15 +552,44 @@ func (s *AccountTokenGuardV2Service) runProbe(ctx context.Context, record Accoun
 	case AccountTokenGuardV2ProbeAuth:
 		completion.FailStreak++
 		completion.NextProbeAt = now.Add(time.Duration(rules.RetryIntervalSeconds) * time.Second)
+		shouldRelogin := completion.FailStreak >= rules.FailStreakThreshold
+		var rejectedHash string
+		if status == http.StatusUnauthorized {
+			// A genuine HTTP 401 always needs two observations of the same
+			// credentials, separated by the configured delay, even if the
+			// general authentication failure threshold is one or greater than two.
+			rejectedHash = probeCredentialsHash
+			if hashErr != nil {
+				completion.BlockedReason = "inspection credentials could not be identified"
+				s.completeProbe(ctx, record.AccountID, completion)
+				return
+			}
+			retryAt := record.UnauthorizedRetryAt
+			if retryAt == nil || record.UnauthorizedCredentialsHash != rejectedHash {
+				at := completedAt.Add(time.Duration(rules.UnauthorizedRetryIntervalSeconds) * time.Second)
+				retryAt = &at
+			}
+			completion.UnauthorizedRetryAt = retryAt
+			completion.UnauthorizedCredentialsHash = rejectedHash
+			shouldRelogin = !now.Before(*retryAt)
+			if !shouldRelogin {
+				completion.NextProbeAt = *retryAt
+			}
+		}
 		cooldownActive := record.CooldownUntil != nil && record.CooldownUntil.After(now)
 		if cooldownActive && completion.BlockedReason == "" {
 			completion.BlockedReason = "automatic re-login cooling down"
 		}
-		if hasBudget && record.Enabled && record.AutoReloginEnabled && !record.AutoReloginExhausted && !pending && completion.FailStreak >= rules.FailStreakThreshold && !cooldownActive {
+		if hasBudget && record.Enabled && record.AutoReloginEnabled && !record.AutoReloginExhausted && !pending && shouldRelogin && !cooldownActive {
 			task, taskErr := s.reauth.createTaskForProfile(ctx, record.AccountID, "codex", func(createCtx context.Context, id int64, hash string) (*OpenAIOAuthReauthTaskRecord, error) {
+				if rejectedHash != "" && hash != rejectedHash {
+					return nil, infraerrors.Conflict("TOKEN_GUARD_V2_CREDENTIALS_CHANGED", "Credentials changed during inspection")
+				}
 				return budgetRepo.CreateAutomaticRelogin(createCtx, id, hash, s.leaseOwner, rules, s.clockNow())
 			})
 			if taskErr == nil && task != nil {
+				completion.UnauthorizedRetryAt = nil
+				completion.UnauthorizedCredentialsHash = ""
 				completion.LastReauthAt = &now
 				cooldown := now.Add(time.Duration(rules.ReloginCooldownSeconds) * time.Second)
 				completion.CooldownUntil = &cooldown
@@ -549,20 +614,36 @@ func (s *AccountTokenGuardV2Service) completeProbe(ctx context.Context, accountI
 }
 
 func (s *AccountTokenGuardV2Service) probeAccount(ctx context.Context, account *Account) (string, string) {
+	state, detail, _ := s.probeAccountResult(ctx, account)
+	return state, detail
+}
+
+func (s *AccountTokenGuardV2Service) probeAccountResult(ctx context.Context, account *Account) (string, string, int) {
 	if strings.TrimSpace(account.GetCredential("access_token")) == "" {
-		return AccountTokenGuardV2ProbeAuth, "account has no access token"
+		return AccountTokenGuardV2ProbeAuth, "account has no access token", 0
 	}
 	_, err := s.prober.FetchOpenAIModelsList(ctx, account)
 	if err == nil {
-		return AccountTokenGuardV2ProbeOK, "credential accepted"
+		return AccountTokenGuardV2ProbeOK, "credential accepted", http.StatusOK
 	}
 	var upstreamErr *codexModelsManifestUpstreamError
+	if errors.As(err, &upstreamErr) {
+		// Transport status wins over a misleading authentication envelope.
+		switch {
+		case upstreamErr.statusCode == http.StatusTooManyRequests:
+			return AccountTokenGuardV2ProbeTransient, credentialOperationDetail("rate_limited"), upstreamErr.statusCode
+		case upstreamErr.statusCode >= 500:
+			return AccountTokenGuardV2ProbeTransient, credentialOperationDetail("service_error"), upstreamErr.statusCode
+		case isOpenAIIPUnauthorizedResponse(upstreamErr.statusCode, upstreamErr.body):
+			return AccountTokenGuardV2ProbeTransient, credentialOperationDetail("authorization_denied"), upstreamErr.statusCode
+		}
+	}
 	if errors.As(err, &upstreamErr) && upstreamErr.statusCode == http.StatusForbidden {
 		policy, _, _ := detectOpenAICyberPolicy(upstreamErr.body)
 		if policy || isOpenAIUpstreamSessionBlocked(upstreamErr.body) || isOpenAIRequestScoped403(account, upstreamErr.statusCode, upstreamErr.body) {
 			// These denials say nothing about credential health. Never issue a
 			// fresh login/session to bypass them, or echo the upstream body.
-			return AccountTokenGuardV2ProbeTransient, accountTokenGuardV2PolicyBlocked
+			return AccountTokenGuardV2ProbeTransient, accountTokenGuardV2PolicyBlocked, upstreamErr.statusCode
 		}
 	}
 	var code string
@@ -593,12 +674,16 @@ func (s *AccountTokenGuardV2Service) probeAccount(ctx context.Context, account *
 			code = credentialOperationText(err.Error())
 		}
 	}
+	status := 0
+	if upstreamErr != nil {
+		status = upstreamErr.statusCode
+	}
 	if code == "requires_relogin" {
-		return AccountTokenGuardV2ProbeAuth, credentialOperationDetail(code)
+		return AccountTokenGuardV2ProbeAuth, credentialOperationDetail(code), status
 	}
 	// Verification, retirement, security denials and unknown failures cannot
 	// create a new login session. Existing retry budgets and leases still apply.
-	return AccountTokenGuardV2ProbeTransient, credentialOperationDetail(code)
+	return AccountTokenGuardV2ProbeTransient, credentialOperationDetail(code), status
 }
 
 // WorkerStatus separates saved login credentials from execution availability.

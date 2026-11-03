@@ -341,9 +341,12 @@ describe('TokenGuardV2View', () => {
     expect((wrapper.get('#token-guard-v2-rule-probe').element as HTMLInputElement).value).toBe('15')
 
     await wrapper.get('#token-guard-v2-rule-retry').setValue('2')
+    expect((wrapper.get('#token-guard-v2-rule-401-retry').element as HTMLInputElement).value).toBe('30')
+    await wrapper.get('#token-guard-v2-rule-401-retry').setValue('45')
     await wrapper.get('#token-guard-v2-rule-threshold').setValue('3')
     await wrapper.get('#token-guard-v2-rule-cooldown').setValue('120')
     api.saveRules.mockResolvedValueOnce({
+      unauthorized_retry_interval_seconds: 45,
       probe_interval_seconds: 900,
       retry_interval_seconds: 120,
       relogin_cooldown_seconds: 7200,
@@ -353,6 +356,7 @@ describe('TokenGuardV2View', () => {
     await flushPromises()
 
     expect(api.saveRules).toHaveBeenCalledWith({
+      unauthorized_retry_interval_seconds: 45,
       relogin_backoff_max_seconds: 7200,
       relogin_max_failures: 3,
       probe_interval_seconds: 900,
@@ -361,6 +365,7 @@ describe('TokenGuardV2View', () => {
       fail_streak_threshold: 3,
     })
     expect(wrapper.text()).toContain('tokenGuardV2.rulesSaved')
+    expect((wrapper.get('#token-guard-v2-rule-401-retry').element as HTMLInputElement).value).toBe('45')
   })
 
   it('paginates monitored accounts and resets to page one after searching', async () => {

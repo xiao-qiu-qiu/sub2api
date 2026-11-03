@@ -142,6 +142,7 @@
         </div>
         <form id="token-guard-v2-rules" class="rules-form" @submit.prevent="saveRulesConfig">
           <div class="rule-metrics">
+            <label><span>{{ t('tokenGuardV2.ruleUnauthorizedRetryInterval') }}</span><input id="token-guard-v2-rule-401-retry" v-model.number="rulesDraft.unauthorized_retry_interval_seconds" class="input" type="number" min="1" max="86400" required @input="rulesDirty = true" /><small>{{ t('tokenGuardV2.seconds') }}</small></label>
             <label><span>{{ t('tokenGuardV2.ruleProbeInterval') }}</span><input id="token-guard-v2-rule-probe" v-model.number="rulesDraft.probe_interval_minutes" class="input" type="number" min="1" max="1440" required @input="rulesDirty = true" /><small>{{ t('tokenGuardV2.minutes') }}</small></label>
             <label><span>{{ t('tokenGuardV2.ruleRetryInterval') }}</span><input id="token-guard-v2-rule-retry" v-model.number="rulesDraft.retry_interval_minutes" class="input" type="number" min="1" max="1440" required @input="rulesDirty = true" /><small>{{ t('tokenGuardV2.minutes') }}</small></label>
             <label><span>{{ t('tokenGuardV2.ruleFailureThreshold') }}</span><input id="token-guard-v2-rule-threshold" v-model.number="rulesDraft.fail_streak_threshold" class="input" type="number" min="1" max="10" required @input="rulesDirty = true" /><small>{{ t('tokenGuardV2.times') }}</small></label>
@@ -156,7 +157,7 @@
           <article><span>2</span><div><strong>{{ t('tokenGuardV2.ruleHealthyTitle') }}</strong><p>{{ t('tokenGuardV2.ruleHealthyHint') }}</p></div></article>
           <article><span>3</span><div><strong>{{ t('tokenGuardV2.ruleAuthTitle') }}</strong><p>{{ t('tokenGuardV2.ruleAuthHint') }}</p></div></article>
           <article><span>4</span><div><strong>{{ t('tokenGuardV2.ruleTransientTitle') }}</strong><p>{{ t('tokenGuardV2.ruleTransientHint') }}</p></div></article>
-          <article><span>5</span><div><strong>{{ t('tokenGuardV2.ruleReloginTitle') }}</strong><p>{{ t('tokenGuardV2.ruleReloginHint', { count: status.fail_streak_threshold }) }}</p></div></article>
+          <article><span>5</span><div><strong>{{ t('tokenGuardV2.ruleReloginTitle') }}</strong><p>{{ t('tokenGuardV2.ruleReloginHint', { count: status.fail_streak_threshold, seconds: status.unauthorized_retry_interval_seconds ?? 30 }) }}</p></div></article>
         </div>
       </section>
 
@@ -256,6 +257,7 @@ import {
 const { t } = useI18n()
 const encryptionReady = ref(false)
 const emptyStatus = (): TokenGuardV2Status => ({
+  unauthorized_retry_interval_seconds: 30,
   accounts: [],
   probe_interval_seconds: 1800,
   retry_interval_seconds: 300,
@@ -296,6 +298,7 @@ const blankDraft = (): SaveTokenGuardV2Account => ({
 })
 const draft = reactive<SaveTokenGuardV2Account>(blankDraft())
 const rulesDraft = reactive({
+  unauthorized_retry_interval_seconds: 30,
   relogin_backoff_max_minutes: 60,
   relogin_max_failures: 3,
   probe_interval_minutes: 30,
@@ -431,6 +434,7 @@ const configurationDetail = (item: TokenGuardV2Account) => {
 function resetDraft() { Object.assign(draft, blankDraft()) }
 function syncRulesDraft(rules: TokenGuardV2Rules) {
   Object.assign(rulesDraft, {
+    unauthorized_retry_interval_seconds: rules.unauthorized_retry_interval_seconds ?? 30,
     relogin_backoff_max_minutes: Math.round((rules.relogin_backoff_max_seconds ?? Math.max(3600, rules.relogin_cooldown_seconds)) / 60),
     relogin_max_failures: rules.relogin_max_failures ?? 3,
     probe_interval_minutes: Math.round(rules.probe_interval_seconds / 60),
@@ -488,6 +492,7 @@ async function saveRulesConfig() {
   rulesSaving.value = true; error.value = ''; notice.value = ''
   try {
     const saved = await saveTokenGuardV2Rules({
+      unauthorized_retry_interval_seconds: rulesDraft.unauthorized_retry_interval_seconds,
       relogin_backoff_max_seconds: Math.max(rulesDraft.relogin_backoff_max_minutes, rulesDraft.relogin_cooldown_minutes) * 60,
       relogin_max_failures: rulesDraft.relogin_max_failures,
       probe_interval_seconds: rulesDraft.probe_interval_minutes * 60,

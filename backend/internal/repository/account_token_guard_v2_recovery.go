@@ -249,7 +249,7 @@ func (r *accountTokenGuardV2Repository) CompleteImmediateReauthVerification(ctx 
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE account_token_guard_v2_accounts
         SET probe_state=$2,probe_detail=$3,fail_streak=$4,last_probe_at=$5,next_probe_at=$6,
-          blocked_reason=$7,updated_at=NOW() WHERE account_id=$1`, id, result.ProbeState, result.ProbeDetail,
+          blocked_reason=$7,unauthorized_retry_at=NULL,unauthorized_credentials_hash='',updated_at=NOW() WHERE account_id=$1`, id, result.ProbeState, result.ProbeDetail,
 		failures, result.LastProbeAt, result.NextProbeAt, result.BlockedReason)
 	if err != nil {
 		return err

@@ -98,6 +98,56 @@ func TestAccountTokenGuardV2RepositoryLeasesAndReauth(t *testing.T) {
 	require.Equal(t, service.OpenAIOAuthReauthStatusSucceeded, done.Status)
 }
 
+func TestAccountTokenGuardV2UnauthorizedConfirmationPersistence(t *testing.T) {
+	ctx := t.Context()
+	account := mustCreateAccount(t, testEntClient(t), &service.Account{
+		Name: "401-confirmation-test", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "synthetic"},
+	})
+	t.Cleanup(func() {
+		_, err := integrationDB.ExecContext(context.Background(), `DELETE FROM accounts WHERE id=$1`, account.ID)
+		require.NoError(t, err)
+	})
+	guard := NewAccountTokenGuardV2Repository(integrationDB)
+	require.NoError(t, guard.UpsertAccount(ctx, account.ID, true, true))
+	_, err := guard.ClaimAccount(ctx, account.ID, "first-instance", time.Minute)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	retryAt := now.Add(30 * time.Second)
+	result := service.AccountTokenGuardV2ProbeCompletion{ProbeState: service.AccountTokenGuardV2ProbeAuth,
+		FailStreak: 1, LastProbeAt: now, NextProbeAt: retryAt,
+		UnauthorizedRetryAt: &retryAt, UnauthorizedCredentialsHash: "synthetic-snapshot-hash"}
+	require.NoError(t, guard.CompleteProbe(ctx, account.ID, "first-instance", result))
+	guard = NewAccountTokenGuardV2Repository(integrationDB) // Restart / another process.
+	stored, err := guard.GetAccount(ctx, account.ID)
+	require.NoError(t, err)
+	require.True(t, retryAt.Equal(*stored.UnauthorizedRetryAt))
+	require.Equal(t, result.UnauthorizedCredentialsHash, stored.UnauthorizedCredentialsHash)
+	claimed, err := guard.ClaimDue(ctx, "second-instance", time.Minute, 10)
+	require.NoError(t, err)
+	for _, record := range claimed {
+		require.NotEqual(t, account.ID, record.AccountID, "confirmation cannot run early")
+	}
+	// Simulate time advancing without a 30-second wall-clock wait.
+	_, err = integrationDB.ExecContext(ctx, `UPDATE account_token_guard_v2_accounts SET next_probe_at=NOW()-INTERVAL '1 second' WHERE account_id=$1`, account.ID)
+	require.NoError(t, err)
+	claimed, err = guard.ClaimDue(ctx, "second-instance", time.Minute, 10)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.Equal(t, result.UnauthorizedCredentialsHash, claimed[0].UnauthorizedCredentialsHash)
+	require.True(t, retryAt.Equal(*claimed[0].UnauthorizedRetryAt))
+	other, err := guard.ClaimAccount(ctx, account.ID, "third-instance", time.Minute)
+	require.NoError(t, err)
+	require.Nil(t, other)
+	result = service.AccountTokenGuardV2ProbeCompletion{ProbeState: service.AccountTokenGuardV2ProbeOK, LastProbeAt: now, NextProbeAt: now.Add(time.Hour)}
+	require.ErrorIs(t, guard.CompleteProbe(ctx, account.ID, "first-instance", result), sql.ErrNoRows)
+	require.NoError(t, guard.CompleteProbe(ctx, account.ID, "second-instance", result))
+	stored, err = guard.GetAccount(ctx, account.ID)
+	require.NoError(t, err)
+	require.Nil(t, stored.UnauthorizedRetryAt)
+	require.Empty(t, stored.UnauthorizedCredentialsHash)
+}
+
 func TestAccountTokenGuardV2ManagedWorkerOnlyClaimsPasswordTasks(t *testing.T) {
 	ctx := context.Background()
 	repo := NewOpenAIOAuthReauthRepository(integrationDB).(*openAIOAuthReauthRepository)

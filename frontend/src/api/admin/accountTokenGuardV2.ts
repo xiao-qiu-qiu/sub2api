@@ -65,6 +65,7 @@ export interface TokenGuardV2Account {
 }
 
 export interface TokenGuardV2Rules {
+  unauthorized_retry_interval_seconds?: number
   relogin_backoff_max_seconds?: number
   relogin_max_failures?: number
   probe_interval_seconds: number

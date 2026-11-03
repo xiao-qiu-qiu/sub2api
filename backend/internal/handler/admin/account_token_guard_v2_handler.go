@@ -79,15 +79,16 @@ func (h *AccountTokenGuardV2Handler) List(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{
-		"relogin_backoff_max_seconds": rules.ReloginBackoffMaxSeconds,
-		"relogin_max_failures":        rules.ReloginMaxFailures,
-		"runtime_settings":            runtimeSettings,
-		"accounts":                    accounts,
-		"worker":                      h.service.WorkerStatus(),
-		"probe_interval_seconds":      rules.ProbeIntervalSeconds,
-		"retry_interval_seconds":      rules.RetryIntervalSeconds,
-		"relogin_cooldown_seconds":    rules.ReloginCooldownSeconds,
-		"fail_streak_threshold":       rules.FailStreakThreshold,
+		"relogin_backoff_max_seconds":         rules.ReloginBackoffMaxSeconds,
+		"relogin_max_failures":                rules.ReloginMaxFailures,
+		"runtime_settings":                    runtimeSettings,
+		"accounts":                            accounts,
+		"worker":                              h.service.WorkerStatus(),
+		"probe_interval_seconds":              rules.ProbeIntervalSeconds,
+		"retry_interval_seconds":              rules.RetryIntervalSeconds,
+		"unauthorized_retry_interval_seconds": rules.UnauthorizedRetryIntervalSeconds,
+		"relogin_cooldown_seconds":            rules.ReloginCooldownSeconds,
+		"fail_streak_threshold":               rules.FailStreakThreshold,
 	})
 }
 
@@ -127,14 +128,25 @@ func (h *AccountTokenGuardV2Handler) UpdateSwitches(c *gin.Context) {
 }
 
 func (h *AccountTokenGuardV2Handler) SaveRules(c *gin.Context) {
-	var rules service.AccountTokenGuardV2Rules
-	if err := c.ShouldBindJSON(&rules); err != nil {
+	var request struct {
+		service.AccountTokenGuardV2Rules
+		UnauthorizedRetryIntervalSeconds *int `json:"unauthorized_retry_interval_seconds"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
 		response.BadRequest(c, "Invalid request")
 		return
 	}
-	// Old clients omit the two new fields. Preserve a previously configured
-	// budget; initial old settings still receive the documented safe defaults.
-	if rules.ReloginMaxFailures == 0 || rules.ReloginBackoffMaxSeconds == 0 {
+	rules := request.AccountTokenGuardV2Rules
+	if request.UnauthorizedRetryIntervalSeconds != nil {
+		rules.UnauthorizedRetryIntervalSeconds = *request.UnauthorizedRetryIntervalSeconds
+		if rules.UnauthorizedRetryIntervalSeconds < 1 || rules.UnauthorizedRetryIntervalSeconds > 86400 {
+			response.BadRequest(c, "unauthorized_retry_interval_seconds must be between 1 and 86400")
+			return
+		}
+	}
+	// Old clients omit newer fields. Preserve the configured budget and 401
+	// confirmation delay; initial old settings receive the documented defaults.
+	if rules.ReloginMaxFailures == 0 || rules.ReloginBackoffMaxSeconds == 0 || request.UnauthorizedRetryIntervalSeconds == nil {
 		current, err := h.service.GetRules(c.Request.Context())
 		if err != nil {
 			response.ErrorFrom(c, err)
@@ -142,6 +154,9 @@ func (h *AccountTokenGuardV2Handler) SaveRules(c *gin.Context) {
 		}
 		if rules.ReloginMaxFailures == 0 {
 			rules.ReloginMaxFailures = current.ReloginMaxFailures
+		}
+		if request.UnauthorizedRetryIntervalSeconds == nil {
+			rules.UnauthorizedRetryIntervalSeconds = current.UnauthorizedRetryIntervalSeconds
 		}
 		if rules.ReloginBackoffMaxSeconds == 0 {
 			rules.ReloginBackoffMaxSeconds = max(current.ReloginBackoffMaxSeconds, rules.ReloginCooldownSeconds)
