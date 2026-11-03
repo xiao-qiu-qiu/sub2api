@@ -466,3 +466,23 @@ func TestGatewayRoutesOpenAICountTokensPathIsRegistered(t *testing.T) {
 	router.ServeHTTP(w, req)
 	require.NotEqual(t, http.StatusNotFound, w.Code)
 }
+
+func TestRoutingAvailabilityRoutePreservesModelACL(t *testing.T) {
+	group := &service.Group{ID: 1, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true,
+		ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.4"}}}
+	router := newGatewayRoutesTestRouterWithGroup(group)
+	for _, tc := range []struct {
+		model  string
+		status int
+	}{{"gpt-5.4", 200}, {"other-model", 404}} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/routing/availability?model="+tc.model, nil))
+		require.Equal(t, tc.status, response.Code, response.Body.String())
+		if tc.status == http.StatusOK {
+			var result service.RoutingAvailability
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+			require.Equal(t, "routing.availability", result.Object)
+			require.Equal(t, "unknown", result.State)
+		}
+	}
+}

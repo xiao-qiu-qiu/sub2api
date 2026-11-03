@@ -110,7 +110,7 @@ func excelBPSRetryAfter(value string, now time.Time) (time.Duration, bool) {
 
 // isExcelBPSCoolingDown reports a BPS cooldown only for requests this account
 // would route through BPS.
-func (s *OpenAIGatewayService) isExcelBPSCoolingDown(account *Account, requestedModel string) bool {
+func (s *OpenAIGatewayService) isExcelBPSCoolingDown(account *Account, requestedModel string, readOnly ...bool) bool {
 	if s == nil || account == nil {
 		return false
 	}
@@ -121,6 +121,8 @@ func (s *OpenAIGatewayService) isExcelBPSCoolingDown(account *Account, requested
 	if until, valid := value.(time.Time); valid && time.Now().Before(until) {
 		return account.IsExcelBPSEnabledForModel(requestedModel)
 	}
-	s.excelBPSCooldownUntil.CompareAndDelete(account.ID, value)
+	if len(readOnly) == 0 || !readOnly[0] {
+		s.excelBPSCooldownUntil.CompareAndDelete(account.ID, value)
+	}
 	return false
 }

@@ -62,7 +62,7 @@ func (s *OpenAIGatewayService) coolDownExcelBPSModel(account *Account, upstreamM
 	cache.until[key] = now.Add(excelBPSModelPermissionCooldown)
 }
 
-func (s *OpenAIGatewayService) isExcelBPSModelCoolingDown(account *Account, requestedModel string) bool {
+func (s *OpenAIGatewayService) isExcelBPSModelCoolingDown(account *Account, requestedModel string, readOnly ...bool) bool {
 	if s == nil || account == nil || !account.IsExcelBPSEnabledForModel(requestedModel) {
 		return false
 	}
@@ -74,7 +74,7 @@ func (s *OpenAIGatewayService) isExcelBPSModelCoolingDown(account *Account, requ
 	if exists && time.Now().Before(until) {
 		return true
 	}
-	if exists {
+	if exists && (len(readOnly) == 0 || !readOnly[0]) {
 		delete(cache.until, key)
 	}
 	return false

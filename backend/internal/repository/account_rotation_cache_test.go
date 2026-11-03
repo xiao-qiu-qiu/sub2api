@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -539,4 +540,171 @@ func TestAccountRotationBatchCheckAndRedisFailure(t *testing.T) {
 	_, err = f.cache.AcquireAccountSlotWithRotation(ctx, 3, 0, "work", f.policy, false, "pool")
 	require.Error(t, err)
 	require.Error(t, f.cache.ReleaseAccountSlot(ctx, 1, "work"))
+}
+
+func TestRoutingAvailabilityCacheReadsDoNotAdvanceRotation(t *testing.T) {
+	f := newAccountRotationCacheFixture(t)
+	ctx := context.Background()
+	// Real admission starts the work clock; expiry and its rest deadline are
+	// intentionally left for the read-only projection to observe.
+	require.True(t, f.acquire(1, "expired-request", 2, false))
+	f.advance(901)
+	before := f.server.Dump()
+	state, err := f.cache.PeekAccountRotation(ctx, 1, f.policy)
+	require.ErrorContains(t, err, "ROUTING_ROTATION_TRANSITION_REQUIRED")
+	require.Nil(t, state)
+	require.Equal(t, before, f.server.Dump(), "a probe must not save the projected rest or remove expired slots")
+	// A real scheduling check establishes the rest start; it is then safe to
+	// observe the persisted deadline without extending it.
+	actual, err := f.cache.CheckAccountRotation(ctx, 1, f.policy)
+	require.NoError(t, err)
+	require.Equal(t, "resting", actual.Phase)
+	before = f.server.Dump()
+	state, err = f.cache.PeekAccountRotation(ctx, 1, f.policy)
+	require.NoError(t, err)
+	require.Equal(t, state, actual)
+	require.Equal(t, before, f.server.Dump())
+
+	// A full account includes both ordinary and Live leases. Expired members
+	// are ignored without cleanup; the count path never refreshes TTLs.
+	require.NoError(t, f.client.ZAdd(ctx, accountSlotKey(2), redis.Z{Score: float64(f.now), Member: "regular"}, redis.Z{Score: float64(f.now - 9999), Member: "expired"}).Err())
+	require.NoError(t, f.client.ZAdd(ctx, liveAccountSlotKey(2), redis.Z{Score: float64(f.now), Member: "live"}).Err())
+	require.NoError(t, f.client.Set(ctx, accountWaitKeyPrefix+"2", "3", time.Minute).Err())
+	before = f.server.Dump()
+	loads, err := f.cache.ReadRoutingAccountLoads(ctx, []service.AccountWithConcurrency{{ID: 2, MaxConcurrency: 2}})
+	require.NoError(t, err)
+	require.Equal(t, 2, loads[2].CurrentConcurrency)
+	require.Equal(t, 3, loads[2].WaitingCount)
+	require.Equal(t, before, f.server.Dump())
+
+	before = f.server.Dump()
+	state, err = f.cache.PeekAccountRotation(ctx, 99, f.policy)
+	require.NoError(t, err)
+	require.Equal(t, "ready", state.Phase)
+	require.Equal(t, before, f.server.Dump(), "a probe cannot start a work window")
+}
+
+func TestRoutingAvailabilityRotationNeedsPersistedRestStart(t *testing.T) {
+	for _, persistedPhase := range []string{"working", "draining"} {
+		t.Run(persistedPhase, func(t *testing.T) {
+			f := newAccountRotationCacheFixture(t)
+			ctx := t.Context()
+			require.True(t, f.acquire(1, "crashed-request", 1, false))
+			f.advance(600)
+			if persistedPhase == "draining" {
+				require.Equal(t, "draining", f.check(1).Phase)
+			}
+			// The crashed request's lease expires without a final release.
+			f.advance(301)
+			for attempt := range 3 {
+				before := f.server.Dump()
+				state, err := f.cache.PeekAccountRotation(ctx, 1, f.policy)
+				require.ErrorContains(t, err, "ROUTING_ROTATION_TRANSITION_REQUIRED")
+				require.Nil(t, state, "an unpersisted rest must not become a permanent empty verdict")
+				require.Equal(t, before, f.server.Dump())
+				require.Equal(t, persistedPhase, f.client.HGet(ctx, accountRotationKey(1), "phase").Val())
+				if attempt < 2 {
+					f.advance(21) // Longer than a full rest; another peek is still unknown.
+				}
+			}
+
+			resting := f.check(1)
+			require.Equal(t, "resting", resting.Phase)
+			require.Equal(t, f.now+20, resting.RestUntil)
+			f.advance(19)
+			before := f.server.Dump()
+			state, err := f.cache.PeekAccountRotation(ctx, 1, f.policy)
+			require.NoError(t, err)
+			require.Equal(t, resting.RestUntil, state.RestUntil)
+			require.Equal(t, "resting", state.Phase)
+			require.Equal(t, before, f.server.Dump())
+
+			f.advance(1)
+			before = f.server.Dump()
+			state, err = f.cache.PeekAccountRotation(ctx, 1, f.policy)
+			require.NoError(t, err)
+			require.Equal(t, "ready", state.Phase, "a persisted rest deadline recovers without a mutating probe")
+			require.Equal(t, before, f.server.Dump())
+			require.Equal(t, "ready", f.check(1).Phase)
+		})
+	}
+}
+
+func TestRoutingAvailabilityRealRedisReadOnly(t *testing.T) {
+	address := os.Getenv("SUB2API_ROUTING_TEST_REDIS_ADDR")
+	if address == "" {
+		t.Skip("set SUB2API_ROUTING_TEST_REDIS_ADDR to an isolated Redis")
+	}
+	client := redis.NewClient(&redis.Options{Addr: address})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx := t.Context()
+	require.NoError(t, client.Ping(ctx).Err())
+	cache := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	policy := service.AccountRotationPolicy{Mode: "aggressive", WorkSeconds: 600, RestMinSeconds: 20, RestMaxSeconds: 20, Revision: "routing-readonly-test"}
+	const accountID int64 = 99123401
+	acquired, err := cache.AcquireAccountSlotWithRotation(ctx, accountID, 2, "existing", policy, false, "routing-readonly-test")
+	require.NoError(t, err)
+	require.True(t, acquired)
+	now, err := client.Time(ctx).Result()
+	require.NoError(t, err)
+	require.NoError(t, client.HSet(ctx, accountRotationKey(accountID), "drain_at", now.Unix()-1).Err())
+	require.NoError(t, client.ZAdd(ctx, accountSlotKey(accountID), redis.Z{Score: float64(now.Unix() - 9999), Member: "expired"}).Err())
+	require.NoError(t, client.ZAdd(ctx, liveAccountSlotKey(accountID), redis.Z{Score: float64(now.Unix()), Member: "live"}).Err())
+	keys, err := client.Keys(ctx, "*").Result()
+	require.NoError(t, err)
+	before := make(map[string]string, len(keys))
+	for _, key := range keys {
+		before[key], err = client.Dump(ctx, key).Result()
+		require.NoError(t, err)
+	}
+	state, err := cache.PeekAccountRotation(ctx, accountID, policy)
+	require.NoError(t, err)
+	require.Equal(t, "draining", state.Phase)
+	loads, err := cache.ReadRoutingAccountLoads(ctx, []service.AccountWithConcurrency{{ID: accountID, MaxConcurrency: 2}})
+	require.NoError(t, err)
+	require.Equal(t, 2, loads[accountID].CurrentConcurrency)
+	afterKeys, err := client.Keys(ctx, "*").Result()
+	require.NoError(t, err)
+	require.ElementsMatch(t, keys, afterKeys)
+	for _, key := range keys {
+		after, err := client.Dump(ctx, key).Result()
+		require.NoError(t, err)
+		require.Equal(t, before[key], after, "read-only probe changed Redis key %s", key)
+	}
+
+	// Exercise the deferred-rest error against real Redis too. Artificially
+	// expire the leases so this regression needs no wall-clock sleeps.
+	require.NoError(t, client.ZAdd(ctx, accountSlotKey(accountID), redis.Z{Score: float64(now.Unix() - 9999), Member: "existing"}).Err())
+	require.NoError(t, client.ZAdd(ctx, liveAccountSlotKey(accountID), redis.Z{Score: float64(now.Unix() - 9999), Member: "live"}).Err())
+	for _, phase := range []string{"working", "draining"} {
+		require.NoError(t, client.HSet(ctx, accountRotationKey(accountID),
+			"phase", phase, "started_at", now.Unix()-1000, "drain_at", now.Unix()-500,
+			"idle_since", 0, "lease_until", now.Unix()-1, "rest_until", 0).Err())
+		keys, err := client.Keys(ctx, "*").Result()
+		require.NoError(t, err)
+		for _, key := range keys {
+			before[key], err = client.Dump(ctx, key).Result()
+			require.NoError(t, err)
+		}
+		for range 3 {
+			state, err := cache.PeekAccountRotation(ctx, accountID, policy)
+			require.ErrorContains(t, err, "ROUTING_ROTATION_TRANSITION_REQUIRED")
+			require.Nil(t, state)
+			for _, key := range keys {
+				after, err := client.Dump(ctx, key).Result()
+				require.NoError(t, err)
+				require.Equal(t, before[key], after)
+			}
+		}
+		resting, err := cache.CheckAccountRotation(ctx, accountID, policy)
+		require.NoError(t, err)
+		require.Equal(t, "resting", resting.Phase)
+		state, err := cache.PeekAccountRotation(ctx, accountID, policy)
+		require.NoError(t, err)
+		require.Equal(t, resting.RestUntil, state.RestUntil)
+		require.NoError(t, client.HSet(ctx, accountRotationKey(accountID), "rest_until", now.Unix()-1).Err())
+		state, err = cache.PeekAccountRotation(ctx, accountID, policy)
+		require.NoError(t, err)
+		require.Equal(t, "ready", state.Phase)
+	}
 }

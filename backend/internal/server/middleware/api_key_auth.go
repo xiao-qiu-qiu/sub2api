@@ -196,7 +196,13 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			AbortWithError(c, http.StatusForbidden, "API_KEY_EXPIRED", "API key 已过期")
 			return
 		}
+		routingAvailabilityRequest := c.Request.Method == http.MethodGet && c.Request.URL.Path == "/v1/routing/availability"
 		metadataReadRequest := billingInfoRequest || pelicanReadRequest
+		// Capacity polling authenticates normally but is not API-key activity.
+		if routingAvailabilityRequest && (apiKey.Status == service.StatusAPIKeyExpired || apiKey.IsExpired()) {
+			AbortWithError(c, http.StatusForbidden, "API_KEY_EXPIRED", "API key has expired")
+			return
+		}
 		// Async image task polling only reads data that already belongs to the
 		// authenticated key and must remain available after the completed
 		// generation consumes the key's remaining balance.
@@ -212,7 +218,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			})
 			c.Set(string(ContextKeyUserRole), apiKey.User.Role)
 			setGroupContext(c, apiKey.Group)
-			if !metadataReadRequest {
+			if !metadataReadRequest && !routingAvailabilityRequest {
 				_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
 			}
 			authDone()
@@ -269,7 +275,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			// 订阅模式：验证订阅限额
 			if subscription != nil {
 				needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-				if needsMaintenance {
+				if needsMaintenance && !routingAvailabilityRequest {
 					refreshed, maintenanceErr := subscriptionService.EnsureWindowMaintenance(c.Request.Context(), subscription)
 					if maintenanceErr != nil {
 						AbortWithError(c, 500, "SUBSCRIPTION_MAINTENANCE_FAILED", "Failed to maintain subscription usage windows")
@@ -293,7 +299,9 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			} else {
 				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查
 				if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
-					apiKeyService.NotifyBalanceRejected(apiKey.User)
+					if !routingAvailabilityRequest {
+						apiKeyService.NotifyBalanceRejected(apiKey.User)
+					}
 					AbortWithError(c, 403, "INSUFFICIENT_BALANCE", service.InsufficientUserBalanceMessage)
 					return
 				}
@@ -312,7 +320,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		})
 		c.Set(string(ContextKeyUserRole), apiKey.User.Role)
 		setGroupContext(c, apiKey.Group)
-		if !metadataReadRequest {
+		if !metadataReadRequest && !routingAvailabilityRequest {
 			_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
 		}
 

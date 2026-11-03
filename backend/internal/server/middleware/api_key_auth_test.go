@@ -1792,3 +1792,60 @@ func (r *stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64,
 func (r *stubUserSubscriptionRepo) BatchUpdateExpiredStatus(ctx context.Context) (int64, error) {
 	return 0, errors.New("not implemented")
 }
+
+func TestRoutingAvailabilityAuthenticationAndPermissions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, mode := range []string{config.RunModeSimple, config.RunModeStandard} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			change func(*service.APIKey, *http.Request)
+		}{
+			{"valid", 200, nil},
+			{"missing", 401, func(_ *service.APIKey, r *http.Request) { r.Header.Del("Authorization") }},
+			{"invalid", 401, func(_ *service.APIKey, r *http.Request) { r.Header.Set("Authorization", "Bearer unknown") }},
+			{"query_credential", 400, func(_ *service.APIKey, r *http.Request) { r.URL.RawQuery += "&api_key=secret" }},
+			{"disabled_key", 401, func(k *service.APIKey, _ *http.Request) { k.Status = service.StatusAPIKeyDisabled }},
+			{"expired_key", 403, func(k *service.APIKey, _ *http.Request) {
+				expired := time.Now().Add(-time.Hour)
+				k.ExpiresAt = &expired
+			}},
+			{"inactive_user", 401, func(k *service.APIKey, _ *http.Request) { k.User.Status = service.StatusDisabled }},
+			{"disabled_group", 403, func(k *service.APIKey, _ *http.Request) { k.Group.Status = service.StatusDisabled }},
+			{"group_model_denied", 404, func(k *service.APIKey, _ *http.Request) {
+				k.Group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"other-model"}}
+			}},
+			{"user_model_denied", 404, func(k *service.APIKey, _ *http.Request) { k.User.UserGroupDeniedModels = []string{"gpt-5.4"} }},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				group := &service.Group{ID: 42, Platform: service.PlatformOpenAI, Hydrated: true, Status: service.StatusActive}
+				key := &service.APIKey{ID: 7, Key: "routing-test-key", UserID: 9, GroupID: &group.ID, Group: group, Status: service.StatusActive,
+					ConcurrencyLimit: 1, User: &service.User{ID: 9, Status: service.StatusActive, Role: service.RoleUser, Balance: 100, Concurrency: 1}}
+				request := httptest.NewRequest(http.MethodGet, "/v1/routing/availability?model=gpt-5.4", nil)
+				request.Header.Set("Authorization", "Bearer "+key.Key)
+				if tc.change != nil {
+					tc.change(key, request)
+				}
+				touches := 0
+				repo := &stubApiKeyRepo{
+					getByKey: func(_ context.Context, credential string) (*service.APIKey, error) {
+						if credential != key.Key {
+							return nil, service.ErrAPIKeyNotFound
+						}
+						clone := *key
+						return &clone, nil
+					},
+					updateLastUsed: func(context.Context, int64, time.Time) error { touches++; return nil },
+				}
+				cfg := &config.Config{RunMode: mode}
+				keys := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
+				router := gin.New()
+				router.GET("/v1/routing/availability", gin.HandlerFunc(NewAPIKeyAuthMiddleware(keys, nil, cfg)), GroupModelAllowlist(), func(c *gin.Context) { c.Status(http.StatusOK) })
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				require.Equal(t, tc.status, response.Code, response.Body.String())
+				require.Zero(t, touches, "capacity polling must not count as key activity")
+			})
+		}
+	}
+}

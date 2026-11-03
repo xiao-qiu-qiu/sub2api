@@ -500,7 +500,7 @@ func (s *OpenAIGatewayService) clearOpenAIAccountModelTransientState(accountID i
 	state.recordSuccess(accountID, model)
 }
 
-func (s *OpenAIGatewayService) isOpenAIAccountModelRuntimeBlocked(account *Account, requestedModel string) bool {
+func (s *OpenAIGatewayService) isOpenAIAccountModelRuntimeBlocked(account *Account, requestedModel string, readOnly ...bool) bool {
 	if s == nil || account == nil {
 		return false
 	}
@@ -509,7 +509,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountModelRuntimeBlocked(account *Accou
 		return false
 	}
 	canonicalModel := canonicalOpenAIAccountSchedulingModel(account, requestedModel)
-	return state.isBlocked(account.ID, openAIAccountModelTransientModel(canonicalModel), time.Now())
+	return state.isBlocked(account.ID, openAIAccountModelTransientModel(canonicalModel), time.Now(), readOnly...)
 }
 
 func accountPersistedSchedulingCooldownActive(account *Account) bool {
@@ -535,7 +535,7 @@ type openAIAccountRuntimeBlockSnapshot struct {
 	blocked    bool
 }
 
-func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account) openAIAccountRuntimeBlockSnapshot {
+func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account, readOnly ...bool) openAIAccountRuntimeBlockSnapshot {
 	if s == nil || !isOpenAIAccount(account) {
 		return openAIAccountRuntimeBlockSnapshot{}
 	}
@@ -548,9 +548,11 @@ func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account) o
 	}
 	until, isTime := value.(time.Time)
 	if !isTime || until.IsZero() || !time.Now().Before(until) {
-		s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
-		s.openaiOAuth429RetryStartedAt.Delete(account.ID)
-		s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+			s.openaiOAuth429RetryStartedAt.Delete(account.ID)
+			s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
+		}
 		return openAIAccountRuntimeBlockSnapshot{}
 	}
 	generation, _ := s.openaiAccountRuntimeBlockGeneration.Load(account.ID)
@@ -592,25 +594,27 @@ func (s *OpenAIGatewayService) clearOpenAIAccountRuntimeBlockIfUnchanged(account
 // requireCompact 必须与 Forward 的 /responses/compact 判定同源（两侧都来自
 // IsOpenAIResponsesCompactPath）：门票门控按真正出站的模型名判定，否则 compact
 // 请求会被按客户端原始模型误拦（见 openAICodexTicketOutboundModel）。
-func (s *OpenAIGatewayService) isOpenAIAccountRequestRuntimeBlocked(account *Account, requestedModel string, requireCompact bool) bool {
+func (s *OpenAIGatewayService) isOpenAIAccountRequestRuntimeBlocked(account *Account, requestedModel string, requireCompact bool, readOnly ...bool) bool {
 	if s == nil {
 		return false
 	}
-	if s.isExcelBPSCoolingDown(account, requestedModel) || s.isExcelBPSModelCoolingDown(account, requestedModel) {
+	if s.isExcelBPSCoolingDown(account, requestedModel, readOnly...) || s.isExcelBPSModelCoolingDown(account, requestedModel, readOnly...) {
 		return true
 	}
 	outboundModel := s.openAICodexTicketOutboundModel(account, requestedModel, requireCompact)
-	if s.openAICodexTicketBlocksAccount(account, outboundModel) {
+	if s.openAICodexTicketBlocksAccount(account, outboundModel, readOnly...) {
 		return true
 	}
-	snapshot := s.peekOpenAIAccountRuntimeBlock(account)
+	snapshot := s.peekOpenAIAccountRuntimeBlock(account, readOnly...)
 	if snapshot.blocked {
 		if accountPersistedSchedulingCooldownActive(account) {
 			return true
 		}
-		s.clearOpenAIAccountRuntimeBlockIfUnchanged(account.ID, snapshot)
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.clearOpenAIAccountRuntimeBlockIfUnchanged(account.ID, snapshot)
+		}
 	}
-	return s.isOpenAIAccountModelRuntimeBlocked(account, requestedModel)
+	return s.isOpenAIAccountModelRuntimeBlocked(account, requestedModel, readOnly...)
 }
 
 func (s *OpenAIGatewayService) recordOpenAIOAuth429() {

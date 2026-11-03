@@ -69,6 +69,9 @@ var openAIAdvancedSchedulerSettingCache atomic.Value // *cachedOpenAIAdvancedSch
 var openAIAdvancedSchedulerSettingSF singleflight.Group
 
 type OpenAIAccountScheduleRequest struct {
+	// Read-only capacity evaluation never enters selection or admission.
+	routingAvailability *routingAvailabilityEvaluation
+
 	ObservationEffort       string
 	ObservationEffortScoped bool
 	priorityLatencyPool     *priorityLatencyPool
@@ -1752,7 +1755,13 @@ func (s openAISelectionFilterStats) summary(extra string) string {
 // Reuse the normal request eligibility pass before deciding whether the entire
 // latency pool is stopped. No sticky/protocol preference may hide a healthy peer.
 func (s *defaultOpenAIAccountScheduler) loadOpenAIEligibleAccounts(ctx context.Context, req OpenAIAccountScheduleRequest) (context.Context, []*Account, map[int64]*AccountLoadInfo, openAISelectionFilterStats, error) {
-	accounts, err := s.service.listSchedulableAccountsForRequest(ctx, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs)
+	var accounts []Account
+	var err error
+	if req.routingAvailability != nil {
+		accounts, err = s.service.listRoutingAvailabilityAccounts(ctx, req)
+	} else {
+		accounts, err = s.service.listSchedulableAccountsForRequest(ctx, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs)
+	}
 	if err != nil {
 		return ctx, nil, nil, openAISelectionFilterStats{}, err
 	}
@@ -1789,7 +1798,7 @@ func (s *defaultOpenAIAccountScheduler) loadOpenAIEligibleAccounts(ctx context.C
 
 	// require_privacy_set: 获取分组配置。GetByID 会聚合账号计数，选号不能走它。
 	var schedGroup *Group
-	if req.GroupID != nil && s.service.schedulerSnapshot != nil {
+	if req.routingAvailability == nil && req.GroupID != nil && s.service.schedulerSnapshot != nil {
 		schedGroup, _ = s.service.schedulerSnapshot.GetGroupByIDLite(ctx, *req.GroupID)
 	}
 
@@ -1813,15 +1822,15 @@ func (s *defaultOpenAIAccountScheduler) loadOpenAIEligibleAccounts(ctx context.C
 			filterStats.exclude("platform_mismatch")
 			continue
 		}
-		if s.service.isExcelBPSModelCoolingDown(account, req.RequestedModel) {
+		if s.service.isExcelBPSModelCoolingDown(account, req.RequestedModel, req.routingAvailability != nil) {
 			filterStats.exclude(excelBPSModelPermissionFilterReason)
 			continue
 		}
-		if s.service.isExcelBPSCoolingDown(account, req.RequestedModel) {
+		if s.service.isExcelBPSCoolingDown(account, req.RequestedModel, req.routingAvailability != nil) {
 			filterStats.exclude(excelBPSRateLimitedFilterReason)
 			continue
 		}
-		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact) {
+		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact, req.routingAvailability != nil) {
 			filterStats.exclude("runtime_blocked")
 			continue
 		}
@@ -1847,7 +1856,7 @@ func (s *defaultOpenAIAccountScheduler) loadOpenAIEligibleAccounts(ctx context.C
 				continue
 			}
 		}
-		if priorityHardStopApplies(s.service.prioritySchedulingRuntimeConfig(), req) {
+		if req.routingAvailability == nil && priorityHardStopApplies(s.service.prioritySchedulingRuntimeConfig(), req) {
 			// Use the existing scheduling authority here; selected-account primary
 			// rechecks remain after acquisition, avoiding a full-pool SQL fanout.
 			account = s.service.resolveFreshSchedulableOpenAIAccount(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
@@ -1871,7 +1880,13 @@ func (s *defaultOpenAIAccountScheduler) loadOpenAIEligibleAccounts(ctx context.C
 	// Keep native candidates available until BPS capacity has been checked.
 
 	loadMap := map[int64]*AccountLoadInfo{}
-	if s.service.concurrencyService != nil {
+	if req.routingAvailability != nil {
+		batchLoad, loadErr := req.routingAvailability.cache.ReadRoutingAccountLoads(ctx, loadReq)
+		if loadErr != nil {
+			return ctx, nil, nil, filterStats, loadErr
+		}
+		loadMap = batchLoad
+	} else if s.service.concurrencyService != nil {
 		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
 			loadMap = batchLoad
 		}
@@ -2256,7 +2271,7 @@ func (s *defaultOpenAIAccountScheduler) accountRequestCompatibility(ctx context.
 	if account == nil {
 		return false, "account_nil"
 	}
-	if s != nil && s.service != nil && !s.service.concurrencyService.AccountRotationAllowed(ctx, account, AccountRotationSticky(ctx, account.ID)) {
+	if req.routingAvailability == nil && s != nil && s.service != nil && !s.service.concurrencyService.AccountRotationAllowed(ctx, account, AccountRotationSticky(ctx, account.ID)) {
 		return false, "account_rotation"
 	}
 	if account.IsExcelOAuth() && s != nil && s.service != nil && !s.service.excelBPSGloballyEnabled(ctx) {
@@ -2270,10 +2285,10 @@ func (s *defaultOpenAIAccountScheduler) accountRequestCompatibility(ctx context.
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
-	if !ignoreRuntimeBlock && s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact) {
+	if !ignoreRuntimeBlock && s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel, req.RequireCompact, req.routingAvailability != nil) {
 		return false, "runtime_blocked"
 	}
-	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account) {
+	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account, req.routingAvailability != nil) {
 		return false, "proxy_stream_quarantined"
 	}
 	// Quota auto-pause must be evaluated during the initial filter too. Without it the

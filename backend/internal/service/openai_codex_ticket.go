@@ -540,13 +540,13 @@ func (t *openAICodexTicket) needsRefresh(now time.Time, refreshBefore time.Durat
 	return !openAICodexTicketRemainingUntil(t).After(now.Add(refreshBefore))
 }
 
-func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model string) *openAICodexTicket {
+func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model string, readOnly ...bool) *openAICodexTicket {
 	if s == nil {
 		return nil
 	}
 	s.openaiCodexTicketStateMu.Lock()
 	defer s.openaiCodexTicketStateMu.Unlock()
-	return s.lookupCodexTicketLocked(account, model)
+	return s.lookupCodexTicketLocked(account, model, readOnly...)
 }
 
 // Keep the production identity binding: candidates are hydrated by the
@@ -568,7 +568,7 @@ func ticketIdentityMatches(account *Account, ticket *openAICodexTicket) bool {
 	return ticket != nil && (ticket.Identity == "" || ticket.Identity == ticketIdentity(account))
 }
 
-func (s *OpenAIGatewayService) lookupCodexTicketLocked(account *Account, model string) *openAICodexTicket {
+func (s *OpenAIGatewayService) lookupCodexTicketLocked(account *Account, model string, readOnly ...bool) *openAICodexTicket {
 	if account != nil && (account.AuthConnectionID != "" || account.HasManagedOpenAIConnections()) {
 		return nil
 	}
@@ -618,22 +618,30 @@ func (s *OpenAIGatewayService) lookupCodexTicketLocked(account *Account, model s
 	}
 	if mem != nil && !mem.valid(now, targetLen) && mem.Standby.valid(now, targetLen) {
 		promoted := *mem.Standby
-		s.openaiCodexTickets.Store(key, &promoted)
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.openaiCodexTickets.Store(key, &promoted)
+		}
 		return &promoted
 	}
 	if extra.valid(now, targetLen) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
-		s.openaiCodexTickets.Store(key, extra)
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.openaiCodexTickets.Store(key, extra)
+		}
 		return extra
 	}
 	if mem.valid(now, targetLen) {
 		return mem
 	}
 	if extra != nil {
-		s.openaiCodexTickets.Store(key, extra)
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.openaiCodexTickets.Store(key, extra)
+		}
 		return extra
 	}
 	if mem != nil {
-		s.openaiCodexTickets.Delete(key)
+		if len(readOnly) == 0 || !readOnly[0] {
+			s.openaiCodexTickets.Delete(key)
+		}
 	}
 	return nil
 }
@@ -832,7 +840,7 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
 // 不是客户端原始模型：注入侧读的是出站 body.model，两侧口径必须一致。
-func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string) bool {
+func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string, readOnly ...bool) bool {
 	if account.isPrismBrowserUpstreamModelEnabled(outboundModel) {
 		return false
 	}
@@ -853,7 +861,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 	if s.openAICodexTicketHarvestExcluded(account) {
 		return true
 	}
-	ticket := s.lookupOpenAICodexTicket(account, model)
+	ticket := s.lookupOpenAICodexTicket(account, model, readOnly...)
 	return !ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg))
 }
 

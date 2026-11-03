@@ -39,6 +39,9 @@ var accountRotationScript = redis.NewScript(`
 redis.replicate_commands()
 local stateKey, regularKey, liveKey, waiterKey = KEYS[1], KEYS[2], KEYS[3], KEYS[5]
 local op, ttl, liveTTL = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
+-- Project the exact admission state machine without changing leases or clocks.
+local readOnly = op == 'peek'
+if readOnly then op = 'check' end
 local accountID, requestID = ARGV[4], ARGV[5]
 local time = redis.call('TIME')
 local now = tonumber(time[1])
@@ -62,7 +65,7 @@ if #values > 0 then
 end
 
 local function forgetPlan()
-    if s and s.pool and s.pool ~= '' then
+    if not readOnly and s and s.pool and s.pool ~= '' then
         redis.call('ZREM', poolPrefix .. s.pool, stateKey)
     end
     if s then s.planned_start, s.planned_end = 0, 0 end
@@ -72,7 +75,7 @@ local function cleanupPlans(key)
     if cleanedPools[key] then return end
     cleanedPools[key] = true
     local expired = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'LIMIT', 0, scanLimit)
-    if #expired > 0 then redis.call('ZREM', key, unpack(expired)) end
+    if not readOnly and #expired > 0 then redis.call('ZREM', key, unpack(expired)) end
 end
 
 local function indexPlan(startAt, endAt)
@@ -80,7 +83,7 @@ local function indexPlan(startAt, endAt)
     if s.pool ~= '' then
         local key = poolPrefix .. s.pool
         cleanupPlans(key)
-        redis.call('ZADD', key, endAt, stateKey)
+        if not readOnly then redis.call('ZADD', key, endAt, stateKey) end
     end
 end
 
@@ -202,7 +205,7 @@ local function startWindow()
 end
 
 local function save()
-    if not s then return end
+    if readOnly or not s then return end
     redis.call('HSET', stateKey,
         'phase', s.phase, 'started_at', s.started_at, 'drain_at', s.drain_at,
         'rest_until', s.rest_until, 'idle_since', s.idle_since, 'rest_seconds', s.rest_seconds,
@@ -212,6 +215,11 @@ local function save()
         'planned_start', s.planned_start, 'planned_end', s.planned_end,
         'reason', s.reason, 'hold', s.hold, 'early_rest_enabled', s.early_rest_enabled,
         'scheduled_rest_seconds', s.scheduled_rest_seconds)
+end
+
+local function activeCount(key, expiry)
+    if readOnly then return redis.call('ZCOUNT', key, '(' .. expiry, '+inf') end
+    return redis.call('ZCARD', key)
 end
 
 local function snapshot()
@@ -225,7 +233,7 @@ local function snapshot()
         drain_at = s and s.drain_at or 0, rest_until = s and s.rest_until or 0,
         idle_since = s and s.idle_since or 0, rest_seconds = s and s.rest_seconds or 0,
         reason = s and s.reason or '', hold = s ~= nil and s.hold == 1,
-        waiting_count = redis.call('ZCARD', waiterKey), early_eligible_at = eligibleAt})
+        waiting_count = activeCount(waiterKey, now - waiterTTL), early_eligible_at = eligibleAt})
 end
 
 -- Delete and inspect in one invocation, including user/key members for Live.
@@ -241,9 +249,11 @@ elseif op == 'release_live' then
 end
 if not s and (op == 'release' or op == 'release_live') then return 1 end
 
-redis.call('ZREMRANGEBYSCORE', regularKey, '-inf', now - ttl)
-redis.call('ZREMRANGEBYSCORE', liveKey, '-inf', now - liveTTL)
-redis.call('ZREMRANGEBYSCORE', waiterKey, '-inf', now - waiterTTL)
+if not readOnly then
+    redis.call('ZREMRANGEBYSCORE', regularKey, '-inf', now - ttl)
+    redis.call('ZREMRANGEBYSCORE', liveKey, '-inf', now - liveTTL)
+    redis.call('ZREMRANGEBYSCORE', waiterKey, '-inf', now - waiterTTL)
+end
 if op == 'wait_refresh' then
     redis.call('ZADD', waiterKey, now, requestID)
     redis.call('EXPIRE', waiterKey, waiterTTL)
@@ -268,7 +278,7 @@ if op == 'refresh_live' then
         liveRefreshed = 1
     end
 end
-local count = redis.call('ZCARD', regularKey) + redis.call('ZCARD', liveKey)
+local count = activeCount(regularKey, now - ttl) + activeCount(liveKey, now - liveTTL)
 -- A manual action must not reset an automatic rest through a newer policy
 -- revision, and a no-op cancel must not change an unrelated work window.
 local noManualCancel = op == 'hold_cancel' and (not s or s.hold ~= 1 or s.reason ~= 'manual')
@@ -373,6 +383,10 @@ if s then
     end
     if s.phase == 'draining' then
         if count == 0 then
+            -- Only a real check/release can persist the start of this rest.
+            -- Re-projecting now + rest_seconds on every peek would keep a
+            -- fallback router on its backup forever without advancing rotation.
+            if readOnly then return redis.error_reply('ROUTING_ROTATION_TRANSITION_REQUIRED') end
             s.phase, s.rest_until = 'resting', now + s.rest_seconds
             indexPlan(now, s.rest_until)
         else

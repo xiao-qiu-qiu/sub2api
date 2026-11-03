@@ -166,7 +166,7 @@ func (c *openAIProxyStreamCircuit) recordSuccess(proxyID int64) bool {
 	return true
 }
 
-func (c *openAIProxyStreamCircuit) isBlocked(proxyID int64, now time.Time) bool {
+func (c *openAIProxyStreamCircuit) isBlocked(proxyID int64, now time.Time, readOnly ...bool) bool {
 	if c == nil || c.settings.disabled || proxyID <= 0 {
 		return false
 	}
@@ -177,7 +177,9 @@ func (c *openAIProxyStreamCircuit) isBlocked(proxyID int64, now time.Time) bool 
 		return false
 	}
 	if !now.Before(entry.blockedUntil) {
-		delete(c.entries, proxyID)
+		if len(readOnly) == 0 || !readOnly[0] {
+			delete(c.entries, proxyID)
+		}
 		return false
 	}
 	return true
@@ -323,7 +325,7 @@ func openAIProxyStreamQuarantineBypassed(ctx context.Context) bool {
 	return bypassed
 }
 
-func (s *OpenAIGatewayService) isOpenAIProxyStreamQuarantined(ctx context.Context, account *Account) bool {
+func (s *OpenAIGatewayService) isOpenAIProxyStreamQuarantined(ctx context.Context, account *Account, readOnly ...bool) bool {
 	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
 	if !ok {
 		return false
@@ -332,7 +334,7 @@ func (s *OpenAIGatewayService) isOpenAIProxyStreamQuarantined(ctx context.Contex
 		return false
 	}
 	circuit := s.getOpenAIProxyStreamCircuit()
-	if circuit == nil || !circuit.isBlocked(proxyID, time.Now()) {
+	if circuit == nil || !circuit.isBlocked(proxyID, time.Now(), readOnly...) {
 		return false
 	}
 	if native, _ := ctx.Value(openAIProxyQuarantineNativeTransportKey{}).(bool); native {

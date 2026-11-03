@@ -3495,3 +3495,41 @@ func TestOpenAIResponsesWebSocketSimpleModeRechecksKeyWindows(t *testing.T) {
 		})
 	}
 }
+
+func TestRoutingAvailabilityAPIContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &service.Group{ID: 42, Platform: service.PlatformAnthropic, Status: service.StatusActive, Hydrated: true}
+	key := &service.APIKey{ID: 7, UserID: 9, GroupID: &group.ID, Group: group}
+	for _, tc := range []struct {
+		query  string
+		status int
+	}{
+		{"?model=gpt-5.4&service_tier=priority&transport=http&require_compact=false", 200},
+		{"?model=gpt-5.4&service_tier=ultrafast&transport=websocket&require_compact=true", 200},
+		{"?model=gpt-5.4", 200},
+		{"", 400}, {"?model=", 400}, {"?model=gpt-5.4&model=other", 400},
+		{"?model=gpt-5.4&require_compact=1", 400}, {"?model=gpt-5.4&transport=udp", 400},
+		{"?model=gpt-5.4&service_tier=invalid", 400}, {"?model=gpt-5.4&service_tier=", 400},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			h := &OpenAIGatewayHandler{}
+			router := gin.New()
+			router.GET("/v1/routing/availability", func(c *gin.Context) { c.Set(string(middleware.ContextKeyAPIKey), key); c.Next() }, h.RoutingAvailability)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/routing/availability"+tc.query, nil))
+			require.Equal(t, tc.status, response.Code, response.Body.String())
+			assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			if tc.status == http.StatusOK {
+				var result map[string]any
+				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+				assert.Len(t, result, 6)
+				assert.Equal(t, "routing.availability", result["object"])
+				assert.Equal(t, "gpt-5.4", result["model"])
+				assert.Equal(t, "unknown", result["state"])
+				assert.Equal(t, "platform_not_supported", result["reason"])
+				assert.Greater(t, result["checked_at"].(float64), float64(0))
+				assert.Equal(t, float64(3), result["retry_after_seconds"])
+			}
+		})
+	}
+}

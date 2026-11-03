@@ -4,6 +4,8 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -391,4 +394,55 @@ func TestClassifyNoAccountError_GPT55Retirement(t *testing.T) {
 func TestGPT55RetirementEmptyListingDoesNotUseDefaults(t *testing.T) {
 	require.Empty(t, service.ModelListingSource(service.PlatformOpenAI, []string{}, []string{"gpt-5.5"}))
 	require.Equal(t, []string{"gpt-5.5"}, service.ModelListingSource(service.PlatformOpenAI, nil, []string{"gpt-5.5"}))
+}
+
+func TestNoAvailableAccountsRequiresProvenSelectionFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		err            error
+		complete, pool bool
+		code           string
+	}{
+		{"known_empty_pool", nil, true, false, "no_available_accounts"},
+		{"known_empty_selection", fmt.Errorf("selection: %w", service.ErrNoAvailableAccounts), true, true, "no_available_accounts"},
+		{"diagnosis_failed", service.ErrNoAvailableAccounts, false, true, ""},
+		{"query_failure", errors.New("database unavailable"), true, true, ""},
+		{"untyped_message", errors.New("no available accounts"), true, true, ""},
+		{"rpm_store_failure", service.ErrOpenAIRPMUnavailable, true, true, ""},
+		{"rpm_exhausted", service.ErrOpenAIRPMExhausted, true, true, ""},
+		{"latency_policy", service.ErrPriorityLatencyUnavailable, true, true, "latency_penalty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			diagnoser := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{Complete: tc.complete, HasAccountsInPool: tc.pool, HasModelSupport: tc.pool}}
+			result := classifyNoAccountError(t.Context(), diagnoser, &service.APIKey{GroupID: ptrInt64(42)}, "gpt-5.4", "public-model", service.PlatformOpenAI)
+			result = classifySelectionFailureError(tc.err, result)
+			assert.Equal(t, tc.code, result.Code)
+		})
+	}
+}
+
+func TestNoAvailableAccountsHTTPAndCommittedSSE(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			diagnoser := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{Complete: true}}
+			result := classifyNoAccountErrorFromGin(c, diagnoser, &service.APIKey{GroupID: ptrInt64(42)}, "gpt-5.4", "public-model", service.PlatformOpenAI)
+			h := &OpenAIGatewayHandler{}
+			if streaming {
+				c.Writer.WriteHeaderNow()
+			}
+			h.handleStreamingAwareErrorWithCode(c, result.Status, result.ErrType, result.Code, result.Message, streaming, false)
+			assert.Contains(t, recorder.Body.String(), `"code":"no_available_accounts"`)
+			if streaming {
+				assert.Contains(t, recorder.Body.String(), "response.failed")
+			} else {
+				assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+				assert.Equal(t, "no_available_accounts", response["error"].(map[string]any)["code"])
+			}
+		})
+	}
 }

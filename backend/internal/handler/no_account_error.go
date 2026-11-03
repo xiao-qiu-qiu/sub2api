@@ -83,6 +83,13 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if fallback.ModelNotFound || fallback.Code != "" {
 		return fallback
 	}
+	// Only a typed empty-selection result plus a completed authority read may
+	// tell another gateway to cache this request scope as empty. A database or
+	// concurrency-service error is still generic even if configured accounts exist.
+	if errors.Is(err, service.ErrNoAvailableAccounts) && fallback.Diagnosis.Complete {
+		fallback.Code = "no_available_accounts"
+		return fallback
+	}
 	match := selectionModelRateLimitedPattern.FindStringSubmatch(strings.ToLower(err.Error()))
 	if len(match) != 2 {
 		return fallback
@@ -167,6 +174,9 @@ func classifyNoAccountError(
 			Code:          "model_not_found",
 			Diagnosis:     result,
 		}
+	}
+	if result.Complete && !result.HasAccountsInPool {
+		fallback.Code = "no_available_accounts"
 	}
 	return fallback
 }

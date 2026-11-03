@@ -249,6 +249,9 @@ func RegisterGatewayRoutes(
 	gateway.Use(opsErrorLogger)
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
+	// Register before inference-only capture, image admission, serverless and
+	// composite routing: capacity observation must not start any of them.
+	gateway.GET("/routing/availability", groupModelAllowlist, requireGroupAnthropic, h.OpenAIGateway.RoutingAvailability)
 	gateway.Use(captureTraffic)
 	gateway.Use(imageAdmission)
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)

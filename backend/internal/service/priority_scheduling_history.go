@@ -81,7 +81,7 @@ func (s *OpenAIGatewayService) prioritySignals(req OpenAIAccountScheduleRequest,
 // Cache by model/group/window, with a bounded union of recently seen accounts.
 // Candidate churn must not erase evidence for peers. Never query on the request
 // goroutine; two workers and bounded scopes also apply to dashboard refreshes.
-func (s *OpenAIGatewayService) priorityHistory(req OpenAIAccountScheduleRequest, c PrioritySchedulingConfig, accounts []openAIAccountCandidateScore) priorityHistoryResult {
+func (s *OpenAIGatewayService) priorityHistory(req OpenAIAccountScheduleRequest, c PrioritySchedulingConfig, accounts []openAIAccountCandidateScore, readOnly ...bool) priorityHistoryResult {
 	reader, ok := s.usageLogRepo.(PrioritySchedulingSignalReader)
 	if !ok {
 		return priorityHistoryResult{status: "unavailable"}
@@ -103,6 +103,9 @@ func (s *OpenAIGatewayService) priorityHistory(req OpenAIAccountScheduleRequest,
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	now := time.Now()
+	if len(readOnly) > 0 && readOnly[0] {
+		return priorityHistorySnapshot(state.entries[key], wanted, now)
+	}
 	if state.entries == nil {
 		state.entries = make(map[string]*prioritySignalEntry)
 	}
@@ -256,6 +259,15 @@ func (s *OpenAIGatewayService) priorityHistory(req OpenAIAccountScheduleRequest,
 			}
 			entry.expires = entry.observed.Add(ttl)
 		}()
+	}
+	return priorityHistorySnapshot(state.entries[key], wanted, now)
+}
+
+// The caller holds priorityScheduling.mu. Observers must not refresh history,
+// touch eviction timestamps or change the scheduler's candidate universe.
+func priorityHistorySnapshot(entry *prioritySignalEntry, wanted map[int64]struct{}, now time.Time) priorityHistoryResult {
+	if entry == nil {
+		return priorityHistoryResult{status: "unavailable"}
 	}
 	// Completion metadata and evidence belong to the same locked observation.
 	h := priorityHistoryResult{entry: entry, completedReadGeneration: entry.completedReadGeneration, signals: make(map[int64]PrioritySchedulingSignal, len(wanted)), status: "loading", failure: entry.failure, refreshing: entry.refreshing}
