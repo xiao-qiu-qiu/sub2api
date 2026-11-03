@@ -47,14 +47,28 @@ func (c *routingAvailabilityTestCache) PeekAccountRotation(_ context.Context, id
 
 type routingAvailabilityTestRepo struct {
 	schedulerTestOpenAIAccountRepo
-	err error
+	err      error
+	groupIDs []int64
 }
 
 func (r *routingAvailabilityTestRepo) ListSchedulableByGroupIDAndPlatform(ctx context.Context, id int64, platform string) ([]Account, error) {
+	r.groupIDs = append(r.groupIDs, id)
 	if r.err != nil {
 		return nil, r.err
 	}
 	return r.schedulerTestOpenAIAccountRepo.ListSchedulableByGroupIDAndPlatform(ctx, id, platform)
+}
+
+type routingAvailabilitySnapshotCache struct {
+	*openAISnapshotCacheStub
+	buckets map[SchedulerBucket][]*Account
+	read    []SchedulerBucket
+}
+
+func (c *routingAvailabilitySnapshotCache) GetSnapshot(_ context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
+	c.read = append(c.read, bucket)
+	accounts, hit := c.buckets[bucket]
+	return accounts, hit, nil
 }
 
 func routingAvailabilityFixture() (*OpenAIGatewayService, *APIKey, *routingAvailabilityTestRepo, *routingAvailabilityTestCache) {
@@ -184,6 +198,52 @@ func TestRoutingAvailabilityRecoversWithoutAdmission(t *testing.T) {
 	assert.Nil(t, repo.accounts[0].LastUsedAt)
 	assert.Nil(t, repo.accounts[0].TempUnschedulableUntil)
 	assert.Nil(t, svc.openaiScheduler)
+}
+
+func TestRoutingAvailabilityKeepsEmptyPrimaryGroupSeparateFromReadyBackupGroup(t *testing.T) {
+	for _, source := range []string{"repo", "snapshot"} {
+		t.Run(source, func(t *testing.T) {
+			svc, primaryKey, repo, _ := routingAvailabilityFixture()
+			svc.cfg.RunMode = config.RunModeStandard
+			primaryGroup := &Group{ID: 2, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true}
+			backupGroup := &Group{ID: 5, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true}
+			primaryKey.GroupID, primaryKey.Group = &primaryGroup.ID, primaryGroup
+			backupKey := &APIKey{ID: 8, UserID: primaryKey.UserID, GroupID: &backupGroup.ID, Group: backupGroup}
+			backupAccount := repo.accounts[0]
+			backupAccount.ID, backupAccount.GroupIDs = 2, []int64{backupGroup.ID}
+			repo.accounts[0].GroupIDs, repo.accounts[0].Schedulable = []int64{primaryGroup.ID}, false
+			repo.accounts = append(repo.accounts, backupAccount)
+			primaryBucket := SchedulerBucket{GroupID: primaryGroup.ID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
+			backupBucket := SchedulerBucket{GroupID: backupGroup.ID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
+			var snapshot *routingAvailabilitySnapshotCache
+			if source == "snapshot" {
+				snapshot = &routingAvailabilitySnapshotCache{
+					openAISnapshotCacheStub: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{
+						1: &repo.accounts[0], 2: &repo.accounts[1],
+					}},
+					buckets: map[SchedulerBucket][]*Account{
+						primaryBucket: {&repo.accounts[0]},
+						backupBucket:  {&repo.accounts[1]},
+					},
+				}
+				svc.schedulerSnapshot = &SchedulerSnapshotService{cache: snapshot, cfg: svc.cfg}
+				repo.err = errors.New("snapshot availability must not query the repository")
+			}
+			request := RoutingAvailabilityRequest{Model: "gpt-5.4"}
+			primary := svc.RoutingAvailability(t.Context(), primaryKey, request)
+			backup := svc.RoutingAvailability(t.Context(), backupKey, request)
+			again := svc.RoutingAvailability(t.Context(), primaryKey, request)
+			assert.Equal(t, "empty", primary.State, primary)
+			assert.Equal(t, "ready", backup.State, backup)
+			assert.Equal(t, "empty", again.State, "another group's ready result must not change primary availability")
+			if source == "snapshot" {
+				assert.Equal(t, []SchedulerBucket{primaryBucket, backupBucket, primaryBucket}, snapshot.read)
+				assert.Empty(t, repo.groupIDs)
+			} else {
+				assert.Equal(t, []int64{primaryGroup.ID, backupGroup.ID, primaryGroup.ID}, repo.groupIDs)
+			}
+		})
+	}
 }
 
 func TestRoutingAvailabilityChannelAndAccountModelMapping(t *testing.T) {
