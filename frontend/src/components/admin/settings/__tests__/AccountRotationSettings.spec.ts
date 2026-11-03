@@ -14,12 +14,51 @@ describe('account rotation recovery settings', () => {
     const settings = defaultAccountRotationSettings()
     expect(settings).toMatchObject({
       enabled: false,
+      scheduled_hold_enabled: true,
       early_rest_enabled: false,
+      early_rest_window_minutes: 20,
+      early_rest_concurrency_threshold: 2,
+      early_rest_seconds: 120,
       recovery_min_interval_ms: 500,
       recovery_max_interval_ms: 2000,
     })
     settings.recovery_min_interval_ms = 100
     expect(defaultAccountRotationSettings().recovery_min_interval_ms).toBe(500)
+  })
+
+  it('holds scheduled requests by default and preserves the previous drain mode when toggled', async () => {
+    const settings = reactive({ ...defaultAccountRotationSettings(), enabled: true, mode: 'sticky' as const })
+    const wrapper = mount(AccountRotationSettings, { props: { modelValue: settings } })
+    expect(wrapper.find('select').exists()).toBe(false)
+    await wrapper.get('#account-rotation-hold-toggle').trigger('click')
+    expect(settings.scheduled_hold_enabled).toBe(false)
+    expect(wrapper.get<HTMLSelectElement>('select').element.value).toBe('sticky')
+    await wrapper.get('#account-rotation-hold-toggle').trigger('click')
+    expect(settings.scheduled_hold_enabled).toBe(true)
+    expect(settings.mode).toBe('sticky')
+    wrapper.unmount()
+  })
+
+  it('edits all early-rest parameters and rejects fractional or out-of-range values', async () => {
+    const settings = reactive({ ...defaultAccountRotationSettings(), enabled: true })
+    const wrapper = mount(AccountRotationSettings, { props: { modelValue: settings } })
+    expect(wrapper.find('#account-rotation-early-window').exists()).toBe(false)
+    await wrapper.get('#account-rotation-early-toggle').trigger('click')
+    for (const [id, key, value, ceiling] of [
+      ['window', 'early_rest_window_minutes', 10, 1440],
+      ['concurrency', 'early_rest_concurrency_threshold', 3, 10000],
+      ['seconds', 'early_rest_seconds', 45, 7200],
+    ] as const) {
+      const input = wrapper.get<HTMLInputElement>(`#account-rotation-early-${id}`)
+      for (const invalid of ['0', '1.5', String(ceiling + 1), '']) {
+        await input.setValue(invalid)
+        expect(input.element.checkValidity()).toBe(false)
+      }
+      await input.setValue(String(value))
+      expect(input.element.checkValidity()).toBe(true)
+      expect(settings[key]).toBe(value)
+    }
+    wrapper.unmount()
   })
 
   it('shows editable seconds for manual rest while automatic rotation is off', async () => {

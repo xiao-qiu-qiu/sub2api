@@ -862,19 +862,25 @@ describe("admin SettingsView payment visible method controls", () => {
     await gatewayTab!.trigger('click');
     const editor = wrapper.findComponent({ name: 'AccountRotationSettings' });
     expect(editor.exists()).toBe(true);
+    expect(editor.find('select').exists()).toBe(false);
+    await editor.get('#account-rotation-hold-toggle').setValue(false);
     expect(editor.get('select').element.value).toBe('sticky');
+    await editor.get('#account-rotation-hold-toggle').setValue(true);
     await editor.get('input[type="number"]').setValue('240');
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240, early_rest_enabled: false, recovery_min_interval_ms: 500, recovery_max_interval_ms: 2000 });
+    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240, scheduled_hold_enabled: true, early_rest_enabled: false, early_rest_window_minutes: 20, early_rest_concurrency_threshold: 2, early_rest_seconds: 120, recovery_min_interval_ms: 500, recovery_max_interval_ms: 2000 });
     await editor.get('#account-rotation-recovery-min').setValue('0.123');
     await editor.get('#account-rotation-recovery-max').setValue('1.001');
     const earlyToggle = editor.get('#account-rotation-early-toggle');
     await earlyToggle.setValue(true);
+    await editor.get('#account-rotation-early-window').setValue('10');
+    await editor.get('#account-rotation-early-concurrency').setValue('3');
+    await editor.get('#account-rotation-early-seconds').setValue('45');
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
     expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings?.early_rest_enabled).toBe(true);
-    expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings).toMatchObject({ recovery_min_interval_ms: 123, recovery_max_interval_ms: 1001 });
+    expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings).toMatchObject({ scheduled_hold_enabled: true, early_rest_window_minutes: 10, early_rest_concurrency_threshold: 3, early_rest_seconds: 45, recovery_min_interval_ms: 123, recovery_max_interval_ms: 1001 });
     wrapper.unmount();
   });
 

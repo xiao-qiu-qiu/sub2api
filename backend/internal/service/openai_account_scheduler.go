@@ -427,6 +427,12 @@ func (s *defaultOpenAIAccountScheduler) Select(
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
 	ctx = s.service.withAccountRotationSession(ctx, req.GroupID, req.SessionHash)
 	ctx = WithAccountRotationSticky(ctx, req.StickyAccountID, req.StickyPreviousAccountID)
+	if req.StickyWeighted && (s.service.openAIStickyRotationWaiting(ctx, req.StickyPreviousAccountID) ||
+		s.service.openAIStickyRotationWaiting(ctx, req.StickyAccountID)) {
+		// A confirmed HOLD/recovery keeps the existing owner out of the
+		// weighted race. The ordinary sticky paths retain all hard filters.
+		req.StickyWeighted = false
+	}
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
 		req.RequirePrivacySet = true
 	}
@@ -742,7 +748,8 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
-	if !req.PreserveStickyBinding && s.service.openAICodexTicketShouldYieldSticky(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs) {
+	rotationWaiting := s.service.openAIStickyRotationWaiting(ctx, accountID)
+	if !rotationWaiting && !req.PreserveStickyBinding && s.service.openAICodexTicketShouldYieldSticky(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs) {
 		clearBinding()
 		return nil, false, nil
 	}
@@ -755,10 +762,15 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	// Ordinary affinity is a preference. A current measured latency penalty
 	// must enter the same scored pool as a freely routed request, independently
 	// of the optional EWMA/capacity escape setting. Ownership paths stay pinned.
-	if s.shouldYieldPriorityLatencySticky(req, account) {
+	if !rotationWaiting && s.shouldYieldPriorityLatencySticky(req, account) {
 		return nil, true, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
+	if rotationWaiting {
+		// Performance, rebalance and capacity escapes cannot redirect a
+		// request already assigned to this account's rest/recovery queue.
+		escapeCfg.enabled = false
+	}
 	if escapeCfg.enabled && s.shouldRebalancePrioritySticky(ctx, req, account) {
 		slog.Info("sticky_escape_triggered", "account_id", accountID, "reason", "priority_capacity_imbalance")
 		return nil, true, nil
@@ -1668,7 +1680,7 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		}
 		// Primary scored candidates have already been tried. Do not reintroduce
 		// a measured slow ordinary affinity through this separate shortcut.
-		if s.shouldYieldPriorityLatencySticky(req, account) {
+		if !s.service.openAIStickyRotationWaiting(ctx, account.ID) && s.shouldYieldPriorityLatencySticky(req, account) {
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)

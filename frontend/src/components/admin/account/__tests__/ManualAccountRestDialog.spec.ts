@@ -29,26 +29,26 @@ beforeEach(() => {
 afterEach(() => wrappers.splice(0).forEach(wrapper => wrapper.unmount()))
 
 describe('ManualAccountRestDialog', () => {
-  it('starts with one minute and sends nothing until confirmation', async () => {
+  it('starts with 60 seconds and sends nothing until confirmation', async () => {
     const wrapper = render()
-    expect(wrapper.get<HTMLInputElement>('#manual-rest-minutes').element.value).toBe('1')
+    expect(wrapper.get<HTMLInputElement>('#manual-rest-seconds').element.value).toBe('60')
     expect(startManualRest).not.toHaveBeenCalled()
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(startManualRest).toHaveBeenCalledWith(23, 1)
+    expect(startManualRest).toHaveBeenCalledWith(23, 60)
     expect(wrapper.emitted('updated')?.[0]).toEqual([state, false])
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 
   it('validates an edited duration and preserves it for the request', async () => {
     const wrapper = render()
-    for (const minutes of ['0', '121', '1.5', '']) {
-      await wrapper.get('#manual-rest-minutes').setValue(minutes)
+    for (const seconds of ['0', '7201', '1.5', '']) {
+      await wrapper.get('#manual-rest-seconds').setValue(seconds)
       await wrapper.get('form').trigger('submit')
       expect(startManualRest).not.toHaveBeenCalled()
       expect(wrapper.get<HTMLButtonElement>('button[type="submit"]').element.disabled).toBe(true)
     }
-    await wrapper.get('#manual-rest-minutes').setValue('3')
+    await wrapper.get('#manual-rest-seconds').setValue('3')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(startManualRest).toHaveBeenCalledWith(23, 3)
@@ -63,7 +63,7 @@ describe('ManualAccountRestDialog', () => {
 
   it('ends a manual rest using DELETE, even if the list refreshes before confirmation', async () => {
     const wrapper = render({ account_rotation: state })
-    expect(wrapper.find('#manual-rest-minutes').exists()).toBe(false)
+    expect(wrapper.find('#manual-rest-seconds').exists()).toBe(false)
     await wrapper.setProps({ account: { ...account, account_rotation: null } })
     await wrapper.get('form').trigger('submit')
     await flushPromises()

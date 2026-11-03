@@ -2643,14 +2643,17 @@ const handleManualRestUpdated = (state: NonNullable<Account['account_rotation']>
   appStore.showSuccess(t(ended ? 'admin.settings.accountRotation.manualEnded' : 'admin.settings.accountRotation.manualStarted'))
 }
 
-// Refresh only rotation state while a visible account is due to change. This
-// keeps the rest badge current even when full-table auto refresh is disabled.
+// Refresh active rest every 5s and idle/work plans every 30s. Idle resets and
+// new work windows must update the countdown even without full-table refresh.
+let restStateRefreshRound = 0
 useIntervalFn(async () => {
   if (document.hidden || loading.value || isAnyModalOpen.value || restStateAbortController) return
+  const refreshPlans = ++restStateRefreshRound % 6 === 0
   const now = Date.now() / 1000
   const candidates = accounts.value.filter(account => {
     const state = account.account_rotation
     if (!state) return false
+    if (refreshPlans) return true
     if (state.recovering || state.hold || (state.waiting_count ?? 0) > 0 || state.phase === 'draining' || state.phase === 'resting') return true
     if (state.phase !== 'working') return false
     const earlyAt = state.early_eligible_at ?? 0

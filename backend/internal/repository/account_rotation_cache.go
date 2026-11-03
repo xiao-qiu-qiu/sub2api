@@ -25,7 +25,8 @@ var _ service.AccountRotationHoldCache = (*concurrencyCache)(nil)
 // Every operation uses the same Redis clock and state machine, including slot
 // removal. In particular, there is no release -> check gap in which a new sticky
 // request could slip into a drained account. State hashes deliberately have no
-// TTL; request leases and the disposable pool planning index have separate lives.
+// TTL, retaining only the latest manual and automatic rest timestamps per account;
+// request leases and the disposable pool planning index have separate lives.
 //
 // The bounded greedy planner examines at most 128 neighboring rest intervals and
 // 49 candidate deadlines inside work +/- stagger%. It minimizes (overlap peak,
@@ -59,10 +60,16 @@ if #values > 0 then
         'rest_seconds', 'work_seconds', 'rest_min_seconds', 'rest_max_seconds',
         'stagger_percent', 'cycle', 'lease_until', 'planned_start', 'planned_end',
         'early_rest_enabled', 'hold', 'scheduled_rest_seconds', 'recovery_next_ms',
-        'recovery_min_interval_ms', 'recovery_max_interval_ms'}) do
+        'recovery_min_interval_ms', 'recovery_max_interval_ms', 'scheduled_hold_enabled',
+        'early_rest_window_seconds', 'early_rest_concurrency_threshold', 'early_rest_seconds',
+        'last_manual_rest_at', 'last_automatic_rest_at'}) do
         s[field] = tonumber(s[field]) or 0
     end
     s.reason = s.reason or ''
+    s.last_automatic_rest_reason = s.last_automatic_rest_reason or ''
+    if s.early_rest_window_seconds <= 0 then s.early_rest_window_seconds = 1200 end
+    if s.early_rest_concurrency_threshold <= 0 then s.early_rest_concurrency_threshold = 2 end
+    if s.early_rest_seconds <= 0 then s.early_rest_seconds = 120 end
     if s.recovery_min_interval_ms <= 0 then s.recovery_min_interval_ms = 500 end
     if s.recovery_max_interval_ms <= 0 then s.recovery_max_interval_ms = 2000 end
     if s.reason == '' and (s.phase == 'draining' or s.phase == 'resting') then s.reason = 'scheduled' end
@@ -188,17 +195,26 @@ local function applyPolicy()
     s.rest_min_seconds, s.rest_max_seconds = tonumber(ARGV[11]), tonumber(ARGV[12])
     s.stagger_percent, s.revision = tonumber(ARGV[13]), ARGV[14]
     s.early_rest_enabled = tonumber(ARGV[15]) or 0
+    s.scheduled_hold_enabled = tonumber(ARGV[19]) or 0
+    s.early_rest_window_seconds = tonumber(ARGV[20]) or 1200
+    s.early_rest_concurrency_threshold = tonumber(ARGV[21]) or 2
+    s.early_rest_seconds = tonumber(ARGV[22]) or 120
     s.recovery_min_interval_ms = tonumber(ARGV[17]) or 500
     s.recovery_max_interval_ms = tonumber(ARGV[18]) or 2000
 end
 
 local function newPolicy()
     local cycle = s and s.cycle or 0
+    local manualAt = s and s.last_manual_rest_at or 0
+    local automaticAt = s and s.last_automatic_rest_at or 0
+    local automaticReason = s and s.last_automatic_rest_reason or ''
     forgetPlan()
     s = {phase = 'working', started_at = 0, drain_at = 0, rest_until = 0,
         idle_since = 0, rest_seconds = 0, cycle = cycle, lease_until = 0,
         planned_start = 0, planned_end = 0, pool = ARGV[8] or '',
-        reason = '', hold = 0, scheduled_rest_seconds = 0, recovery_next_ms = 0}
+        reason = '', hold = 0, scheduled_rest_seconds = 0, recovery_next_ms = 0,
+        last_manual_rest_at = manualAt, last_automatic_rest_at = automaticAt,
+        last_automatic_rest_reason = automaticReason}
     applyPolicy()
 end
 
@@ -220,10 +236,19 @@ local function save()
         'revision', s.revision, 'pool', s.pool, 'cycle', s.cycle, 'lease_until', s.lease_until,
         'planned_start', s.planned_start, 'planned_end', s.planned_end,
         'reason', s.reason, 'hold', s.hold, 'early_rest_enabled', s.early_rest_enabled,
+        'scheduled_hold_enabled', s.scheduled_hold_enabled,
+        'early_rest_window_seconds', s.early_rest_window_seconds,
+        'early_rest_concurrency_threshold', s.early_rest_concurrency_threshold,
+        'early_rest_seconds', s.early_rest_seconds,
+        'last_manual_rest_at', s.last_manual_rest_at,
+        'last_automatic_rest_at', s.last_automatic_rest_at,
+        'last_automatic_rest_reason', s.last_automatic_rest_reason,
         'scheduled_rest_seconds', s.scheduled_rest_seconds,
         'recovery_next_ms', s.recovery_next_ms,
         'recovery_min_interval_ms', s.recovery_min_interval_ms,
         'recovery_max_interval_ms', s.recovery_max_interval_ms)
+    -- Window resets and policy changes must not expire history or an active HOLD.
+    redis.call('PERSIST', stateKey)
 end
 
 local function activeCount(key, expiry)
@@ -237,9 +262,13 @@ local function snapshot()
     if s and phase == 'working' and s.started_at == 0 then phase = 'ready' end
     local eligibleAt = 0
     if s and s.early_rest_enabled == 1 and s.work_seconds > 0 and s.started_at > 0 and s.drain_at > 0 then
-        eligibleAt = math.max(s.started_at, s.drain_at - 1200)
+        eligibleAt = math.max(s.started_at, s.drain_at - s.early_rest_window_seconds)
     end
     return cjson.encode({phase = phase, started_at = s and s.started_at or 0,
+        automatic_enabled = (s and s.work_seconds or tonumber(ARGV[10]) or 0) > 0,
+        last_manual_rest_at = s and s.last_manual_rest_at or 0,
+        last_automatic_rest_at = s and s.last_automatic_rest_at or 0,
+        last_automatic_rest_reason = s and s.last_automatic_rest_reason or '',
         drain_at = s and s.drain_at or 0, rest_until = s and s.rest_until or 0,
         idle_since = s and s.idle_since or 0, rest_seconds = s and s.rest_seconds or 0,
         reason = s and s.reason or '', hold = s ~= nil and s.hold == 1,
@@ -314,9 +343,13 @@ local automaticRestConflict = op == 'hold_start' and s and s.reason ~= 'manual'
 if not noManualCancel and not automaticRestConflict
     and (op == 'check' or op == 'acquire' or op == 'hold_start' or op == 'hold_cancel') then
     if s and (s.revision ~= ARGV[14] or s.work_seconds ~= tonumber(ARGV[10])
-        or s.early_rest_enabled ~= (tonumber(ARGV[15]) or 0)) then
+        or s.early_rest_enabled ~= (tonumber(ARGV[15]) or 0)
+        or s.scheduled_hold_enabled ~= (tonumber(ARGV[19]) or 0)
+        or s.early_rest_window_seconds ~= (tonumber(ARGV[20]) or 1200)
+        or s.early_rest_concurrency_threshold ~= (tonumber(ARGV[21]) or 2)
+        or s.early_rest_seconds ~= (tonumber(ARGV[22]) or 120)) then
         -- Configuration changes affect the next cycle, never release requests
-        -- already waiting for a manually or opportunistically forced gap.
+        -- already waiting for any forced gap, including scheduled HOLD.
         if (s.hold == 1 and (s.phase == 'draining' or s.phase == 'resting'))
             or s.recovery_next_ms > 0 then applyPolicy()
         else newPolicy() end
@@ -403,12 +436,13 @@ if s then
     end
     if s.phase == 'working' and s.work_seconds > 0 and s.started_at > 0 then
         if now >= s.drain_at then
-            s.phase, s.reason, s.hold = 'draining', 'scheduled', 0
-        elseif s.early_rest_enabled == 1 and now >= s.drain_at - 1200 and count < 2 then
+            s.phase, s.reason, s.hold = 'draining', 'scheduled', s.scheduled_hold_enabled
+        elseif s.early_rest_enabled == 1 and now >= s.drain_at - s.early_rest_window_seconds
+            and count < s.early_rest_concurrency_threshold then
             forgetPlan()
             s.scheduled_rest_seconds = s.rest_seconds
             s.phase, s.reason, s.hold = 'draining', 'early', 1
-            s.rest_seconds, s.rest_until = 120, 0
+            s.rest_seconds, s.rest_until = s.early_rest_seconds, 0
         end
     end
     if s.phase == 'draining' then
@@ -418,6 +452,11 @@ if s then
             -- fallback router on its backup forever without advancing rotation.
             if readOnly then return redis.error_reply('ROUTING_ROTATION_TRANSITION_REQUIRED') end
             s.phase, s.rest_until = 'resting', now + s.rest_seconds
+            if s.reason == 'manual' then
+                s.last_manual_rest_at = now
+            elseif s.reason == 'scheduled' or s.reason == 'early' then
+                s.last_automatic_rest_at, s.last_automatic_rest_reason = now, s.reason
+            end
             indexPlan(now, s.rest_until)
         else
             indexPlan(now, now + s.rest_seconds)
@@ -490,6 +529,21 @@ func (c *concurrencyCache) accountRotationArgs(op string, accountID int64, reque
 	if policy.EarlyRestEnabled {
 		earlyArg = 1
 	}
+	scheduledHoldArg := 0
+	if policy.ScheduledHoldEnabled {
+		scheduledHoldArg = 1
+	}
+	earlyWindow, earlyThreshold, earlySeconds := policy.EarlyRestWindowSeconds, policy.EarlyRestConcurrencyThreshold, policy.EarlyRestSeconds
+	// Zero-valued policies from older internal callers retain the former early defaults.
+	if earlyWindow == 0 {
+		earlyWindow = 1200
+	}
+	if earlyThreshold == 0 {
+		earlyThreshold = 2
+	}
+	if earlySeconds == 0 {
+		earlySeconds = 120
+	}
 	poolHash := ""
 	if op == "acquire" {
 		poolHash = fmt.Sprintf("%x", sha256.Sum256([]byte(pool)))
@@ -500,10 +554,15 @@ func (c *concurrencyCache) accountRotationArgs(op string, accountID int64, reque
 	}
 	return []any{op, c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, requestID, limit, stickyArg, poolHash,
 		policy.Mode, policy.WorkSeconds, policy.RestMinSeconds, policy.RestMaxSeconds, policy.StaggerPercent, policy.Revision, earlyArg,
-		0, recoveryMin, recoveryMax}
+		0, recoveryMin, recoveryMax, scheduledHoldArg, earlyWindow, earlyThreshold, earlySeconds}
 }
 
 func validateAccountRotationPolicy(policy service.AccountRotationPolicy) error {
+	if policy.EarlyRestWindowSeconds < 0 || policy.EarlyRestWindowSeconds > 86400 ||
+		policy.EarlyRestConcurrencyThreshold < 0 || policy.EarlyRestConcurrencyThreshold > 10000 ||
+		policy.EarlyRestSeconds < 0 || policy.EarlyRestSeconds > 7200 {
+		return fmt.Errorf("invalid account rotation early rest policy")
+	}
 	if (policy.RecoveryMinIntervalMS != 0 || policy.RecoveryMaxIntervalMS != 0) &&
 		(policy.RecoveryMinIntervalMS < 1 || policy.RecoveryMaxIntervalMS < policy.RecoveryMinIntervalMS || policy.RecoveryMaxIntervalMS > 60000) {
 		return fmt.Errorf("invalid account rotation recovery interval")
@@ -632,8 +691,8 @@ func (c *concurrencyCache) SetAccountRotationHold(ctx context.Context, accountID
 	if err := validateAccountRotationPolicy(policy); err != nil {
 		return nil, err
 	}
-	if seconds <= 0 {
-		return nil, fmt.Errorf("account rest seconds must be positive")
+	if seconds < 1 || seconds > 7200 {
+		return nil, fmt.Errorf("account rest seconds must be between 1 and 7200")
 	}
 	args := c.accountRotationArgs("hold_start", accountID, "", 0, false, "", policy)
 	args[15] = seconds
@@ -679,7 +738,30 @@ func (c *concurrencyCache) RefreshAccountRotationSlot(ctx context.Context, accou
 		"refresh", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, requestID).Err()
 }
 
+// A failed SDP releases its account immediately. The exact joint user/key
+// owners still need renewal while its replacement waits for rotation. Validate
+// both before renewing either; never create or revive a missing/expired owner.
+var refreshLiveOwnersScript = redis.NewScript(`
+redis.replicate_commands()
+local time = redis.call('TIME')
+local now, ttl, leaseID = tonumber(time[1]), tonumber(ARGV[1]), ARGV[2]
+for _, key in ipairs(KEYS) do
+    local score = tonumber(redis.call('ZSCORE', key, leaseID))
+    if not score or score <= now - ttl then return 0 end
+end
+for _, key in ipairs(KEYS) do
+    redis.call('ZADD', key, 'XX', now, leaseID)
+    redis.call('EXPIRE', key, ttl)
+end
+return 1
+`)
+
 func (c *concurrencyCache) refreshAccountRotationLiveLease(ctx context.Context, accountID, userID, apiKeyID int64, leaseID string) (bool, error) {
+	if accountID == 0 {
+		result, err := refreshLiveOwnersScript.Run(ctx, c.rdb,
+			[]string{liveUserSlotKey(userID), liveAPIKeySlotKey(apiKeyID)}, liveLeaseTTLSeconds, leaseID).Int()
+		return result == 1, err
+	}
 	keys := append(accountRotationKeys(accountID), liveUserSlotKey(userID), liveAPIKeySlotKey(apiKeyID))
 	result, err := accountRotationScript.Run(ctx, c.rdb, keys,
 		"refresh_live", c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, leaseID).Int()

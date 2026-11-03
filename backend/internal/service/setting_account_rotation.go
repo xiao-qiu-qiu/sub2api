@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,19 +24,26 @@ const (
 // scheduled accounts, with staggered windows planned separately per platform.
 // A work window starts when account concurrency first becomes positive. During
 // work, 300 continuous seconds without requests resets that window (fixed).
-// After work ends, aggressive blocks all new requests; sticky admits only
-// existing sticky sessions until concurrency reaches zero. Rest begins at zero
-// concurrency and lasts a random duration in [RestMinMinutes, RestMaxMinutes].
+// After work ends, ScheduledHoldEnabled keeps new requests waiting on the same
+// account through draining and rest. With that option disabled, aggressive
+// rejects all new requests; sticky admits only existing sticky sessions while
+// draining. Rest begins at zero concurrency and lasts a random duration in
+// [RestMinMinutes, RestMaxMinutes]. Manual and early rest always hold requests.
 type AccountRotationSettings struct {
-	Enabled               bool   `json:"enabled"`
-	EarlyRestEnabled      bool   `json:"early_rest_enabled"`
-	Mode                  string `json:"mode"`
-	WorkMinutes           int    `json:"work_minutes"`
-	RestMinMinutes        int    `json:"rest_min_minutes"`
-	RestMaxMinutes        int    `json:"rest_max_minutes"`
-	StaggerPercent        int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
-	RecoveryMinIntervalMS int    `json:"recovery_min_interval_ms"`
-	RecoveryMaxIntervalMS int    `json:"recovery_max_interval_ms"`
+	Enabled                bool `json:"enabled"`
+	ScheduledHoldEnabled   bool `json:"scheduled_hold_enabled"`
+	EarlyRestEnabled       bool `json:"early_rest_enabled"`
+	EarlyRestWindowMinutes int  `json:"early_rest_window_minutes"`
+	// Early rest requires concurrency strictly below this threshold.
+	EarlyRestConcurrencyThreshold int    `json:"early_rest_concurrency_threshold"`
+	EarlyRestSeconds              int    `json:"early_rest_seconds"`
+	Mode                          string `json:"mode"`
+	WorkMinutes                   int    `json:"work_minutes"`
+	RestMinMinutes                int    `json:"rest_min_minutes"`
+	RestMaxMinutes                int    `json:"rest_max_minutes"`
+	StaggerPercent                int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
+	RecoveryMinIntervalMS         int    `json:"recovery_min_interval_ms"`
+	RecoveryMaxIntervalMS         int    `json:"recovery_max_interval_ms"`
 	// Revision is server-owned and changes only when policy content changes.
 	// Unsaved defaults and legacy records have no revision; schedulers may use
 	// a hash of policy content to identify those configurations.
@@ -44,19 +52,32 @@ type AccountRotationSettings struct {
 
 func DefaultAccountRotationSettings() *AccountRotationSettings {
 	return &AccountRotationSettings{
-		Mode:                  AccountRotationModeAggressive,
-		WorkMinutes:           300,
-		RestMinMinutes:        10,
-		RestMaxMinutes:        30,
-		StaggerPercent:        10,
-		RecoveryMinIntervalMS: 500,
-		RecoveryMaxIntervalMS: 2000,
+		ScheduledHoldEnabled:          true,
+		EarlyRestWindowMinutes:        20,
+		EarlyRestConcurrencyThreshold: 2,
+		EarlyRestSeconds:              120,
+		Mode:                          AccountRotationModeAggressive,
+		WorkMinutes:                   300,
+		RestMinMinutes:                10,
+		RestMaxMinutes:                30,
+		StaggerPercent:                10,
+		RecoveryMinIntervalMS:         500,
+		RecoveryMaxIntervalMS:         2000,
 	}
 }
 
 func (settings *AccountRotationSettings) Validate() error {
 	if settings == nil {
 		return fmt.Errorf("account_rotation_settings must be an object")
+	}
+	if settings.EarlyRestWindowMinutes < 1 || settings.EarlyRestWindowMinutes > 1440 {
+		return fmt.Errorf("account_rotation_settings.early_rest_window_minutes must be between 1 and 1440")
+	}
+	if settings.EarlyRestConcurrencyThreshold < 1 || settings.EarlyRestConcurrencyThreshold > 10000 {
+		return fmt.Errorf("account_rotation_settings.early_rest_concurrency_threshold must be between 1 and 10000")
+	}
+	if settings.EarlyRestSeconds < 1 || settings.EarlyRestSeconds > 7200 {
+		return fmt.Errorf("account_rotation_settings.early_rest_seconds must be between 1 and 7200")
 	}
 	if settings.Mode != AccountRotationModeAggressive && settings.Mode != AccountRotationModeSticky {
 		return fmt.Errorf("account_rotation_settings.mode must be aggressive or sticky")
@@ -86,6 +107,17 @@ func parseAccountRotationSettings(raw string) *AccountRotationSettings {
 	settings := DefaultAccountRotationSettings()
 	if strings.TrimSpace(raw) == "" {
 		return settings
+	}
+	// Absent fields inherit defaults, but explicit null must not silently enable
+	// scheduled holds or turn malformed early-rest values into valid defaults.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return DefaultAccountRotationSettings()
+	}
+	for _, field := range []string{"scheduled_hold_enabled", "early_rest_window_minutes", "early_rest_concurrency_threshold", "early_rest_seconds"} {
+		if bytes.Equal(bytes.TrimSpace(fields[field]), []byte("null")) {
+			return DefaultAccountRotationSettings()
+		}
 	}
 	if err := json.Unmarshal([]byte(raw), settings); err != nil || settings.Validate() != nil {
 		return DefaultAccountRotationSettings()

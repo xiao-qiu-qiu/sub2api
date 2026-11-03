@@ -1468,6 +1468,10 @@ export interface Account {
   current_concurrency?: number // Real-time concurrency count from Redis
   account_rotation?: {
     phase: 'ready' | 'working' | 'draining' | 'resting'
+    automatic_enabled?: boolean
+    last_manual_rest_at?: number
+    last_automatic_rest_at?: number
+    last_automatic_rest_reason?: 'scheduled' | 'early' | ''
     started_at: number
     drain_at: number
     rest_until: number

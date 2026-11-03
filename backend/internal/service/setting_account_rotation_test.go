@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -59,6 +60,8 @@ func (r *accountRotationSettingRepo) SetMultiple(_ context.Context, values map[s
 func TestAccountRotationSettingsDefaultsAndInvalidStorage(t *testing.T) {
 	expected := &AccountRotationSettings{
 		Enabled: false, Mode: "aggressive", WorkMinutes: 300,
+		ScheduledHoldEnabled: true, EarlyRestWindowMinutes: 20,
+		EarlyRestConcurrencyThreshold: 2, EarlyRestSeconds: 120,
 		RestMinMinutes: 10, RestMaxMinutes: 30, StaggerPercent: 10,
 		RecoveryMinIntervalMS: 500, RecoveryMaxIntervalMS: 2000,
 	}
@@ -182,6 +185,11 @@ func TestAccountRotationSettingsRevisionTracksContentOnly(t *testing.T) {
 		func() { settings.StaggerPercent++ },
 		func() { settings.EarlyRestEnabled = true },
 		func() { settings.EarlyRestEnabled = false },
+		func() { settings.ScheduledHoldEnabled = false },
+		func() { settings.ScheduledHoldEnabled = true },
+		func() { settings.EarlyRestWindowMinutes++ },
+		func() { settings.EarlyRestConcurrencyThreshold++ },
+		func() { settings.EarlyRestSeconds++ },
 		func() { settings.RecoveryMinIntervalMS++ },
 		func() { settings.RecoveryMaxIntervalMS++ },
 	} {
@@ -253,6 +261,8 @@ func TestAccountRotationSettingsLegacyRecoveryDefaultsPreservePolicy(t *testing.
 			require.NoError(t, err)
 			require.Equal(t, &AccountRotationSettings{
 				Enabled: true, EarlyRestEnabled: true, Mode: "sticky", WorkMinutes: 75,
+				ScheduledHoldEnabled: true, EarlyRestWindowMinutes: 20,
+				EarlyRestConcurrencyThreshold: 2, EarlyRestSeconds: 120,
 				RestMinMinutes: 2, RestMaxMinutes: 9, StaggerPercent: 23, Revision: "legacy-policy",
 				RecoveryMinIntervalMS: tc.min, RecoveryMaxIntervalMS: tc.max,
 			}, settings)
@@ -283,6 +293,85 @@ func TestAccountRotationSettingsLegacyEarlyRestDefaultsAndPersists(t *testing.T)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyAccountRotationSettings]), &raw))
 	require.Equal(t, true, raw["early_rest_enabled"])
+}
+
+func TestAccountRotationSettingsEarlyRestValidation(t *testing.T) {
+	for _, field := range []struct {
+		name    string
+		maximum int
+		set     func(*AccountRotationSettings, int)
+	}{
+		{"early_rest_window_minutes", 1440, func(s *AccountRotationSettings, v int) { s.EarlyRestWindowMinutes = v }},
+		{"early_rest_concurrency_threshold", 10000, func(s *AccountRotationSettings, v int) { s.EarlyRestConcurrencyThreshold = v }},
+		{"early_rest_seconds", 7200, func(s *AccountRotationSettings, v int) { s.EarlyRestSeconds = v }},
+	} {
+		for _, value := range []int{-1, 0, 1, field.maximum, field.maximum + 1} {
+			t.Run(fmt.Sprintf("%s/%d", field.name, value), func(t *testing.T) {
+				for _, enabled := range []bool{false, true} {
+					settings := DefaultAccountRotationSettings()
+					settings.Enabled, settings.EarlyRestEnabled, settings.ScheduledHoldEnabled = enabled, enabled, enabled
+					field.set(settings, value)
+					if value >= 1 && value <= field.maximum {
+						require.NoError(t, settings.Validate())
+					} else {
+						require.ErrorContains(t, settings.Validate(), field.name)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAccountRotationSettingsScheduledHoldDefaultsAndExplicitFalse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hold *bool
+	}{
+		{"legacy missing", nil},
+		{"explicit false", new(false)},
+		{"explicit true", new(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy := map[string]any{"enabled": true, "early_rest_enabled": true, "mode": "sticky", "revision": "legacy-policy"}
+			if tc.hold != nil {
+				legacy["scheduled_hold_enabled"] = *tc.hold
+			}
+			raw, err := json.Marshal(legacy)
+			require.NoError(t, err)
+			repo := &accountRotationSettingRepo{values: map[string]string{SettingKeyAccountRotationSettings: string(raw)}}
+			svc := NewSettingService(repo, &config.Config{})
+			actual, err := svc.GetAccountRotationSettings(t.Context())
+			require.NoError(t, err)
+			expected := DefaultAccountRotationSettings()
+			expected.Enabled, expected.EarlyRestEnabled, expected.Mode, expected.Revision = true, true, "sticky", "legacy-policy"
+			if tc.hold != nil {
+				expected.ScheduledHoldEnabled = *tc.hold
+			}
+			require.Equal(t, expected, actual)
+			require.Equal(t, string(raw), repo.values[SettingKeyAccountRotationSettings])
+			require.NoError(t, svc.UpdateSettings(t.Context(), &SystemSettings{AccountRotationSettings: actual}))
+			reloaded, err := NewSettingService(repo, &config.Config{}).GetAccountRotationSettings(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, expected, reloaded, "saving defaults must preserve legacy revision and explicit false")
+		})
+	}
+}
+
+func TestAccountRotationSettingsInvalidNewStoredFieldsFallBackToDefaults(t *testing.T) {
+	for field, values := range map[string][]any{
+		"scheduled_hold_enabled":           {nil, "false", 0, []any{}, map[string]any{}},
+		"early_rest_window_minutes":        {nil, 0, -1, 1441, "20", true, json.Number("1.0"), json.Number("1e1"), []any{}, map[string]any{}},
+		"early_rest_concurrency_threshold": {nil, 0, -1, 10001, "2", true, json.Number("1.0"), []any{}, map[string]any{}},
+		"early_rest_seconds":               {nil, 0, -1, 7201, "120", true, json.Number("1.5"), []any{}, map[string]any{}},
+	} {
+		for i, value := range values {
+			t.Run(fmt.Sprintf("%s/%d", field, i), func(t *testing.T) {
+				raw, err := json.Marshal(map[string]any{"enabled": true, "mode": "sticky", "revision": "invalid-policy", field: value})
+				require.NoError(t, err)
+				require.Equal(t, DefaultAccountRotationSettings(), parseAccountRotationSettings(string(raw)))
+			})
+		}
+	}
 }
 
 func TestAccountRotationSettingsLegacyRevisionRemainsEmptyUntilContentChanges(t *testing.T) {

@@ -7,8 +7,17 @@
       <Toggle id="account-rotation-toggle" v-model="value.enabled" />
     </div>
     <template v-if="value.enabled">
-      <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <label class="block text-sm text-gray-700 dark:text-gray-300">
+      <div class="mt-4 rounded-xl bg-gray-50 p-4 dark:bg-dark-900/50">
+        <div class="flex items-center justify-between gap-4">
+          <label for="account-rotation-hold-toggle" class="text-sm font-medium text-gray-900 dark:text-white">
+            {{ t('admin.settings.accountRotation.scheduledHold') }}
+          </label>
+          <Toggle id="account-rotation-hold-toggle" v-model="value.scheduled_hold_enabled" />
+        </div>
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.accountRotation.scheduledHoldHint') }}</p>
+      </div>
+      <div class="mt-4 grid gap-4 sm:grid-cols-2" :class="{ 'lg:grid-cols-3': !value.scheduled_hold_enabled }">
+        <label v-if="!value.scheduled_hold_enabled" class="block text-sm text-gray-700 dark:text-gray-300">
           {{ t('admin.settings.accountRotation.mode') }}
           <select v-model="value.mode" class="input mt-1 min-h-11 w-full">
             <option value="aggressive">{{ t('admin.settings.accountRotation.aggressive') }}</option>
@@ -34,7 +43,9 @@
       </div>
       <p class="mt-3 text-sm leading-relaxed text-gray-500 dark:text-gray-400">
         {{ t('admin.settings.accountRotation.timing') }}
-        {{ t(value.mode === 'aggressive' ? 'admin.settings.accountRotation.aggressiveHint' : 'admin.settings.accountRotation.stickyHint') }}
+        <template v-if="!value.scheduled_hold_enabled">
+          {{ t(value.mode === 'aggressive' ? 'admin.settings.accountRotation.aggressiveHint' : 'admin.settings.accountRotation.stickyHint') }}
+        </template>
       </p>
       <div class="mt-4 rounded-xl bg-gray-50 p-4 dark:bg-dark-900/50">
         <div class="flex items-center justify-between gap-4">
@@ -42,6 +53,20 @@
             {{ t('admin.settings.accountRotation.earlyRest') }}
           </label>
           <Toggle id="account-rotation-early-toggle" v-model="value.early_rest_enabled" />
+        </div>
+        <div v-if="value.early_rest_enabled" class="mt-4 grid gap-4 sm:grid-cols-3">
+          <label class="block text-sm text-gray-700 dark:text-gray-300">
+            {{ t('admin.settings.accountRotation.earlyWindow') }}
+            <input id="account-rotation-early-window" v-model.number="value.early_rest_window_minutes" type="number" min="1" max="1440" step="1" required class="input mt-1 min-h-11 w-full" />
+          </label>
+          <label class="block text-sm text-gray-700 dark:text-gray-300">
+            {{ t('admin.settings.accountRotation.earlyConcurrency') }}
+            <input id="account-rotation-early-concurrency" v-model.number="value.early_rest_concurrency_threshold" type="number" min="1" max="10000" step="1" required class="input mt-1 min-h-11 w-full" />
+          </label>
+          <label class="block text-sm text-gray-700 dark:text-gray-300">
+            {{ t('admin.settings.accountRotation.earlySeconds') }}
+            <input id="account-rotation-early-seconds" v-model.number="value.early_rest_seconds" type="number" min="1" max="7200" step="1" required class="input mt-1 min-h-11 w-full" />
+          </label>
         </div>
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.accountRotation.earlyHint') }}</p>
       </div>

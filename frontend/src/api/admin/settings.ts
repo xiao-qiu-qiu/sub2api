@@ -22,12 +22,16 @@ export interface DefaultSubscriptionSetting {
 
 export interface AccountRotationSettings {
   enabled: boolean;
+  scheduled_hold_enabled: boolean;
   mode: 'aggressive' | 'sticky';
   work_minutes: number;
   rest_min_minutes: number;
   rest_max_minutes: number;
   stagger_percent: number;
   early_rest_enabled: boolean;
+  early_rest_window_minutes: number;
+  early_rest_concurrency_threshold: number;
+  early_rest_seconds: number;
   recovery_min_interval_ms: number;
   recovery_max_interval_ms: number;
   revision?: string;
@@ -35,12 +39,16 @@ export interface AccountRotationSettings {
 
 export const defaultAccountRotationSettings = (): AccountRotationSettings => ({
   enabled: false,
+  scheduled_hold_enabled: true,
   mode: 'aggressive',
   work_minutes: 300,
   rest_min_minutes: 10,
   rest_max_minutes: 30,
   stagger_percent: 10,
   early_rest_enabled: false,
+  early_rest_window_minutes: 20,
+  early_rest_concurrency_threshold: 2,
+  early_rest_seconds: 120,
   recovery_min_interval_ms: 500,
   recovery_max_interval_ms: 2000,
 });

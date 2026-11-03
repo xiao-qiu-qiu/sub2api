@@ -93,16 +93,21 @@ func TestAccountManualRestAdminReadStateDoesNotStartOrCancel(t *testing.T) {
 func TestAccountManualRestAdminStartDefaultsAndBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		body    string
-		minutes int
-	}{{"", 1}, {"{}", 1}, {`{"minutes":1}`, 1}, {`{"minutes":17}`, 17}, {`{"minutes":120}`, 120}} {
-		t.Run(tc.body+"/"+strconv.Itoa(tc.minutes), func(t *testing.T) {
+		seconds int
+	}{
+		{"", 60}, {" \n\t ", 60}, {"{}", 60},
+		{`{"seconds":1}`, 1}, {`{"seconds":17}`, 17}, {`{"seconds":60}`, 60},
+		{`{"seconds":120}`, 120}, {`{"seconds":7199}`, 7199}, {`{"seconds":7200}`, 7200},
+		{`{"minutes":1}`, 60}, {`{"minutes":17}`, 1020}, {`{"minutes":120}`, 7200},
+	} {
+		t.Run(tc.body+"/"+strconv.Itoa(tc.seconds), func(t *testing.T) {
 			router, _, admin, cache := setupAccountManualRestRouter(t)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/accounts/101/rotation/rest", strings.NewReader(tc.body)))
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			require.Equal(t, []int64{101}, admin.lookups)
 			require.Equal(t, []int64{101}, cache.startIDs)
-			require.Equal(t, []int{tc.minutes * 60}, cache.startSeconds)
+			require.Equal(t, []int{tc.seconds}, cache.startSeconds)
 			require.Zero(t, cache.policies[0].WorkSeconds, "manual rest must work with automatic rotation disabled")
 			require.Equal(t, "manual", gjson.GetBytes(rec.Body.Bytes(), "data.account_rotation.reason").String())
 			require.True(t, gjson.GetBytes(rec.Body.Bytes(), "data.account_rotation.hold").Bool())
@@ -112,12 +117,18 @@ func TestAccountManualRestAdminStartDefaultsAndBoundaries(t *testing.T) {
 	}
 }
 
-func TestAccountManualRestAdminRejectsInvalidMinutesBeforeMutation(t *testing.T) {
+func TestAccountManualRestAdminRejectsInvalidDurationsBeforeMutation(t *testing.T) {
 	for _, body := range []string{
+		`{"seconds":0}`, `{"seconds":-1}`, `{"seconds":7201}`, `{"seconds":1.5}`, `{"seconds":1.0}`, `{"seconds":1e1}`,
+		`{"seconds":"1"}`, `{"seconds":true}`, `{"seconds":null}`, `{"seconds":[]}`, `{"seconds":{}}`,
+		`{"seconds":999999999999999999999999}`, `{"seconds":60,"minutes":1}`,
+		`{"seconds":null,"minutes":1}`, `{"seconds":60,"minutes":null}`, `{"seconds":null,"minutes":null}`,
 		`{"minutes":0}`, `{"minutes":-1}`, `{"minutes":121}`, `{"minutes":1.5}`,
+		`{"minutes":1.0}`, `{"minutes":1e1}`, `{"minutes":{}}`,
 		`{"minutes":"1"}`, `{"minutes":true}`, `{"minutes":null}`, `{"minutes":[]}`,
 		`{"minutes":999999999999999999999999}`, `null`, `[]`, `1`, `"1"`, `{`,
-		`{"minute":1}`, `{} {}`, `{} invalid`,
+		`{"minute":1}`, `{"seconds":1,"unknown":1}`, `{} {}`, `{} invalid`,
+		`{"seconds":1} {"seconds":2}`, `{"seconds":1} null`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			router, _, admin, cache := setupAccountManualRestRouter(t)

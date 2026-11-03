@@ -11,9 +11,9 @@
       <p class="text-sm leading-relaxed text-gray-600 dark:text-gray-300">
         {{ t(ending ? 'admin.settings.accountRotation.endManualConfirm' : 'admin.settings.accountRotation.manualConfirm', { name: account.name }) }}
       </p>
-      <label v-if="!ending" for="manual-rest-minutes" class="mt-5 block text-sm font-medium text-gray-700 dark:text-gray-300">
-        {{ t('admin.settings.accountRotation.manualMinutes') }}
-        <input id="manual-rest-minutes" v-model.number="minutes" type="number" min="1" max="120" step="1" required :disabled="saving" class="input mt-2 w-full" />
+      <label v-if="!ending" for="manual-rest-seconds" class="mt-5 block text-sm font-medium text-gray-700 dark:text-gray-300">
+        {{ t('admin.settings.accountRotation.manualSeconds') }}
+        <input id="manual-rest-seconds" v-model.number="seconds" type="number" min="1" max="7200" step="1" required :disabled="saving" class="input mt-2 min-h-11 w-full" />
       </label>
       <p v-if="error" role="alert" class="mt-3 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
     </form>
@@ -45,10 +45,10 @@ const { t } = useI18n()
 // Capture the selected action. A background list refresh must not change what
 // the confirmation button will do while the dialog is open.
 const ending = props.account.account_rotation?.hold === true && props.account.account_rotation.reason === 'manual'
-const minutes = ref<number>(1)
+const seconds = ref<number>(60)
 const saving = ref(false)
 const error = ref('')
-const valid = computed(() => ending || (Number.isInteger(minutes.value) && minutes.value >= 1 && minutes.value <= 120))
+const valid = computed(() => ending || (Number.isInteger(seconds.value) && seconds.value >= 1 && seconds.value <= 7200))
 const close = () => { if (!saving.value) emit('close') }
 const confirm = async () => {
   if (saving.value || !valid.value) return
@@ -57,7 +57,7 @@ const confirm = async () => {
   try {
     const result = ending
       ? await adminAPI.accounts.cancelManualRest(props.account.id)
-      : await adminAPI.accounts.startManualRest(props.account.id, minutes.value)
+      : await adminAPI.accounts.startManualRest(props.account.id, seconds.value)
     emit('updated', result.account_rotation, ending)
     emit('close')
   } catch (cause) {

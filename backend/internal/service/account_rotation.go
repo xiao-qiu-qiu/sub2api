@@ -21,23 +21,30 @@ type AccountRotationPolicy struct {
 	Mode                                                        string
 	WorkSeconds, RestMinSeconds, RestMaxSeconds, StaggerPercent int
 	EarlyRestEnabled                                            bool
+	ScheduledHoldEnabled                                        bool
+	EarlyRestWindowSeconds, EarlyRestConcurrencyThreshold       int
+	EarlyRestSeconds                                            int
 	RecoveryMinIntervalMS, RecoveryMaxIntervalMS                int
 	Revision                                                    string
 }
 
 type AccountRotationState struct {
-	Phase           string `json:"phase"`
-	StartedAt       int64  `json:"started_at"`
-	DrainAt         int64  `json:"drain_at"`
-	RestUntil       int64  `json:"rest_until"`
-	IdleSince       int64  `json:"idle_since"`
-	RestSeconds     int    `json:"rest_seconds"`
-	Reason          string `json:"reason,omitempty"`
-	Hold            bool   `json:"hold"`
-	WaitingCount    int    `json:"waiting_count"`
-	EarlyEligibleAt int64  `json:"early_eligible_at,omitempty"`
-	Recovering      bool   `json:"recovering"`
-	RetryAfterMS    int64  `json:"retry_after_ms,omitempty"`
+	AutomaticEnabled        bool   `json:"automatic_enabled"`
+	LastManualRestAt        int64  `json:"last_manual_rest_at"`
+	LastAutomaticRestAt     int64  `json:"last_automatic_rest_at"`
+	LastAutomaticRestReason string `json:"last_automatic_rest_reason"`
+	Phase                   string `json:"phase"`
+	StartedAt               int64  `json:"started_at"`
+	DrainAt                 int64  `json:"drain_at"`
+	RestUntil               int64  `json:"rest_until"`
+	IdleSince               int64  `json:"idle_since"`
+	RestSeconds             int    `json:"rest_seconds"`
+	Reason                  string `json:"reason,omitempty"`
+	Hold                    bool   `json:"hold"`
+	WaitingCount            int    `json:"waiting_count"`
+	EarlyEligibleAt         int64  `json:"early_eligible_at,omitempty"`
+	Recovering              bool   `json:"recovering"`
+	RetryAfterMS            int64  `json:"retry_after_ms,omitempty"`
 }
 
 type AccountRotationCache interface {
@@ -200,9 +207,13 @@ func (s *ConcurrencyService) accountRotationPolicy(ctx context.Context) (*Accoun
 		Mode: settings.Mode, WorkSeconds: settings.WorkMinutes * 60,
 		RestMinSeconds: settings.RestMinMinutes * 60, RestMaxSeconds: settings.RestMaxMinutes * 60,
 		StaggerPercent: settings.StaggerPercent, Revision: settings.Revision,
-		EarlyRestEnabled:      settings.Enabled && settings.EarlyRestEnabled,
-		RecoveryMinIntervalMS: settings.RecoveryMinIntervalMS,
-		RecoveryMaxIntervalMS: settings.RecoveryMaxIntervalMS,
+		EarlyRestEnabled:              settings.Enabled && settings.EarlyRestEnabled,
+		ScheduledHoldEnabled:          settings.ScheduledHoldEnabled,
+		EarlyRestWindowSeconds:        settings.EarlyRestWindowMinutes * 60,
+		EarlyRestConcurrencyThreshold: settings.EarlyRestConcurrencyThreshold,
+		EarlyRestSeconds:              settings.EarlyRestSeconds,
+		RecoveryMinIntervalMS:         settings.RecoveryMinIntervalMS,
+		RecoveryMaxIntervalMS:         settings.RecoveryMaxIntervalMS,
 	}
 	if !settings.Enabled {
 		// Keep real requests visible for a manual rest, including unlimited
@@ -300,9 +311,13 @@ func (s *ConcurrencyService) GetAccountRotationStates(ctx context.Context, ids [
 		return map[int64]*AccountRotationState{}, nil
 	}
 	states, err := s.accountRotationStates(ctx, ids, *policy)
-	if err == nil && policy.WorkSeconds == 0 {
+	if err == nil {
 		for id, state := range states {
-			if state == nil || (!state.Hold && !state.Recovering && state.WaitingCount == 0) {
+			if state != nil {
+				state.AutomaticEnabled = policy.WorkSeconds > 0
+			}
+			if policy.WorkSeconds == 0 && (state == nil || (!state.Hold && !state.Recovering && state.WaitingCount == 0 &&
+				state.LastManualRestAt == 0 && state.LastAutomaticRestAt == 0)) {
 				delete(states, id)
 			}
 		}
@@ -314,11 +329,18 @@ func (s *ConcurrencyService) StartAccountManualRest(ctx context.Context, account
 	if accountID <= 0 || minutes < 1 || minutes > 120 {
 		return nil, infraerrors.BadRequest("INVALID_ACCOUNT_REST", "rest minutes must be between 1 and 120")
 	}
+	return s.StartAccountManualRestSeconds(ctx, accountID, minutes*60)
+}
+
+func (s *ConcurrencyService) StartAccountManualRestSeconds(ctx context.Context, accountID int64, seconds int) (*AccountRotationState, error) {
+	if accountID <= 0 || seconds < 1 || seconds > 7200 {
+		return nil, infraerrors.BadRequest("INVALID_ACCOUNT_REST", "rest seconds must be between 1 and 7200")
+	}
 	cache, policy, err := s.accountRotationHoldPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return cache.SetAccountRotationHold(ctx, accountID, minutes*60, *policy)
+	return cache.SetAccountRotationHold(ctx, accountID, seconds, *policy)
 }
 
 func (s *ConcurrencyService) CancelAccountManualRest(ctx context.Context, accountID int64) (*AccountRotationState, error) {

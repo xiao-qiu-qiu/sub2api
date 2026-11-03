@@ -1544,8 +1544,8 @@ export const accountsAPI = {
 
 export default accountsAPI
 
-export async function startManualRest(id: number, minutes = 1): Promise<{ account_rotation: NonNullable<Account['account_rotation']> }> {
-  const { data } = await apiClient.post(`/admin/accounts/${id}/rotation/rest`, { minutes })
+export async function startManualRest(id: number, seconds = 60): Promise<{ account_rotation: NonNullable<Account['account_rotation']> }> {
+  const { data } = await apiClient.post(`/admin/accounts/${id}/rotation/rest`, { seconds })
   return data
 }
 

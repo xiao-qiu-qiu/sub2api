@@ -377,49 +377,55 @@ func TestOpenAIAccountRotationHoldSchedulersWaitForSameAccount(t *testing.T) {
 		{"advanced", true, true, false}, {"legacy_load", false, true, false}, {"legacy_priority", false, false, false},
 		{"advanced_sticky", true, true, true}, {"legacy_load_sticky", false, true, true}, {"legacy_priority_sticky", false, false, true},
 	} {
-		t.Run(path.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				svc, _ := newOpenAIRotationTestService(t, path.advanced, path.batch, false, AccountRotationModeAggressive)
-				cache := newRotationHoldTestCache()
-				svc.concurrencyService.cache = cache
-				cache.setState(48101, AccountRotationState{Phase: "resting", Hold: true, Reason: "manual"})
-				session := ""
-				if path.sticky {
-					session = "existing-session"
-					require.NoError(t, svc.setStickySessionAccountID(t.Context(), nil, session, 48101, time.Hour))
-				}
-				type outcome struct {
-					selection *AccountSelectionResult
-					err       error
-				}
-				done := make(chan outcome, 1)
-				go func() {
-					selection, err := selectOpenAIRotationTestAccount(svc, t.Context(), session)
-					done <- outcome{selection, err}
-				}()
-				synctest.Wait()
-				cache.assertCounts(t, 48101, 0, 1)
-				time.Sleep(46 * time.Second)
-				synctest.Wait()
-				requireRotationHoldPending(t, done)
-				cache.assertCounts(t, 48102, 0, 0)
-				cache.setState(48101, AccountRotationState{Phase: "ready"})
-				time.Sleep(time.Second)
-				result := <-done
-				require.NoError(t, result.err)
-				require.NotNil(t, result.selection)
-				require.EqualValues(t, 48101, result.selection.Account.ID)
-				require.True(t, result.selection.Acquired)
-				require.Nil(t, result.selection.WaitPlan)
-				require.True(t, HasAccountRotationTracking(ContextWithSelectionProfitGate(t.Context(), result.selection)))
-				result.selection.ReleaseFunc()
-				cache.assertCounts(t, 48101, 0, 0)
-				for _, call := range cache.calls {
-					require.EqualValues(t, 48101, call.accountID, "a HOLD cannot spill into the free fallback account")
-					require.Equal(t, path.sticky, call.sticky)
-				}
+		for _, reason := range []string{"manual", "early", "scheduled"} {
+			t.Run(path.name+"/"+reason, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					svc, _ := newOpenAIRotationTestService(t, path.advanced, path.batch, reason == "scheduled", AccountRotationModeAggressive)
+					cache := newRotationHoldTestCache()
+					svc.concurrencyService.cache = cache
+					cache.setState(48101, AccountRotationState{Phase: "resting", Hold: true, Reason: reason})
+					session := ""
+					if path.sticky {
+						session = "existing-session"
+						require.NoError(t, svc.setStickySessionAccountID(t.Context(), nil, session, 48101, time.Hour))
+					}
+					type outcome struct {
+						selection *AccountSelectionResult
+						err       error
+					}
+					done := make(chan outcome, 1)
+					go func() {
+						selection, err := selectOpenAIRotationTestAccount(svc, t.Context(), session)
+						done <- outcome{selection, err}
+					}()
+					synctest.Wait()
+					cache.assertCounts(t, 48101, 0, 1)
+					time.Sleep(46 * time.Second)
+					synctest.Wait()
+					requireRotationHoldPending(t, done)
+					cache.assertCounts(t, 48102, 0, 0)
+					cache.setState(48101, AccountRotationState{Phase: "ready"})
+					time.Sleep(time.Second)
+					result := <-done
+					require.NoError(t, result.err)
+					require.NotNil(t, result.selection)
+					require.EqualValues(t, 48101, result.selection.Account.ID)
+					require.True(t, result.selection.Acquired)
+					require.Nil(t, result.selection.WaitPlan)
+					require.True(t, HasAccountRotationTracking(ContextWithSelectionProfitGate(t.Context(), result.selection)))
+					result.selection.ReleaseFunc()
+					cache.assertCounts(t, 48101, 0, 0)
+					for _, call := range cache.calls {
+						require.EqualValues(t, 48101, call.accountID, "a HOLD cannot spill into the free fallback account")
+						require.Equal(t, path.sticky, call.sticky)
+						if reason == "scheduled" {
+							require.Positive(t, call.policy.WorkSeconds, "scheduled HOLD must exercise automatic rotation")
+							require.True(t, call.policy.ScheduledHoldEnabled)
+						}
+					}
+				})
 			})
-		})
+		}
 	}
 }
 

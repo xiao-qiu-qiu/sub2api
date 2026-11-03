@@ -12,15 +12,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func decodeAccountManualRestMinutes(body io.Reader) (int, error) {
+func decodeAccountManualRestSeconds(body io.Reader) (int, error) {
 	var request *struct {
+		Seconds json.RawMessage `json:"seconds"`
 		Minutes json.RawMessage `json:"minutes"`
 	}
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		if err == io.EOF {
-			return 1, nil
+			return 60, nil
 		}
 		return 0, fmt.Errorf("invalid request: %w", err)
 	}
@@ -31,19 +32,21 @@ func decodeAccountManualRestMinutes(body io.Reader) (int, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return 0, fmt.Errorf("request must contain a single JSON object")
 	}
-	minutes := 1
+	if len(request.Seconds) != 0 && len(request.Minutes) != 0 {
+		return 0, fmt.Errorf("seconds and minutes cannot be provided together")
+	}
+	field, raw, maximum, multiplier := "seconds", request.Seconds, 7200, 1
 	if len(request.Minutes) != 0 {
-		if bytes.Equal(bytes.TrimSpace(request.Minutes), []byte("null")) {
-			return 0, fmt.Errorf("minutes must be an integer between 1 and 120")
-		}
-		if err := json.Unmarshal(request.Minutes, &minutes); err != nil {
-			return 0, fmt.Errorf("minutes must be an integer between 1 and 120")
-		}
+		field, raw, maximum, multiplier = "minutes", request.Minutes, 120, 60
 	}
-	if minutes < 1 || minutes > 120 {
-		return 0, fmt.Errorf("minutes must be an integer between 1 and 120")
+	if len(raw) == 0 {
+		return 60, nil
 	}
-	return minutes, nil
+	var duration int
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &duration) != nil || duration < 1 || duration > maximum {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", field, maximum)
+	}
+	return duration * multiplier, nil
 }
 
 // StartAccountManualRest holds new requests until the account has drained and
@@ -55,7 +58,7 @@ func (h *AccountHandler) StartAccountManualRest(c *gin.Context) {
 		response.BadRequest(c, "Invalid account ID")
 		return
 	}
-	minutes, err := decodeAccountManualRestMinutes(c.Request.Body)
+	seconds, err := decodeAccountManualRestSeconds(c.Request.Body)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -67,7 +70,7 @@ func (h *AccountHandler) StartAccountManualRest(c *gin.Context) {
 		response.ErrorFrom(c, service.ErrAccountRotationUnsupported)
 		return
 	}
-	state, err := h.concurrencyService.StartAccountManualRest(c.Request.Context(), accountID, minutes)
+	state, err := h.concurrencyService.StartAccountManualRestSeconds(c.Request.Context(), accountID, seconds)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

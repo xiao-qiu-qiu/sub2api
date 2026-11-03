@@ -166,8 +166,15 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 	}
 
 	for attempt := 0; attempt <= 3; attempt++ {
+		selectionCtx := ctx
+		stopSelectionLease := func() {}
+		if joint.leaseID != "" {
+			selectionCtx, stopSelectionLease = s.liveSelectionLeaseContext(ctx, &LiveCallRecord{
+				AccountID: joint.accountID, UserID: identity.UserID, APIKeyID: identity.APIKeyID, LeaseID: joint.leaseID,
+			})
+		}
 		selection, _, selectErr := s.SelectAccountWithSchedulerForCapability(
-			ctx,
+			selectionCtx,
 			identity.GroupID,
 			"",
 			uuid.NewString(),
@@ -179,8 +186,24 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			false,
 			false,
 		)
+		if selectErr == nil {
+			selectErr = s.acquireLiveRotationWaitPlan(selectionCtx, selection)
+		}
+		if errors.Is(context.Cause(selectionCtx), ErrAPIKeySlotLeaseLost) {
+			selectErr = ErrAPIKeySlotLeaseLost
+		}
+		stopSelectionLease()
 		if selectErr != nil {
+			if selection != nil && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
 			releaseJoint()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if errors.Is(selectErr, ErrAPIKeySlotLeaseLost) {
+				return nil, selectErr
+			}
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -343,6 +366,79 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		return nil, lastErr
 	}
 	return nil, ErrLiveUnavailable
+}
+
+// Only a confirmed rotation gap can extend a Live capacity rejection. Ordinary
+// WaitPlans retain their immediate rejection; a confirmed HOLD stays on this
+// account even if the gap ends before the first acquisition and capacity fills.
+func (s *OpenAIGatewayService) acquireLiveRotationWaitPlan(ctx context.Context, selection *AccountSelectionResult) error {
+	if selection == nil || selection.Account == nil || selection.Acquired || selection.WaitPlan == nil ||
+		selection.WaitPlan.AccountID != selection.Account.ID || s.concurrencyService == nil {
+		return nil
+	}
+	concurrency := s.concurrencyService
+	cache, ok := concurrency.cache.(AccountRotationHoldCache)
+	if !ok {
+		return nil
+	}
+	policy, err := concurrency.accountRotationPolicy(ctx)
+	if err != nil || policy == nil {
+		return err
+	}
+	account := selection.Account
+	state, err := cache.CheckAccountRotation(ctx, account.ID, *policy)
+	if err != nil || state == nil || (!state.Hold && !state.Recovering) {
+		return err
+	}
+	ctx = accountRotationHoldingContext(ContextWithSelectionProfitGate(ctx, selection))
+	for {
+		result, err := concurrency.AcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		if err != nil {
+			return err
+		}
+		if result.Acquired {
+			previousRelease := selection.ReleaseFunc
+			selection.Acquired, selection.AccountRequestID, selection.WaitPlan = true, result.RequestID, nil
+			selection.ReleaseFunc = func() {
+				result.ReleaseFunc()
+				if previousRelease != nil {
+					previousRelease()
+				}
+			}
+			return nil
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// While selecting a replacement, accountID is zero: only the retained user/key
+// owners renew. Failed upstream attempts never keep an account slot occupied.
+func (s *OpenAIGatewayService) liveSelectionLeaseContext(ctx context.Context, record *LiveCallRecord) (context.Context, func()) {
+	leaseCtx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(liveLeaseRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				if !s.refreshLiveLease(record) {
+					cancel(ErrAPIKeySlotLeaseLost)
+					return
+				}
+			}
+		}
+	}()
+	return leaseCtx, func() { cancel(context.Canceled); <-done }
 }
 
 // acquireLiveLeaseForIdentity atomically moves the exact ordinary account,

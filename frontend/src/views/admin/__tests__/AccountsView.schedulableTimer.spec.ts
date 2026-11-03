@@ -195,6 +195,23 @@ function selectedIds() {
 }
 
 describe('account immediate scheduling without confirmation', () => {
+  it('refreshes a waiting work window every 30 seconds without refreshing the full table', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const state = { phase: 'ready', started_at: 0, drain_at: 0, rest_until: 0, idle_since: 0, rest_seconds: 0, automatic_enabled: true }
+    const working = { ...state, phase: 'working', started_at: Date.now() / 1000, drain_at: Date.now() / 1000 + 18000 }
+    listAccounts.mockResolvedValue({ items: [{ ...baseAccount, id: 7, name: 'rotation-ready', account_rotation: state }], total: 1, page: 1, page_size: 20, pages: 1 })
+    getAccountRestState.mockResolvedValue({ account_rotation: working })
+    wrapper = mountView()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(25000)
+    expect(getAccountRestState).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(getAccountRestState).toHaveBeenCalledTimes(1)
+    expect(wrapper.findComponent(DataTableStub).props('data')[0].account_rotation.drain_at).toBe(working.drain_at)
+    expect(listAccounts).toHaveBeenCalledTimes(1)
+  })
+
   it('refreshes the final recovery gap without held or queued requests and stops after recovery', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     const state = {
