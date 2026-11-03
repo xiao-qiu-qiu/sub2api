@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -1364,7 +1365,19 @@ func (h *AccountHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err = h.adminService.DeleteAccount(c.Request.Context(), accountID)
+	var req struct {
+		DeleteNote string `json:"delete_note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	note, err := service.NormalizeAccountDeleteNote(req.DeleteNote)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	err = h.deleteAccountWithNote(c.Request.Context(), accountID, note)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -1951,9 +1964,15 @@ func (h *AccountHandler) RevertProxyFallback(c *gin.Context) {
 func (h *AccountHandler) BatchDelete(c *gin.Context) {
 	var req struct {
 		AccountIDs []int64 `json:"account_ids"`
+		DeleteNote string  `json:"delete_note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	note, err := service.NormalizeAccountDeleteNote(req.DeleteNote)
+	if err != nil {
+		response.ErrorFrom(c, err)
 		return
 	}
 
@@ -2040,7 +2059,7 @@ func (h *AccountHandler) BatchDelete(c *gin.Context) {
 	for _, id := range rootIDs {
 		accountID := id
 		g.Go(func() error {
-			err := h.adminService.DeleteAccount(gctx, accountID)
+			err := h.deleteAccountWithNote(gctx, accountID, note)
 
 			mu.Lock()
 			defer mu.Unlock()

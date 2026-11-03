@@ -8,6 +8,7 @@ export default {
   name: 'Name',
   details: 'Details',
   deletedAt: 'Deleted At',
+  deleteNote: 'Deletion Note',
   loginCredentials: 'Login Credentials',
   credentialsArchived: 'Archived',
   noCredentials: 'No login credentials',

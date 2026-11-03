@@ -281,10 +281,15 @@ export async function checkMixedChannelRisk(
 /**
  * Delete account
  * @param id - Account ID
+ * @param deleteNote - Optional note stored with the deleted account
  * @returns Success confirmation
  */
-export async function deleteAccount(id: number): Promise<{ message: string }> {
-  const { data } = await apiClient.delete<{ message: string }>(`/admin/accounts/${id}`)
+export async function deleteAccount(id: number, deleteNote?: string): Promise<{ message: string }> {
+  const note = deleteNote?.trim()
+  const url = `/admin/accounts/${id}`
+  const { data } = note
+    ? await apiClient.delete<{ message: string }>(url, { data: { delete_note: note } })
+    : await apiClient.delete<{ message: string }>(url)
   return data
 }
 
@@ -862,9 +867,11 @@ export async function revertProxyFallback(id: number): Promise<{ message: string
 /**
  * Delete multiple accounts with bounded server-side concurrency.
  */
-export async function batchDelete(accountIds: number[]): Promise<BatchOperationResult> {
+export async function batchDelete(accountIds: number[], deleteNote?: string): Promise<BatchOperationResult> {
+  const note = deleteNote?.trim()
   const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-delete', {
-    account_ids: accountIds
+    account_ids: accountIds,
+    ...(note ? { delete_note: note } : {})
   })
   return data
 }

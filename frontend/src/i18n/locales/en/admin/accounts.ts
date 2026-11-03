@@ -150,6 +150,8 @@ export default {
       crsBack: 'Back',
       editAccount: 'Edit Account',
       deleteAccount: 'Move Account to Recycle Bin',
+      deleteNote: 'Deletion note (optional)',
+      deleteNotePlaceholder: 'Reason for deletion or other notes',
       searchAccounts: 'Search accounts...',
       notes: 'Notes',
       notesPlaceholder: 'Enter notes',

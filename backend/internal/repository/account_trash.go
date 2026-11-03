@@ -14,6 +14,7 @@ import (
 )
 
 var _ service.AccountTrashRepository = (*accountRepository)(nil)
+var _ service.AccountDeleteNoteRepository = (*accountRepository)(nil)
 
 // No ciphertext is selected by the listing, even for old deleted rows which
 // predate archives and still have a live reauthentication configuration.
@@ -52,7 +53,8 @@ func (r *accountRepository) ListAccountTrash(ctx context.Context, params paginat
 			NULLIF(a.credentials->>'email', ''), a.extra->>'email', ''),
 		(COALESCE(length(ar.password_ciphertext), length(c.password_ciphertext), 0) > 0
 		 OR COALESCE(length(ar.totp_secret_ciphertext), length(c.totp_secret_ciphertext), 0) > 0
-		 OR COALESCE(length(ar.otp_url_ciphertext), length(c.otp_url_ciphertext), 0) > 0)`+
+		 OR COALESCE(length(ar.otp_url_ciphertext), length(c.otp_url_ciphertext), 0) > 0),
+		COALESCE(ar.delete_note, '')`+
 		accountTrashFrom+` ORDER BY a.deleted_at DESC, a.id DESC LIMIT $2 OFFSET $3`, search, params.Limit(), params.Offset())
 	if err != nil {
 		return nil, nil, err
@@ -61,7 +63,7 @@ func (r *accountRepository) ListAccountTrash(ctx context.Context, params paginat
 	items := make([]service.AccountTrashItem, 0)
 	for rows.Next() {
 		var item service.AccountTrashItem
-		if err := rows.Scan(&item.ID, &item.Name, &item.Platform, &item.Type, &item.DeletedAt, &item.LoginEmail, &item.HasLoginCredentials); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Platform, &item.Type, &item.DeletedAt, &item.LoginEmail, &item.HasLoginCredentials, &item.DeleteNote); err != nil {
 			return nil, nil, err
 		}
 		items = append(items, item)
@@ -225,6 +227,14 @@ func parkTrashTOTPRotations(ctx context.Context, exec sqlExecutor, id int64) ([]
 }
 
 func (r *accountRepository) deleteAccountToTrash(ctx context.Context, id int64) error {
+	return r.DeleteWithNote(ctx, id, "")
+}
+
+func (r *accountRepository) DeleteWithNote(ctx context.Context, id int64, note string) error {
+	note, err := service.NormalizeAccountDeleteNote(note)
+	if err != nil {
+		return err
+	}
 	return r.accountTrashTransaction(ctx, func(ctx context.Context, client *dbent.Client) error {
 		account, err := lockTrashAccount(ctx, client, id)
 		if err != nil {
@@ -237,10 +247,10 @@ func (r *accountRepository) deleteAccountToTrash(ctx context.Context, id int64) 
 			return err
 		}
 		if _, err := client.ExecContext(ctx, `INSERT INTO account_trash_archives (
-			account_id, group_bindings, original_proxy_id, original_proxy_fallback_origin_id,
+			account_id, delete_note, group_bindings, original_proxy_id, original_proxy_fallback_origin_id,
 			login_email, credential_mode, engine, proxy_source,
 			login_proxy_id, password_ciphertext, totp_secret_ciphertext, otp_url_ciphertext, login_created_at
-		) SELECT a.id, COALESCE((SELECT jsonb_agg(jsonb_build_object(
+		) SELECT a.id, $2, COALESCE((SELECT jsonb_agg(jsonb_build_object(
 			'group_id', ag.group_id, 'priority', ag.priority, 'allowed_models', ag.allowed_models,
 			'created_at', ag.created_at) ORDER BY ag.group_id)
 			FROM account_groups ag WHERE ag.account_id = a.id), '[]'::jsonb),
@@ -250,6 +260,7 @@ func (r *accountRepository) deleteAccountToTrash(ctx context.Context, id int64) 
 		FROM accounts a LEFT JOIN openai_oauth_reauth_configs c ON c.account_id = a.id
 		WHERE a.id = $1
 		ON CONFLICT (account_id) DO UPDATE SET
+			delete_note = EXCLUDED.delete_note,
 			group_bindings = EXCLUDED.group_bindings,
 			original_proxy_id = EXCLUDED.original_proxy_id,
 			original_proxy_fallback_origin_id = EXCLUDED.original_proxy_fallback_origin_id,
@@ -259,7 +270,7 @@ func (r *accountRepository) deleteAccountToTrash(ctx context.Context, id int64) 
 			password_ciphertext = EXCLUDED.password_ciphertext,
 			totp_secret_ciphertext = EXCLUDED.totp_secret_ciphertext,
 			otp_url_ciphertext = EXCLUDED.otp_url_ciphertext,
-			login_created_at = EXCLUDED.login_created_at, archived_at = NOW()`, id); err != nil {
+			login_created_at = EXCLUDED.login_created_at, archived_at = NOW()`, id, note); err != nil {
 			return err
 		}
 		groupIDs, err := trashGroupIDs(ctx, client, id, false)

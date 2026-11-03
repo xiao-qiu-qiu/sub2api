@@ -7,6 +7,7 @@ export interface TrashEntry {
   id: number
   name: string
   deleted_at: string
+  delete_note?: string
   status?: string
   protocol?: string
   host?: string

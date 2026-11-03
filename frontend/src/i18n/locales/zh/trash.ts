@@ -8,6 +8,7 @@ export default {
   name: '名称',
   details: '详情',
   deletedAt: '删除时间',
+  deleteNote: '删除备注',
   loginCredentials: '登录凭据',
   credentialsArchived: '已存档',
   noCredentials: '无登录凭据',

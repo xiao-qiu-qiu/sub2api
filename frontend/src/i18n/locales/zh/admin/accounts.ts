@@ -149,6 +149,8 @@ export default {
       crsBack: '返回',
       editAccount: '编辑账号',
       deleteAccount: '将账号移入回收站',
+      deleteNote: '删除备注（选填）',
+      deleteNotePlaceholder: '填写删除原因或其他说明',
       searchAccounts: '搜索账号...',
       notes: '备注',
       notesPlaceholder: '请输入备注',

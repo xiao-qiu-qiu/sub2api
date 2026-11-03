@@ -50,6 +50,9 @@
             {{ t(row.has_login_credentials ? 'trash.credentialsArchived' : 'trash.noCredentials') }}
           </span>
         </template>
+        <template #cell-delete_note="{ row }">
+          <div class="max-w-xs whitespace-pre-wrap break-words text-left text-sm leading-6 text-gray-600 [overflow-wrap:anywhere] dark:text-gray-300">{{ row.delete_note?.trim() ? row.delete_note : '—' }}</div>
+        </template>
         <template #cell-deleted_at="{ value }">
           <span class="whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{{ formatDateTime(value) }}</span>
         </template>
@@ -148,7 +151,10 @@ let loadVersion = 0
 const columns = computed<Column[]>(() => [
   { key: 'name', label: t('trash.name') },
   { key: 'details', label: t('trash.details') },
-  ...(props.kind === 'accounts' ? [{ key: 'login_credentials', label: t('trash.loginCredentials') }] : []),
+  ...(props.kind === 'accounts' ? [
+    { key: 'login_credentials', label: t('trash.loginCredentials') },
+    { key: 'delete_note', label: t('trash.deleteNote') }
+  ] : []),
   { key: 'deleted_at', label: t('trash.deletedAt') },
   { key: 'actions', label: t('common.actions'), class: 'text-right' }
 ])

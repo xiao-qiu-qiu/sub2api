@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
@@ -8,6 +9,17 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
+
+func (h *AccountHandler) deleteAccountWithNote(ctx context.Context, id int64, note string) error {
+	if note == "" {
+		return h.adminService.DeleteAccount(ctx, id)
+	}
+	svc, ok := h.adminService.(service.AccountDeleteNoteAdminService)
+	if !ok {
+		return service.ErrAccountTrashUnavailable
+	}
+	return svc.DeleteAccountWithNote(ctx, id, note)
+}
 
 // ListTrash handles GET /admin/accounts/trash.
 func (h *AccountHandler) ListTrash(c *gin.Context) {

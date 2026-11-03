@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -16,6 +18,7 @@ type AccountTrashItem struct {
 	Platform            string    `json:"platform"`
 	Type                string    `json:"type"`
 	DeletedAt           time.Time `json:"deleted_at"`
+	DeleteNote          string    `json:"delete_note"`
 	LoginEmail          string    `json:"login_email,omitempty"`
 	HasLoginCredentials bool      `json:"has_login_credentials"`
 }
@@ -33,6 +36,23 @@ type AccountTrashAdminService interface {
 	PermanentlyDeleteAccount(context.Context, int64) error
 }
 
+// Separate optional contracts preserve existing no-note callers and mocks.
+type AccountDeleteNoteRepository interface {
+	DeleteWithNote(context.Context, int64, string) error
+}
+
+type AccountDeleteNoteAdminService interface {
+	DeleteAccountWithNote(context.Context, int64, string) error
+}
+
+func NormalizeAccountDeleteNote(note string) (string, error) {
+	note = strings.TrimSpace(note)
+	if !utf8.ValidString(note) || utf8.RuneCountInString(note) > 1000 || strings.ContainsRune(note, '\x00') {
+		return "", infraerrors.BadRequest("INVALID_DELETE_NOTE", "delete_note must be valid text of at most 1000 characters")
+	}
+	return note, nil
+}
+
 var (
 	ErrAccountTrashUnavailable       = infraerrors.New(501, "ACCOUNT_TRASH_UNAVAILABLE", "Account trash is unavailable")
 	ErrAccountNotDeleted             = infraerrors.Conflict("ACCOUNT_NOT_DELETED", "Account must be deleted first")
@@ -44,6 +64,7 @@ var (
 )
 
 var _ AccountTrashAdminService = (*adminServiceImpl)(nil)
+var _ AccountDeleteNoteAdminService = (*adminServiceImpl)(nil)
 
 func (s *adminServiceImpl) ListAccountTrash(ctx context.Context, page, pageSize int, search string) ([]AccountTrashItem, int64, error) {
 	repo, ok := s.accountRepo.(AccountTrashRepository)
@@ -83,17 +104,35 @@ func (s *adminServiceImpl) PermanentlyDeleteAccount(ctx context.Context, id int6
 }
 
 func (s *adminServiceImpl) deleteAccountWithTrash(ctx context.Context, id int64) error {
+	return s.DeleteAccountWithNote(ctx, id, "")
+}
+
+func (s *adminServiceImpl) DeleteAccountWithNote(ctx context.Context, id int64, note string) error {
+	note, err := NormalizeAccountDeleteNote(note)
+	if err != nil {
+		return err
+	}
+	deleteOne := s.accountRepo.Delete
+	if note != "" {
+		repo, ok := s.accountRepo.(AccountDeleteNoteRepository)
+		if !ok {
+			return ErrAccountTrashUnavailable
+		}
+		deleteOne = func(ctx context.Context, id int64) error {
+			return repo.DeleteWithNote(ctx, id, note)
+		}
+	}
 	deleteAll := func(ctx context.Context) error {
 		shadows, err := s.accountRepo.ListShadowsByParent(ctx, id)
 		if err != nil {
 			return err
 		}
 		for _, shadow := range shadows {
-			if err := s.accountRepo.Delete(ctx, shadow.ID); err != nil {
+			if err := deleteOne(ctx, shadow.ID); err != nil {
 				return err
 			}
 		}
-		return s.accountRepo.Delete(ctx, id)
+		return deleteOne(ctx, id)
 	}
 	if s.entClient == nil || dbent.TxFromContext(ctx) != nil {
 		return deleteAll(ctx)

@@ -491,7 +491,13 @@
       @updated="handleBulkUpdated"
     />
     <TempUnschedStatusModal :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
-    <ConfirmDialog :show="showDeleteDialog" :title="t('admin.accounts.deleteAccount')" :message="t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })" :confirm-text="t('common.delete')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmDelete" @cancel="showDeleteDialog = false" />
+    <DeleteAccountDialog
+      :show="showDeleteDialog"
+      :message="deletingAccountIds.length ? t('admin.accounts.bulkActions.confirmDelete', { count: deletingAccountIds.length }) : t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })"
+      :busy="deleting"
+      @confirm="confirmDelete"
+      @cancel="closeDeleteDialog"
+    />
     <ConfirmDialog :show="showCreateShadowDialog" :title="t('admin.accounts.createSparkShadow')" :message="t('admin.accounts.createSparkShadowConfirm', { name: creatingShadowAcc?.name })" @confirm="confirmCreateSparkShadow" @cancel="showCreateShadowDialog = false" />
     <ConfirmDialog :show="showExportDataDialog" :title="t('admin.accounts.dataExport')" :message="t('admin.accounts.dataExportConfirmMessage')" :confirm-text="t('admin.accounts.dataExportConfirm')" :cancel-text="t('common.cancel')" @confirm="handleExportData" @cancel="showExportDataDialog = false">
       <label v-if="authStore.isAdmin" class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -527,6 +533,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DeleteAccountDialog from '@/components/admin/account/DeleteAccountDialog.vue'
 import RecycleBinDialog from '@/components/admin/RecycleBinDialog.vue'
 import { CreateAccountModal, EditAccountModal, BulkEditAccountModal, SyncFromCrsModal, TempUnschedStatusModal } from '@/components/account'
 import AccountTableActions from '@/components/admin/account/AccountTableActions.vue'
@@ -659,6 +666,8 @@ const showTLSFingerprintProfiles = ref(false)
 const edAcc = ref<Account | null>(null)
 const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
+const deletingAccountIds = ref<number[]>([])
+const deleting = ref(false)
 const creatingShadowAcc = ref<Account | null>(null)
 const reAuthAcc = ref<Account | null>(null)
 const manualRestAcc = ref<Account | null>(null)
@@ -1967,25 +1976,24 @@ const toggleSelectAllVisible = (event: Event) => {
   const target = event.target as HTMLInputElement
   toggleVisible(target.checked)
 }
-const handleBulkDelete = async () => {
-  const accountIds = [...selIds.value]
-  if (!confirm(t('admin.accounts.bulkActions.confirmDelete', { count: accountIds.length }))) return
-  try {
-    const result = await adminAPI.accounts.batchDelete(accountIds)
-    if (result.failed > 0) {
-      appStore.showError(t('admin.accounts.bulkActions.partialSuccess', {
-        success: result.success,
-        failed: result.failed
-      }))
-      setSelectedIds(result.failed_ids?.length ? result.failed_ids : accountIds)
-    } else {
-      appStore.showSuccess(t('admin.accounts.bulkActions.deleteSuccess', { count: result.success }))
-      clearSelection()
-    }
-    await reload()
-  } catch (error) {
-    console.error('Failed to bulk delete accounts:', error)
-    appStore.showError(String(error))
+const handleBulkDelete = () => {
+  if (deleting.value || selIds.value.length === 0) return
+  deletingAcc.value = null
+  deletingAccountIds.value = [...selIds.value]
+  showDeleteDialog.value = true
+}
+const confirmBulkDelete = async (note: string) => {
+  const accountIds = [...deletingAccountIds.value]
+  const result = await adminAPI.accounts.batchDelete(accountIds, note)
+  if (result.failed > 0) {
+    appStore.showError(t('admin.accounts.bulkActions.partialSuccess', {
+      success: result.success,
+      failed: result.failed
+    }))
+    setSelectedIds(result.failed_ids?.length ? result.failed_ids : accountIds)
+  } else {
+    appStore.showSuccess(t('admin.accounts.bulkActions.deleteSuccess', { count: result.success }))
+    clearSelection()
   }
 }
 const handleBulkResetStatus = async () => {
@@ -2606,17 +2614,36 @@ const confirmCreateSparkShadow = async () => {
     appStore.showError(error?.response?.data?.message || t('admin.accounts.createSparkShadowFailed'))
   }
 }
-const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.value = true }
-const confirmDelete = async () => {
-  if (!deletingAcc.value) return
+const handleDelete = (a: Account) => {
+  if (deleting.value) return
+  deletingAcc.value = a
+  deletingAccountIds.value = []
+  showDeleteDialog.value = true
+}
+const closeDeleteDialog = () => {
+  if (deleting.value) return
+  showDeleteDialog.value = false
+  deletingAcc.value = null
+  deletingAccountIds.value = []
+}
+const confirmDelete = async (note: string) => {
+  if (deleting.value || (!deletingAcc.value && deletingAccountIds.value.length === 0)) return
+  deleting.value = true
   try {
-    await adminAPI.accounts.delete(deletingAcc.value.id)
-    appStore.showSuccess(t('admin.accounts.accountDeleted'))
+    if (deletingAccountIds.value.length > 0) {
+      await confirmBulkDelete(note)
+    } else if (deletingAcc.value) {
+      await adminAPI.accounts.delete(deletingAcc.value.id, note)
+      appStore.showSuccess(t('admin.accounts.accountDeleted'))
+    }
     showDeleteDialog.value = false
     deletingAcc.value = null
+    deletingAccountIds.value = []
     await reload()
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('admin.accounts.failedToDelete')))
+  } finally {
+    deleting.value = false
   }
 }
 const handleToggleSchedulable = async (a: Account) => {
