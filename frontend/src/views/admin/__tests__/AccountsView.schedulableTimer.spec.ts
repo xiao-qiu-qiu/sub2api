@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
+import DeleteAccountDialog from '@/components/admin/account/DeleteAccountDialog.vue'
 import AccountsView from '../AccountsView.vue'
 
 const {
@@ -107,6 +108,7 @@ function mountView() {
         HelpTooltip: true,
         Pagination: true,
         ConfirmDialog: true,
+        BaseDialog: { props: ['show'], template: '<div v-if="show"><slot /><slot name="footer" /></div>' },
         AccountTableActions: { template: '<div><slot name="beforeCreate" /><slot name="after" /></div>' },
         AccountTableFilters: { template: '<div></div>' },
         AccountActionMenu: true,
@@ -339,13 +341,32 @@ describe('account immediate scheduling without confirmation', () => {
 
   it('still requires confirmation for deleting accounts', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    batchDelete.mockResolvedValue({ total: 2, success: 2, failed: 0 })
     await mountWithSelection()
     await bulkButton('delete').trigger('click')
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledTimes(1)
-    expect(confirm).toHaveBeenCalledWith('admin.accounts.bulkActions.confirmDelete')
+    const dialog = wrapper.getComponent(DeleteAccountDialog)
+    expect(dialog.props('show')).toBe(true)
+    expect(dialog.props('message')).toBe('admin.accounts.bulkActions.confirmDelete')
+    expect(confirm).not.toHaveBeenCalled()
     expect(batchDelete).not.toHaveBeenCalled()
     expect(selectedIds()).toEqual([7, 11])
+
+    await dialog.get('button[type="button"]').trigger('click')
+    expect(dialog.props('show')).toBe(false)
+    expect(batchDelete).not.toHaveBeenCalled()
+    expect(selectedIds()).toEqual([7, 11])
+
+    await bulkButton('delete').trigger('click')
+    await dialog.get('#account-delete-note').setValue('  已到期  ')
+    await dialog.get('#delete-account-form').trigger('submit')
+    await flushPromises()
+
+    expect(batchDelete).toHaveBeenCalledTimes(1)
+    expect(batchDelete).toHaveBeenCalledWith([7, 11], '已到期')
+    expect(dialog.props('show')).toBe(false)
+    expect(selectedIds()).toEqual([])
+    expect(confirm).not.toHaveBeenCalled()
   })
 })
