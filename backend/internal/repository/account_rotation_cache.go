@@ -45,6 +45,7 @@ if readOnly then op = 'check' end
 local accountID, requestID = ARGV[4], ARGV[5]
 local time = redis.call('TIME')
 local now = tonumber(time[1])
+local nowMS = now * 1000 + math.floor(tonumber(time[2]) / 1000)
 local idleResetSeconds, scanLimit, candidateLimit = 300, 128, 49
 local waiterTTL = 60
 local poolPrefix = 'concurrency:rotation:pool:'
@@ -57,10 +58,13 @@ if #values > 0 then
     for _, field in ipairs({'started_at', 'drain_at', 'rest_until', 'idle_since',
         'rest_seconds', 'work_seconds', 'rest_min_seconds', 'rest_max_seconds',
         'stagger_percent', 'cycle', 'lease_until', 'planned_start', 'planned_end',
-        'early_rest_enabled', 'hold', 'scheduled_rest_seconds'}) do
+        'early_rest_enabled', 'hold', 'scheduled_rest_seconds', 'recovery_next_ms',
+        'recovery_min_interval_ms', 'recovery_max_interval_ms'}) do
         s[field] = tonumber(s[field]) or 0
     end
     s.reason = s.reason or ''
+    if s.recovery_min_interval_ms <= 0 then s.recovery_min_interval_ms = 500 end
+    if s.recovery_max_interval_ms <= 0 then s.recovery_max_interval_ms = 2000 end
     if s.reason == '' and (s.phase == 'draining' or s.phase == 'resting') then s.reason = 'scheduled' end
 end
 
@@ -184,6 +188,8 @@ local function applyPolicy()
     s.rest_min_seconds, s.rest_max_seconds = tonumber(ARGV[11]), tonumber(ARGV[12])
     s.stagger_percent, s.revision = tonumber(ARGV[13]), ARGV[14]
     s.early_rest_enabled = tonumber(ARGV[15]) or 0
+    s.recovery_min_interval_ms = tonumber(ARGV[17]) or 500
+    s.recovery_max_interval_ms = tonumber(ARGV[18]) or 2000
 end
 
 local function newPolicy()
@@ -192,7 +198,7 @@ local function newPolicy()
     s = {phase = 'working', started_at = 0, drain_at = 0, rest_until = 0,
         idle_since = 0, rest_seconds = 0, cycle = cycle, lease_until = 0,
         planned_start = 0, planned_end = 0, pool = ARGV[8] or '',
-        reason = '', hold = 0, scheduled_rest_seconds = 0}
+        reason = '', hold = 0, scheduled_rest_seconds = 0, recovery_next_ms = 0}
     applyPolicy()
 end
 
@@ -214,7 +220,10 @@ local function save()
         'revision', s.revision, 'pool', s.pool, 'cycle', s.cycle, 'lease_until', s.lease_until,
         'planned_start', s.planned_start, 'planned_end', s.planned_end,
         'reason', s.reason, 'hold', s.hold, 'early_rest_enabled', s.early_rest_enabled,
-        'scheduled_rest_seconds', s.scheduled_rest_seconds)
+        'scheduled_rest_seconds', s.scheduled_rest_seconds,
+        'recovery_next_ms', s.recovery_next_ms,
+        'recovery_min_interval_ms', s.recovery_min_interval_ms,
+        'recovery_max_interval_ms', s.recovery_max_interval_ms)
 end
 
 local function activeCount(key, expiry)
@@ -224,6 +233,7 @@ end
 
 local function snapshot()
     local phase = s and s.phase or 'ready'
+    local recovering = s ~= nil and s.phase == 'working' and s.recovery_next_ms > 0
     if s and phase == 'working' and s.started_at == 0 then phase = 'ready' end
     local eligibleAt = 0
     if s and s.early_rest_enabled == 1 and s.work_seconds > 0 and s.started_at > 0 and s.drain_at > 0 then
@@ -233,7 +243,17 @@ local function snapshot()
         drain_at = s and s.drain_at or 0, rest_until = s and s.rest_until or 0,
         idle_since = s and s.idle_since or 0, rest_seconds = s and s.rest_seconds or 0,
         reason = s and s.reason or '', hold = s ~= nil and s.hold == 1,
-        waiting_count = activeCount(waiterKey, now - waiterTTL), early_eligible_at = eligibleAt})
+        waiting_count = activeCount(waiterKey, now - waiterTTL), early_eligible_at = eligibleAt,
+        recovering = recovering,
+        retry_after_ms = recovering and math.max(0, s.recovery_next_ms - nowMS) or 0})
+end
+
+local function beginRecovery()
+    -- Only the accumulated queue needs pacing. An idle account with no queue
+    -- resumes normally. The first queued request may enter immediately.
+    if activeCount(waiterKey, now - waiterTTL) > 0 then
+        s.recovery_next_ms = math.max(s.recovery_next_ms, nowMS)
+    end
 end
 
 -- Delete and inspect in one invocation, including user/key members for Live.
@@ -259,6 +279,13 @@ if op == 'wait_refresh' then
     redis.call('EXPIRE', waiterKey, waiterTTL)
 elseif op == 'wait_remove' then
     redis.call('ZREM', waiterKey, requestID)
+end
+-- Keep the last interval even after admitting the final waiter: a newcomer
+-- must not slip through immediately behind it. Expired/canceled waiters do
+-- not leave a permanent account-wide throttle.
+if s and s.recovery_next_ms > 0 and nowMS >= s.recovery_next_ms
+    and activeCount(waiterKey, now - waiterTTL) == 0 then
+    s.recovery_next_ms = 0
 end
 local liveRefreshed = 0
 if op == 'refresh_live' then
@@ -290,7 +317,8 @@ if not noManualCancel and not automaticRestConflict
         or s.early_rest_enabled ~= (tonumber(ARGV[15]) or 0)) then
         -- Configuration changes affect the next cycle, never release requests
         -- already waiting for a manually or opportunistically forced gap.
-        if s.hold == 1 and (s.phase == 'draining' or s.phase == 'resting') then applyPolicy()
+        if (s.hold == 1 and (s.phase == 'draining' or s.phase == 'resting'))
+            or s.recovery_next_ms > 0 then applyPolicy()
         else newPolicy() end
     end
     if not s and (count > 0 or op == 'hold_start') then newPolicy() end
@@ -307,6 +335,7 @@ if s then
     if s.phase == 'resting' and now >= s.rest_until then
         clearWindow()
         s.idle_since = 0
+        beginRecovery()
     end
 
     if count == 0 and s.idle_since == 0 then
@@ -370,6 +399,7 @@ if s then
             indexPlan(s.drain_at, s.drain_at + s.rest_seconds)
         end
         if count > 0 and s.started_at == 0 then startWindow() end
+        beginRecovery()
     end
     if s.phase == 'working' and s.work_seconds > 0 and s.started_at > 0 then
         if now >= s.drain_at then
@@ -400,15 +430,29 @@ if op == 'acquire' then
     local exists = redis.call('ZSCORE', regularKey, requestID) ~= false
     local allowed = not s or s.phase == 'working' or (s.phase == 'draining'
         and s.hold == 0 and s.mode == 'sticky' and ARGV[7] == '1' and count > 0)
+    if s and s.recovery_next_ms > nowMS then allowed = false end
     if exists or (allowed and (tonumber(ARGV[6]) <= 0 or count < tonumber(ARGV[6]))) then
         redis.call('ZADD', regularKey, now, requestID)
         redis.call('EXPIRE', regularKey, ttl)
         redis.call('ZADD', KEYS[4], now + ttl, accountID)
         if not s then newPolicy() end
+        redis.call('ZREM', waiterKey, requestID)
+        if not exists and s.recovery_next_ms > 0 then
+            -- Advance from the actual admission, not a missed deadline: spare
+            -- concurrency or a delayed poll must never produce catch-up bursts.
+            s.recovery_next_ms = nowMS + s.recovery_min_interval_ms
+                + hashNumber('recovery:' .. requestID) % (s.recovery_max_interval_ms - s.recovery_min_interval_ms + 1)
+        end
         if s.phase == 'working' and s.started_at == 0 then startWindow() end
         s.idle_since, s.lease_until = 0, math.max(s.lease_until, now + ttl)
         save()
         return {1, snapshot()}
+    end
+    if s and (s.hold == 1 or s.recovery_next_ms > 0) then
+        -- Registration is atomic with rejection, so expiry/cancel cannot miss
+        -- a request between admission and the service's waiter heartbeat.
+        redis.call('ZADD', waiterKey, now, requestID)
+        redis.call('EXPIRE', waiterKey, waiterTTL)
     end
     save()
     return {0, snapshot()}
@@ -450,11 +494,20 @@ func (c *concurrencyCache) accountRotationArgs(op string, accountID int64, reque
 	if op == "acquire" {
 		poolHash = fmt.Sprintf("%x", sha256.Sum256([]byte(pool)))
 	}
+	recoveryMin, recoveryMax := policy.RecoveryMinIntervalMS, policy.RecoveryMaxIntervalMS
+	if recoveryMin == 0 && recoveryMax == 0 {
+		recoveryMin, recoveryMax = 500, 2000
+	}
 	return []any{op, c.slotTTLSeconds, liveLeaseTTLSeconds, accountID, requestID, limit, stickyArg, poolHash,
-		policy.Mode, policy.WorkSeconds, policy.RestMinSeconds, policy.RestMaxSeconds, policy.StaggerPercent, policy.Revision, earlyArg}
+		policy.Mode, policy.WorkSeconds, policy.RestMinSeconds, policy.RestMaxSeconds, policy.StaggerPercent, policy.Revision, earlyArg,
+		0, recoveryMin, recoveryMax}
 }
 
 func validateAccountRotationPolicy(policy service.AccountRotationPolicy) error {
+	if (policy.RecoveryMinIntervalMS != 0 || policy.RecoveryMaxIntervalMS != 0) &&
+		(policy.RecoveryMinIntervalMS < 1 || policy.RecoveryMaxIntervalMS < policy.RecoveryMinIntervalMS || policy.RecoveryMaxIntervalMS > 60000) {
+		return fmt.Errorf("invalid account rotation recovery interval")
+	}
 	if (policy.Mode != "aggressive" && policy.Mode != "sticky") || policy.WorkSeconds < 0 ||
 		(policy.WorkSeconds > 0 && (policy.RestMinSeconds <= 0 || policy.RestMaxSeconds < policy.RestMinSeconds)) ||
 		policy.StaggerPercent < 0 || policy.StaggerPercent > 100 {
@@ -583,7 +636,8 @@ func (c *concurrencyCache) SetAccountRotationHold(ctx context.Context, accountID
 		return nil, fmt.Errorf("account rest seconds must be positive")
 	}
 	args := c.accountRotationArgs("hold_start", accountID, "", 0, false, "", policy)
-	result, state, err := c.runAccountRotationStatePair(ctx, accountID, append(args, seconds)...)
+	args[15] = seconds
+	result, state, err := c.runAccountRotationStatePair(ctx, accountID, args...)
 	if err != nil {
 		return nil, err
 	}

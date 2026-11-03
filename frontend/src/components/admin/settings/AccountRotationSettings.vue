@@ -46,14 +46,34 @@
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.accountRotation.earlyHint') }}</p>
       </div>
     </template>
+    <div class="mt-4 grid gap-4 sm:grid-cols-2">
+      <label class="block text-sm text-gray-700 dark:text-gray-300">
+        {{ t('admin.settings.accountRotation.recoveryMin') }}
+        <input id="account-rotation-recovery-min" v-model.number="recoveryMinSeconds" type="number" min="0.001" :max="recoveryMaxSeconds" step="0.001" required class="input mt-1 min-h-11 w-full" />
+      </label>
+      <label class="block text-sm text-gray-700 dark:text-gray-300">
+        {{ t('admin.settings.accountRotation.recoveryMax') }}
+        <input id="account-rotation-recovery-max" v-model.number="recoveryMaxSeconds" type="number" :min="recoveryMinSeconds" max="60" step="0.001" required class="input mt-1 min-h-11 w-full" />
+      </label>
+    </div>
+    <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.accountRotation.recoveryHint') }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Toggle from '@/components/common/Toggle.vue'
 import type { AccountRotationSettings } from '@/api/admin/settings'
 
 const value = defineModel<AccountRotationSettings>({ required: true })
 const { t } = useI18n()
+const recoveryMinSeconds = computed({
+  get: () => value.value.recovery_min_interval_ms / 1000,
+  set: (seconds: number) => { value.value.recovery_min_interval_ms = Math.round(seconds * 1000) },
+})
+const recoveryMaxSeconds = computed({
+  get: () => value.value.recovery_max_interval_ms / 1000,
+  set: (seconds: number) => { value.value.recovery_max_interval_ms = Math.round(seconds * 1000) },
+})
 </script>

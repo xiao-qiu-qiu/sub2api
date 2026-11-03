@@ -40,4 +40,15 @@ describe('AccountRotationBadge', () => {
     expect(wrapper.find('[data-testid="account-rotation-waiting"]').exists()).toBe(false)
     wrapper.unmount()
   })
+  it.each([0, 3])('shows recovery with %i queued requests, including the final gap', async waitingCount => {
+    const recovering = { ...state, phase: 'working' as const, reason: '' as const, hold: false, waiting_count: waitingCount, recovering: true, retry_after_ms: 500 }
+    const wrapper = mount(AccountRotationBadge, { props: { state: recovering } })
+    expect(wrapper.get('[data-testid="account-rotation-status"]').text()).toContain('recovering')
+    expect(wrapper.get('[data-testid="account-rotation-status"]').attributes('title')).toContain('recoveryHint')
+    expect(wrapper.find('.font-mono').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="account-rotation-waiting"]').exists()).toBe(waitingCount > 0)
+    await wrapper.setProps({ state: { ...recovering, recovering: false, retry_after_ms: 0 } })
+    expect(wrapper.get('[data-testid="account-rotation-status"]').text()).toContain('working')
+    wrapper.unmount()
+  })
 })

@@ -866,12 +866,15 @@ describe("admin SettingsView payment visible method controls", () => {
     await editor.get('input[type="number"]').setValue('240');
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240, early_rest_enabled: false });
+    expect(updateSettings.mock.calls[0]?.[0]?.account_rotation_settings).toEqual({ ...rotation, work_minutes: 240, early_rest_enabled: false, recovery_min_interval_ms: 500, recovery_max_interval_ms: 2000 });
+    await editor.get('#account-rotation-recovery-min').setValue('0.123');
+    await editor.get('#account-rotation-recovery-max').setValue('1.001');
     const earlyToggle = editor.get('#account-rotation-early-toggle');
     await earlyToggle.setValue(true);
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
     expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings?.early_rest_enabled).toBe(true);
+    expect(updateSettings.mock.calls.at(-1)?.[0]?.account_rotation_settings).toMatchObject({ recovery_min_interval_ms: 123, recovery_max_interval_ms: 1001 });
     wrapper.unmount();
   });
 

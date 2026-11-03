@@ -23,6 +23,7 @@ const resting = computed(() => props.state.phase === 'resting')
 const draining = computed(() => props.state.phase === 'draining')
 const watching = computed(() => props.state.phase === 'working' && (props.state.early_eligible_at ?? 0) > 0 && now.value.getTime() >= (props.state.early_eligible_at ?? 0) * 1000)
 const label = computed(() => {
+  if (props.state.recovering) return 'recovering'
   if (props.state.hold && (resting.value || draining.value)) {
     return `${props.state.reason === 'early' ? 'early' : 'manual'}${resting.value ? 'Resting' : 'Draining'}`
   }
@@ -33,6 +34,7 @@ const countdown = computed(() => {
   return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
 })
 const title = computed(() => {
+  if (props.state.recovering) return t('admin.settings.accountRotation.recoveryHint')
   if (resting.value) return t('admin.settings.accountRotation.restUntil', { time: new Date(props.state.rest_until * 1000).toLocaleString() })
   if (draining.value && props.state.hold) return t('admin.settings.accountRotation.drainHoldHint', { minutes: props.state.rest_seconds / 60 })
   if (props.state.drain_at > 0) return t('admin.settings.accountRotation.drainAt', { time: new Date(props.state.drain_at * 1000).toLocaleString() })

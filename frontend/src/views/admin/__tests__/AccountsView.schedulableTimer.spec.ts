@@ -15,6 +15,7 @@ const {
   showError,
   showSuccess,
   getProbeSettings,
+  getAccountRestState,
   getCapabilities
 } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
@@ -28,6 +29,7 @@ const {
   showError: vi.fn(),
   showSuccess: vi.fn(),
   getProbeSettings: vi.fn(),
+  getAccountRestState: vi.fn(),
   getCapabilities: vi.fn()
 }))
 
@@ -39,6 +41,7 @@ vi.mock('@/api/admin', () => ({
       listWithEtag,
       getBatchTodayStats,
       getUpstreamBillingProbeSettings: getProbeSettings,
+      getAccountRestState,
       delete: vi.fn(),
       batchClearError: vi.fn(),
       batchRefresh: vi.fn(),
@@ -162,7 +165,7 @@ beforeEach(() => {
   setSchedulable.mockResolvedValue({ ...baseAccount, id: 7, schedulable: false })
   bulkUpdate.mockResolvedValue({ success: 1, failed: 0, success_ids: [7], failed_ids: [] })
 })
-afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })
+afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks(); vi.useRealTimers() })
 function bulkButton(key: string) {
   return wrapper.findComponent({ name: 'AccountBulkActionsBar' }).findAll('button')
     .find(button => button.text() === `admin.accounts.bulkActions.${key}`)!
@@ -192,6 +195,26 @@ function selectedIds() {
 }
 
 describe('account immediate scheduling without confirmation', () => {
+  it('refreshes the final recovery gap without held or queued requests and stops after recovery', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const state = {
+      phase: 'working', hold: false, waiting_count: 0, recovering: true, retry_after_ms: 500,
+      started_at: 0, drain_at: Date.now() / 1000 + 18000, rest_until: 0, idle_since: 0, rest_seconds: 0,
+    }
+    listAccounts.mockResolvedValue({ items: [{ ...baseAccount, id: 7, name: 'recovering', account_rotation: state }], total: 1, page: 1, page_size: 20, pages: 1 })
+    getAccountRestState.mockResolvedValue({ account_rotation: { ...state, recovering: false, retry_after_ms: 0 } })
+    wrapper = mountView()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(getAccountRestState).toHaveBeenCalledTimes(1)
+    expect(getAccountRestState).toHaveBeenCalledWith(7, expect.any(AbortSignal))
+    expect(wrapper.findComponent(DataTableStub).props('data')[0].account_rotation.recovering).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(getAccountRestState).toHaveBeenCalledTimes(1)
+  })
+
   it.each([true, false])('directly switches schedulable=%s through the original API and refreshes plans', async (schedulable) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     listAccounts.mockResolvedValue({ items: [{ ...baseAccount, id: 7, name: 'timer-fixture', schedulable }], total: 1, page: 1, page_size: 20, pages: 1 })

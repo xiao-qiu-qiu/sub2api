@@ -2651,7 +2651,7 @@ useIntervalFn(async () => {
   const candidates = accounts.value.filter(account => {
     const state = account.account_rotation
     if (!state) return false
-    if (state.hold || (state.waiting_count ?? 0) > 0 || state.phase === 'draining' || state.phase === 'resting') return true
+    if (state.recovering || state.hold || (state.waiting_count ?? 0) > 0 || state.phase === 'draining' || state.phase === 'resting') return true
     if (state.phase !== 'working') return false
     const earlyAt = state.early_eligible_at ?? 0
     return (earlyAt > 0 && earlyAt <= now) || (state.drain_at > 0 && state.drain_at <= now)

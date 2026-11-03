@@ -28,6 +28,8 @@ export interface AccountRotationSettings {
   rest_max_minutes: number;
   stagger_percent: number;
   early_rest_enabled: boolean;
+  recovery_min_interval_ms: number;
+  recovery_max_interval_ms: number;
   revision?: string;
 }
 
@@ -39,6 +41,8 @@ export const defaultAccountRotationSettings = (): AccountRotationSettings => ({
   rest_max_minutes: 30,
   stagger_percent: 10,
   early_rest_enabled: false,
+  recovery_min_interval_ms: 500,
+  recovery_max_interval_ms: 2000,
 });
 
 // ── 平台限额类型 ──────────────────────────────────────────────────

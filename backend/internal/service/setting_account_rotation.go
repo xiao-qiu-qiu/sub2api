@@ -27,13 +27,15 @@ const (
 // existing sticky sessions until concurrency reaches zero. Rest begins at zero
 // concurrency and lasts a random duration in [RestMinMinutes, RestMaxMinutes].
 type AccountRotationSettings struct {
-	Enabled          bool   `json:"enabled"`
-	EarlyRestEnabled bool   `json:"early_rest_enabled"`
-	Mode             string `json:"mode"`
-	WorkMinutes      int    `json:"work_minutes"`
-	RestMinMinutes   int    `json:"rest_min_minutes"`
-	RestMaxMinutes   int    `json:"rest_max_minutes"`
-	StaggerPercent   int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
+	Enabled               bool   `json:"enabled"`
+	EarlyRestEnabled      bool   `json:"early_rest_enabled"`
+	Mode                  string `json:"mode"`
+	WorkMinutes           int    `json:"work_minutes"`
+	RestMinMinutes        int    `json:"rest_min_minutes"`
+	RestMaxMinutes        int    `json:"rest_max_minutes"`
+	StaggerPercent        int    `json:"stagger_percent"` // Elastic work-window adjustment, percent.
+	RecoveryMinIntervalMS int    `json:"recovery_min_interval_ms"`
+	RecoveryMaxIntervalMS int    `json:"recovery_max_interval_ms"`
 	// Revision is server-owned and changes only when policy content changes.
 	// Unsaved defaults and legacy records have no revision; schedulers may use
 	// a hash of policy content to identify those configurations.
@@ -42,11 +44,13 @@ type AccountRotationSettings struct {
 
 func DefaultAccountRotationSettings() *AccountRotationSettings {
 	return &AccountRotationSettings{
-		Mode:           AccountRotationModeAggressive,
-		WorkMinutes:    300,
-		RestMinMinutes: 10,
-		RestMaxMinutes: 30,
-		StaggerPercent: 10,
+		Mode:                  AccountRotationModeAggressive,
+		WorkMinutes:           300,
+		RestMinMinutes:        10,
+		RestMaxMinutes:        30,
+		StaggerPercent:        10,
+		RecoveryMinIntervalMS: 500,
+		RecoveryMaxIntervalMS: 2000,
 	}
 }
 
@@ -68,6 +72,12 @@ func (settings *AccountRotationSettings) Validate() error {
 	}
 	if settings.StaggerPercent < 0 || settings.StaggerPercent > 30 {
 		return fmt.Errorf("account_rotation_settings.stagger_percent must be between 0 and 30")
+	}
+	if settings.RecoveryMinIntervalMS < 1 || settings.RecoveryMinIntervalMS > 60000 {
+		return fmt.Errorf("account_rotation_settings.recovery_min_interval_ms must be between 1 and 60000")
+	}
+	if settings.RecoveryMaxIntervalMS < settings.RecoveryMinIntervalMS || settings.RecoveryMaxIntervalMS > 60000 {
+		return fmt.Errorf("account_rotation_settings.recovery_max_interval_ms must be between recovery_min_interval_ms and 60000")
 	}
 	return nil
 }

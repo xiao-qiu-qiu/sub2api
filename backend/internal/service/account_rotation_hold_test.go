@@ -100,7 +100,7 @@ func (c *rotationHoldTestCache) AcquireAccountSlotWithRotationState(ctx context.
 	if err := c.acquireErr[id]; err != nil {
 		return false, state, err
 	}
-	if state.Hold || state.Phase == "resting" || (state.Phase == "draining" && (policy.Mode != AccountRotationModeSticky || !sticky)) || c.full[id] || (max > 0 && len(c.slots[id]) >= max) {
+	if state.Hold || (state.Recovering && state.RetryAfterMS > 0) || state.Phase == "resting" || (state.Phase == "draining" && (policy.Mode != AccountRotationModeSticky || !sticky)) || c.full[id] || (max > 0 && len(c.slots[id]) >= max) {
 		return false, state, nil
 	}
 	if c.slots[id] == nil {

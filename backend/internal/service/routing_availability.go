@@ -290,7 +290,7 @@ func (s *OpenAIGatewayService) listRoutingAvailabilityAccounts(ctx context.Conte
 			if state == nil {
 				return nil, fmt.Errorf("rotation state unavailable")
 			}
-			if state.Hold {
+			if state.Hold || state.Recovering {
 				req.routingAvailability.held[account.ID] = true
 			} else if !rotationStateAllows(state, policy.Mode, false) {
 				continue

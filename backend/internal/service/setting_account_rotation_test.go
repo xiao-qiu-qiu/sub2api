@@ -60,6 +60,7 @@ func TestAccountRotationSettingsDefaultsAndInvalidStorage(t *testing.T) {
 	expected := &AccountRotationSettings{
 		Enabled: false, Mode: "aggressive", WorkMinutes: 300,
 		RestMinMinutes: 10, RestMaxMinutes: 30, StaggerPercent: 10,
+		RecoveryMinIntervalMS: 500, RecoveryMaxIntervalMS: 2000,
 	}
 	for _, raw := range []string{"", "null", "{", `{"enabled":true,"mode":"invalid"}`, `{"enabled":true,"work_minutes":0}`, `{"enabled":true,"rest_min_minutes":31}`} {
 		t.Run(raw, func(t *testing.T) {
@@ -181,11 +182,86 @@ func TestAccountRotationSettingsRevisionTracksContentOnly(t *testing.T) {
 		func() { settings.StaggerPercent++ },
 		func() { settings.EarlyRestEnabled = true },
 		func() { settings.EarlyRestEnabled = false },
+		func() { settings.RecoveryMinIntervalMS++ },
+		func() { settings.RecoveryMaxIntervalMS++ },
 	} {
 		change()
 		next := save()
 		require.NotEqual(t, previous.Revision, next.Revision)
 		previous = next
+	}
+}
+
+func TestAccountRotationSettingsRecoveryValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		min, max     int
+		invalidField string
+	}{
+		{"defaults", 500, 2000, ""},
+		{"minimum", 1, 1, ""},
+		{"full range", 1, 60000, ""},
+		{"maximum", 60000, 60000, ""},
+		{"zero pair", 0, 0, "recovery_min_interval_ms"},
+		{"zero min", 0, 2000, "recovery_min_interval_ms"},
+		{"negative min", -1, 2000, "recovery_min_interval_ms"},
+		{"excessive min", 60001, 60001, "recovery_min_interval_ms"},
+		{"zero max", 1, 0, "recovery_max_interval_ms"},
+		{"negative max", 1, -1, "recovery_max_interval_ms"},
+		{"inverted", 2000, 500, "recovery_max_interval_ms"},
+		{"excessive max", 500, 60001, "recovery_max_interval_ms"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := DefaultAccountRotationSettings()
+			settings.RecoveryMinIntervalMS, settings.RecoveryMaxIntervalMS = tc.min, tc.max
+			for _, enabled := range []bool{false, true} {
+				settings.Enabled = enabled
+				if tc.invalidField == "" {
+					require.NoError(t, settings.Validate())
+				} else {
+					require.ErrorContains(t, settings.Validate(), tc.invalidField)
+				}
+			}
+		})
+	}
+}
+
+func TestAccountRotationSettingsLegacyRecoveryDefaultsPreservePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fields   map[string]any
+		min, max int
+	}{
+		{"both missing", nil, 500, 2000},
+		{"max missing", map[string]any{"recovery_min_interval_ms": 125}, 125, 2000},
+		{"min missing", map[string]any{"recovery_max_interval_ms": 60000}, 500, 60000},
+		{"custom intervals", map[string]any{"recovery_min_interval_ms": 123, "recovery_max_interval_ms": 456}, 123, 456},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy := map[string]any{
+				"enabled": true, "early_rest_enabled": true, "mode": "sticky", "work_minutes": 75,
+				"rest_min_minutes": 2, "rest_max_minutes": 9, "stagger_percent": 23, "revision": "legacy-policy",
+			}
+			for field, value := range tc.fields {
+				legacy[field] = value
+			}
+			raw, err := json.Marshal(legacy)
+			require.NoError(t, err)
+			repo := &accountRotationSettingRepo{values: map[string]string{SettingKeyAccountRotationSettings: string(raw)}}
+			svc := NewSettingService(repo, &config.Config{})
+			settings, err := svc.GetAccountRotationSettings(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, &AccountRotationSettings{
+				Enabled: true, EarlyRestEnabled: true, Mode: "sticky", WorkMinutes: 75,
+				RestMinMinutes: 2, RestMaxMinutes: 9, StaggerPercent: 23, Revision: "legacy-policy",
+				RecoveryMinIntervalMS: tc.min, RecoveryMaxIntervalMS: tc.max,
+			}, settings)
+			require.Equal(t, string(raw), repo.values[SettingKeyAccountRotationSettings], "reads must not rewrite legacy storage")
+			require.NoError(t, svc.UpdateSettings(t.Context(), &SystemSettings{AccountRotationSettings: settings}))
+			reloaded, err := NewSettingService(repo, &config.Config{}).GetAccountRotationSettings(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, settings, reloaded, "saving defaulted fields must preserve the policy and revision")
+		})
 	}
 }
 

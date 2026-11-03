@@ -1476,6 +1476,8 @@ export interface Account {
     reason?: 'manual' | 'early' | 'scheduled' | ''
     hold?: boolean
     waiting_count?: number
+    recovering?: boolean
+    retry_after_ms?: number
     early_eligible_at?: number
   } | null
   scheduler_score?: {

@@ -15,12 +15,13 @@ import (
 
 var ErrAccountRotationUnavailable = errors.New("account is draining or resting")
 
-// AccountRotationPolicy uses seconds and a persisted settings revision so all
-// gateway processes agree on the same work cycle after a configuration change.
+// AccountRotationPolicy uses seconds for work/rest and milliseconds for recovery
+// pacing. The revision identifies the shared policy across gateway processes.
 type AccountRotationPolicy struct {
 	Mode                                                        string
 	WorkSeconds, RestMinSeconds, RestMaxSeconds, StaggerPercent int
 	EarlyRestEnabled                                            bool
+	RecoveryMinIntervalMS, RecoveryMaxIntervalMS                int
 	Revision                                                    string
 }
 
@@ -35,6 +36,8 @@ type AccountRotationState struct {
 	Hold            bool   `json:"hold"`
 	WaitingCount    int    `json:"waiting_count"`
 	EarlyEligibleAt int64  `json:"early_eligible_at,omitempty"`
+	Recovering      bool   `json:"recovering"`
+	RetryAfterMS    int64  `json:"retry_after_ms,omitempty"`
 }
 
 type AccountRotationCache interface {
@@ -197,7 +200,9 @@ func (s *ConcurrencyService) accountRotationPolicy(ctx context.Context) (*Accoun
 		Mode: settings.Mode, WorkSeconds: settings.WorkMinutes * 60,
 		RestMinSeconds: settings.RestMinMinutes * 60, RestMaxSeconds: settings.RestMaxMinutes * 60,
 		StaggerPercent: settings.StaggerPercent, Revision: settings.Revision,
-		EarlyRestEnabled: settings.Enabled && settings.EarlyRestEnabled,
+		EarlyRestEnabled:      settings.Enabled && settings.EarlyRestEnabled,
+		RecoveryMinIntervalMS: settings.RecoveryMinIntervalMS,
+		RecoveryMaxIntervalMS: settings.RecoveryMaxIntervalMS,
 	}
 	if !settings.Enabled {
 		// Keep real requests visible for a manual rest, including unlimited
@@ -297,7 +302,7 @@ func (s *ConcurrencyService) GetAccountRotationStates(ctx context.Context, ids [
 	states, err := s.accountRotationStates(ctx, ids, *policy)
 	if err == nil && policy.WorkSeconds == 0 {
 		for id, state := range states {
-			if state == nil || (!state.Hold && state.WaitingCount == 0) {
+			if state == nil || (!state.Hold && !state.Recovering && state.WaitingCount == 0) {
 				delete(states, id)
 			}
 		}
@@ -409,7 +414,7 @@ func (s *ConcurrencyService) acquireAccountRotationSlot(ctx context.Context, acc
 		if acquired {
 			break
 		}
-		if supportsHold && ((state != nil && state.Hold) || waiting) {
+		if supportsHold && ((state != nil && (state.Hold || state.Recovering)) || waiting) {
 			if !waiting {
 				ctx = accountRotationHoldingContext(ctx)
 			}
@@ -419,7 +424,14 @@ func (s *ConcurrencyService) acquireAccountRotationSlot(ctx context.Context, acc
 			if err := holdCache.RefreshAccountRotationWaiter(ctx, accountID, requestID); err != nil {
 				return nil, err
 			}
-			timer := time.NewTimer(time.Second)
+			// Redis reserves the next admission time atomically. Sleeping here
+			// only avoids polling; independent per-request jitter would still
+			// allow a burst across processes. Cap sleeps to renew waiter leases.
+			delay := time.Second
+			if state != nil && state.Recovering && state.RetryAfterMS > 0 {
+				delay = min(time.Duration(state.RetryAfterMS)*time.Millisecond, 20*time.Second)
+			}
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()

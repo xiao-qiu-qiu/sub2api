@@ -132,6 +132,10 @@ func TestRoutingAvailabilityEligibilityAndCapacity(t *testing.T) {
 			s.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
 			c.states[1] = &AccountRotationState{Phase: "resting", Hold: true}
 		}},
+		{"recovery_pacing", "busy", func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, c *routingAvailabilityTestCache, _ *RoutingAvailabilityRequest) {
+			s.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
+			c.states[1] = &AccountRotationState{Phase: "working", Recovering: true, RetryAfterMS: 500}
+		}},
 		{"rest_start_needs_persistence", "unknown", func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, c *routingAvailabilityTestCache, _ *RoutingAvailabilityRequest) {
 			s.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
 			c.err = errors.New("ROUTING_ROTATION_TRANSITION_REQUIRED")

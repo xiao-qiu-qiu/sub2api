@@ -85,7 +85,7 @@ func TestAccountRotationManualHoldDrainsThenRestartsSameAccount(t *testing.T) {
 	require.Empty(t, resumed.Reason)
 	require.Equal(t, f.now, resumed.StartedAt)
 	require.Equal(t, f.now+600, resumed.DrainAt)
-	require.Equal(t, 1, resumed.WaitingCount)
+	require.Zero(t, resumed.WaitingCount, "successful admission removes its waiting lease atomically")
 	require.NoError(t, f.cache.RemoveAccountRotationWaiter(ctx, 1, "queued"))
 	require.Zero(t, f.check(1).WaitingCount)
 	require.False(t, f.acquire(1, "next-in-queue", 1, false), "capacity still applies after resuming the same account")
@@ -615,7 +615,7 @@ func TestAccountRotationConcurrentResumeKeepsCapacity(t *testing.T) {
 			admitted++
 		}
 	}
-	require.Equal(t, 2, admitted)
-	require.Equal(t, int64(2), f.client.ZCard(ctx, accountSlotKey(1)).Val())
-	require.Equal(t, 12, f.check(1).WaitingCount, "waiting lease cleanup belongs to each admitted/canceled owner")
+	require.Equal(t, 1, admitted, "recovery admits only one request before the next interval, even with spare capacity")
+	require.Equal(t, int64(1), f.client.ZCard(ctx, accountSlotKey(1)).Val())
+	require.Equal(t, 11, f.check(1).WaitingCount, "the admitted request's waiting lease is removed atomically")
 }
