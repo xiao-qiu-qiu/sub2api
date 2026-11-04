@@ -446,3 +446,86 @@ func TestNoAvailableAccountsHTTPAndCommittedSSE(t *testing.T) {
 		})
 	}
 }
+
+type responsesRotationAvailabilityStub struct {
+	result  service.RoutingAvailability
+	calls   int
+	key     *service.APIKey
+	request service.RoutingAvailabilityRequest
+}
+
+func (s *responsesRotationAvailabilityStub) RoutingAvailability(_ context.Context, key *service.APIKey, request service.RoutingAvailabilityRequest) service.RoutingAvailability {
+	s.calls++
+	s.key, s.request = key, request
+	return s.result
+}
+
+func TestResponsesLocalSelectionRotationErrorCode(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, reason, code, wantCode string
+		status                              int
+		upstreamAttempted                   bool
+		wantCalls                           int
+	}{
+		{"local_selection", "busy", "account_rotation", "no_available_accounts", "account_rotation", 503, false, 1},
+		{"local_capacity", "busy", "account_rotation", "model_capacity_exhausted", "account_rotation", 503, false, 1},
+		{"nil_selection", "busy", "account_rotation", "", "account_rotation", 503, false, 1},
+		{"rotation_reselection_exhausted", "busy", "account_rotation", "", "account_rotation", 502, false, 1},
+		{"ordinary_capacity_busy", "busy", "capacity_busy", "no_available_accounts", "no_available_accounts", 503, false, 1},
+		{"empty", "empty", "no_eligible_accounts", "no_available_accounts", "no_available_accounts", 503, false, 1},
+		{"unknown", "unknown", "capacity_authority_unavailable", "", "", 503, false, 1},
+		{"ready", "ready", "capacity_available", "model_capacity_exhausted", "model_capacity_exhausted", 503, false, 1},
+		{"reason_without_busy", "ready", "account_rotation", "no_available_accounts", "no_available_accounts", 503, false, 1},
+		{"upstream_failure_then_empty_selection", "busy", "account_rotation", "no_available_accounts", "no_available_accounts", 503, true, 0},
+		{"upstream_failure_then_nil_selection", "busy", "account_rotation", "", "", 503, true, 0},
+		{"upstream_failure_then_reselection", "busy", "account_rotation", "", "", 502, true, 0},
+		{"upstream_capacity_failure", "busy", "account_rotation", "upstream_capacity_exhausted", "upstream_capacity_exhausted", 503, true, 0},
+		{"latency_policy", "busy", "account_rotation", "latency_penalty", "latency_penalty", 503, false, 0},
+		{"rpm_limit", "busy", "account_rotation", "", "", 429, false, 0},
+		{"model_not_found", "busy", "account_rotation", "model_not_found", "model_not_found", 404, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := &service.APIKey{GroupID: ptrInt64(42), Group: &service.Group{ID: 42, Platform: service.PlatformOpenAI}}
+			request := service.RoutingAvailabilityRequest{Model: "public-model", ServiceTier: "priority", Transport: "http", RequireCompact: true}
+			availability := &responsesRotationAvailabilityStub{result: service.RoutingAvailability{State: tc.state, Reason: tc.reason}}
+			fallback := noAccountErrorClassification{Status: tc.status, ErrType: "api_error", Code: tc.code, Message: "Original selection failure", ModelNotFound: tc.status == 404}
+			got := classifyResponsesAccountRotation(t.Context(), availability, key, request, tc.upstreamAttempted, fallback)
+			want := fallback
+			want.Code = tc.wantCode
+			assert.Equal(t, want, got, "rotation only refines the structured code")
+			assert.Equal(t, tc.wantCalls, availability.calls)
+			if tc.wantCalls > 0 {
+				assert.Same(t, key, availability.key)
+				assert.Equal(t, request, availability.request, "original model, actual tier and compact scope must reach the read-only check")
+			}
+
+			for _, streaming := range []bool{false, true} {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				if streaming {
+					c.Writer.WriteHeaderNow()
+				}
+				h := &OpenAIGatewayHandler{}
+				h.handleStreamingAwareErrorWithCode(c, got.Status, got.ErrType, got.Code, got.Message, streaming, false)
+				if streaming {
+					assert.Contains(t, recorder.Body.String(), "response.failed")
+					if tc.wantCode != "" {
+						assert.Contains(t, recorder.Body.String(), `"code":"`+tc.wantCode+`"`)
+					}
+					continue
+				}
+				assert.Equal(t, tc.status, recorder.Code)
+				var response struct {
+					Error struct {
+						Type, Code, Message string
+					}
+				}
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+				assert.Equal(t, tc.wantCode, response.Error.Code)
+				assert.Equal(t, fallback.ErrType, response.Error.Type)
+				assert.Equal(t, fallback.Message, response.Error.Message)
+			}
+		})
+	}
+}

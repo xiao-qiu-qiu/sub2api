@@ -138,7 +138,7 @@ func TestRoutingAvailabilityEligibilityAndCapacity(t *testing.T) {
 		{"load_missing", "unknown", func(_ *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, c *routingAvailabilityTestCache, _ *RoutingAvailabilityRequest) {
 			c.loads[1] = nil
 		}},
-		{"resting", "empty", func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, c *routingAvailabilityTestCache, _ *RoutingAvailabilityRequest) {
+		{"resting", "busy", func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, c *routingAvailabilityTestCache, _ *RoutingAvailabilityRequest) {
 			s.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
 			c.states[1] = &AccountRotationState{Phase: "resting"}
 		}},
@@ -182,6 +182,166 @@ type openAIHandlerFreeRotationSettings struct{}
 
 func (openAIHandlerFreeRotationSettings) GetAccountRotationSettings(context.Context) (*AccountRotationSettings, error) {
 	return DefaultAccountRotationSettings(), nil
+}
+
+func TestRoutingAvailabilityRotationReasonAndReadOnly(t *testing.T) {
+	cases := []struct {
+		name  string
+		state AccountRotationState
+	}{
+		{"manual_draining", AccountRotationState{Phase: "draining", Reason: "manual", Hold: true}},
+		{"manual_resting", AccountRotationState{Phase: "resting", Reason: "manual", Hold: true}},
+		{"scheduled_hold_draining", AccountRotationState{Phase: "draining", Reason: "scheduled", Hold: true}},
+		{"scheduled_hold_resting", AccountRotationState{Phase: "resting", Reason: "scheduled", Hold: true}},
+		{"early_draining", AccountRotationState{Phase: "draining", Reason: "early", Hold: true}},
+		{"early_resting", AccountRotationState{Phase: "resting", Reason: "early", Hold: true}},
+		{"recovering", AccountRotationState{Phase: "working", Recovering: true, RetryAfterMS: 500}},
+		{"ordinary_draining", AccountRotationState{Phase: "draining", Reason: "scheduled"}},
+		{"ordinary_resting", AccountRotationState{Phase: "resting", Reason: "scheduled"}},
+	}
+	for _, mode := range []string{"aggressive", "sticky"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				svc, key, repo, cache := routingAvailabilityFixture()
+				settings := *DefaultAccountRotationSettings()
+				settings.Enabled, settings.Mode = true, mode
+				svc.concurrencyService.SetAccountRotation(openAIRotationSettingsStub{settings: settings}, nil)
+				state := tc.state
+				state.StartedAt, state.DrainAt, state.RestUntil = 100, 200, 300
+				state.WaitingCount = 3
+				original := state
+				cache.states[1] = &state
+				before := svc.SnapshotOpenAIAccountSchedulerMetrics()
+				// Repeat observations against the same authority: peeking must not
+				// start/finish a rest, consume recovery pacing, or reserve a slot.
+				for range 2 {
+					got := svc.RoutingAvailability(t.Context(), key, RoutingAvailabilityRequest{Model: "gpt-5.4"})
+					assert.Equal(t, "busy", got.State, got)
+					assert.Equal(t, "account_rotation", got.Reason)
+					assert.Equal(t, 1, got.RetryAfterSeconds)
+				}
+				assert.Equal(t, original, *cache.states[1])
+				assert.Equal(t, before, svc.SnapshotOpenAIAccountSchedulerMetrics())
+				assert.Empty(t, cache.loads)
+				assert.Nil(t, repo.accounts[0].LastUsedAt)
+				assert.Nil(t, svc.openaiScheduler)
+			})
+		}
+	}
+}
+
+func TestRoutingAvailabilityRotationRequiresEligibility(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*OpenAIGatewayService, *APIKey, *Account, *RoutingAvailabilityRequest)
+	}{
+		{"disabled", func(_ *OpenAIGatewayService, _ *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			a.Schedulable = false
+		}},
+		{"model_unsupported", func(_ *OpenAIGatewayService, _ *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			a.Credentials["model_mapping"] = map[string]any{"gpt-other": "gpt-other"}
+		}},
+		{"other_group", func(_ *OpenAIGatewayService, _ *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			a.GroupIDs = []int64{99}
+		}},
+		{"group_model_restricted", func(_ *OpenAIGatewayService, k *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			a.AccountGroups = []AccountGroup{{GroupID: *k.GroupID, AllowedModels: []string{"gpt-other"}}}
+		}},
+		{"privacy", func(_ *OpenAIGatewayService, k *APIKey, _ *Account, _ *RoutingAvailabilityRequest) {
+			k.Group.RequirePrivacySet = true
+		}},
+		{"compact_unsupported", func(_ *OpenAIGatewayService, _ *APIKey, a *Account, q *RoutingAvailabilityRequest) {
+			a.Extra = map[string]any{"openai_compact_supported": false}
+			q.RequireCompact = true
+		}},
+		{"websocket_disabled", func(_ *OpenAIGatewayService, _ *APIKey, _ *Account, q *RoutingAvailabilityRequest) {
+			q.Transport = "websocket"
+		}},
+		{"rate_limited", func(_ *OpenAIGatewayService, _ *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			until := time.Now().Add(time.Hour)
+			a.RateLimitResetAt = &until
+		}},
+		{"model_runtime_blocked", func(s *OpenAIGatewayService, _ *APIKey, a *Account, q *RoutingAvailabilityRequest) {
+			modelKey, _ := openAIAccountModelTransientKey(a.ID, q.Model)
+			s.getOpenAIAccountModelTransientState().entries[modelKey] = openAIAccountModelTransientEntry{blockUntil: time.Now().Add(time.Hour)}
+		}},
+		{"rpm_exhausted", func(s *OpenAIGatewayService, _ *APIKey, a *Account, _ *RoutingAvailabilityRequest) {
+			a.Type, a.Extra = AccountTypeOAuth, map[string]any{"base_rpm": 10}
+			s.rpmCache = &groupCapacityRPMCacheStub{counts: map[int64]int{a.ID: 10}}
+		}},
+		{"fast_policy_blocked", func(s *OpenAIGatewayService, _ *APIKey, _ *Account, q *RoutingAvailabilityRequest) {
+			s.settingService = newOpenAIGatewayServiceWithSettings(t, &OpenAIFastPolicySettings{Rules: []OpenAIFastPolicyRule{{
+				ServiceTier: OpenAIFastTierPriority, Action: BetaPolicyActionBlock, Scope: BetaPolicyScopeAll,
+			}}}).settingService
+			q.ServiceTier = OpenAIFastTierPriority
+		}},
+	}
+	for _, rotation := range []AccountRotationState{
+		{Phase: "resting", Reason: "manual", Hold: true},
+		{Phase: "resting", Reason: "scheduled"},
+		{Phase: "working", Recovering: true},
+	} {
+		for _, tc := range cases {
+			t.Run(rotation.Phase+"/"+rotation.Reason+"/"+tc.name, func(t *testing.T) {
+				svc, key, repo, cache := routingAvailabilityFixture()
+				svc.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
+				state := rotation
+				cache.states[1] = &state
+				request := RoutingAvailabilityRequest{Model: "gpt-5.4"}
+				tc.change(svc, key, &repo.accounts[0], &request)
+				got := svc.RoutingAvailability(t.Context(), key, request)
+				assert.Equal(t, "empty", got.State, got)
+				assert.Equal(t, "no_eligible_accounts", got.Reason)
+			})
+		}
+	}
+}
+
+func TestRoutingAvailabilityRotationMixedPool(t *testing.T) {
+	cases := []struct {
+		name                  string
+		rotation              bool
+		full                  bool
+		restrictRotation      bool
+		wantState, wantReason string
+	}{
+		{"ready_beats_rotation", true, false, false, "ready", "capacity_available"},
+		{"rotation_beats_capacity_busy", true, true, false, "busy", "account_rotation"},
+		{"capacity_busy_without_rotation", false, true, false, "busy", "capacity_busy"},
+		{"ineligible_rotation_with_ready", true, false, true, "ready", "capacity_available"},
+		{"ineligible_rotation_with_capacity_busy", true, true, true, "busy", "capacity_busy"},
+	}
+	for _, reverse := range []bool{false, true} {
+		for _, tc := range cases {
+			order := "rotation_first/"
+			if reverse {
+				order = "rotation_last/"
+			}
+			t.Run(order+tc.name, func(t *testing.T) {
+				svc, key, repo, cache := routingAvailabilityFixture()
+				svc.concurrencyService.SetAccountRotation(openAIHandlerFreeRotationSettings{}, nil)
+				other := repo.accounts[0]
+				other.ID = 2
+				repo.accounts = append(repo.accounts, other)
+				if tc.rotation {
+					cache.states[1] = &AccountRotationState{Phase: "resting", Reason: "scheduled"}
+				}
+				if tc.restrictRotation {
+					repo.accounts[0].AccountGroups = []AccountGroup{{GroupID: *key.GroupID, AllowedModels: []string{"gpt-other"}}}
+				}
+				if tc.full {
+					cache.loads[1] = &AccountLoadInfo{CurrentConcurrency: 2}
+					cache.loads[2] = &AccountLoadInfo{CurrentConcurrency: 2}
+				}
+				if reverse {
+					repo.accounts[0], repo.accounts[1] = repo.accounts[1], repo.accounts[0]
+				}
+				got := svc.RoutingAvailability(t.Context(), key, RoutingAvailabilityRequest{Model: "gpt-5.4"})
+				assert.Equal(t, tc.wantState, got.State, got)
+				assert.Equal(t, tc.wantReason, got.Reason)
+			})
+		}
+	}
 }
 
 func TestRoutingAvailabilityRecoversWithoutAdmission(t *testing.T) {

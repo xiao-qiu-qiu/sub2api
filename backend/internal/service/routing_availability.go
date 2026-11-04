@@ -58,9 +58,9 @@ type routingAvailabilityCache interface {
 }
 
 type routingAvailabilityEvaluation struct {
-	cache       routingAvailabilityCache
-	held        map[int64]bool
-	unsupported bool
+	cache           routingAvailabilityCache
+	rotationWaiting map[int64]bool
+	unsupported     bool
 }
 
 // RoutingAvailability only observes eligibility and live capacity. In
@@ -124,7 +124,7 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 	if input.RequireCompact {
 		capability = OpenAIEndpointCapabilityResponsesCompact
 	}
-	evaluation := &routingAvailabilityEvaluation{cache: cache, held: make(map[int64]bool)}
+	evaluation := &routingAvailabilityEvaluation{cache: cache, rotationWaiting: make(map[int64]bool)}
 	req := OpenAIAccountScheduleRequest{
 		GroupID: key.GroupID, Platform: PlatformOpenAI, RequestedModel: model,
 		HistoryModel: input.Model, InboundEndpoint: "/v1/responses", UseUpstreamTokenCost: true,
@@ -168,7 +168,7 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 		}
 		allowed, _ = priorityLatencyAllowed(cfg, pool, history, time.Now())
 	}
-	busy := false
+	busy, rotationWaiting := false, false
 	for _, account := range accounts {
 		if _, ok := allowed[account.ID]; !ok {
 			continue
@@ -182,11 +182,19 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 			result.Reason = "capacity_authority_unavailable"
 			return result
 		}
-		if evaluation.held[account.ID] || (account.Concurrency > 0 && load.CurrentConcurrency >= account.Concurrency) {
+		if evaluation.rotationWaiting[account.ID] {
+			rotationWaiting = true
+			continue
+		}
+		if account.Concurrency > 0 && load.CurrentConcurrency >= account.Concurrency {
 			busy = true
 			continue
 		}
 		result.State, result.Reason, result.RetryAfterSeconds = "ready", "capacity_available", 0
+		return result
+	}
+	if rotationWaiting {
+		result.State, result.Reason, result.RetryAfterSeconds = "busy", "account_rotation", 1
 		return result
 	}
 	if busy {
@@ -290,10 +298,10 @@ func (s *OpenAIGatewayService) listRoutingAvailabilityAccounts(ctx context.Conte
 			if state == nil {
 				return nil, fmt.Errorf("rotation state unavailable")
 			}
-			if state.Hold || state.Recovering {
-				req.routingAvailability.held[account.ID] = true
-			} else if !rotationStateAllows(state, policy.Mode, false) {
-				continue
+			if state.Hold || state.Recovering || !rotationStateAllows(state, policy.Mode, false) {
+				// Keep rotation-blocked accounts through the remaining eligibility
+				// gates. Only a fully eligible candidate may report rotation waiting.
+				req.routingAvailability.rotationWaiting[account.ID] = true
 			}
 		}
 		// Shadow parent lookups in the scheduler return a boolean. Read the

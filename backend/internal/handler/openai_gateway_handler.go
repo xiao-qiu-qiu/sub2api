@@ -795,7 +795,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", invalidStreamFieldTypeMessage)
 		return
 	}
-	if _, err := service.ValidateOpenAIServiceTierField(body); err != nil {
+	serviceTier, err := service.ValidateOpenAIServiceTierField(body)
+	if err != nil {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
@@ -956,6 +957,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var lastAdmissionErr error
+	upstreamAttempted, rotationReselected := false, false
 	var rpmAdmission openAIRPMAdmission
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
@@ -972,6 +974,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// native v2，legacy /responses/compact 与生图意图维持原有 Responses 判定。
 	if nativeV2 && !legacyCompact && !imageIntent && requestPlatform == service.PlatformOpenAI {
 		requiredCapability = service.OpenAIEndpointCapabilityResponsesCompact
+	}
+	rotationAvailability := service.RoutingAvailabilityRequest{
+		Model: reqModel, ServiceTier: serviceTier, Transport: "http", RequireCompact: legacyCompact || nativeV2,
 	}
 
 	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
@@ -1037,6 +1042,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				}
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, forwardModel, reqModel, requestPlatform)
 				cls = classifySelectionFailureError(err, cls)
+				if errors.Is(err, service.ErrNoAvailableAccounts) && !imageIntent {
+					cls = classifyResponsesAccountRotation(c.Request.Context(), h.gatewayService, apiKey, rotationAvailability, upstreamAttempted, cls)
+				}
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
@@ -1048,12 +1056,21 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
-				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
+				status, errType, message := h.mapUpstreamError(http.StatusBadGateway)
+				cls := noAccountErrorClassification{Status: status, ErrType: errType, Message: message}
+				if rotationReselected && errors.Is(err, service.ErrNoAvailableAccounts) && !imageIntent {
+					cls = classifyResponsesAccountRotation(c.Request.Context(), h.gatewayService, apiKey, rotationAvailability, upstreamAttempted, cls)
+				}
+				service.SetOpsUpstreamError(c, http.StatusBadGateway, message, "")
+				h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, streamStarted, false)
 			}
 			return
 		}
 		if selection == nil || selection.Account == nil {
 			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, forwardModel, reqModel, requestPlatform)
+			if !imageIntent {
+				cls = classifyResponsesAccountRotation(c.Request.Context(), h.gatewayService, apiKey, rotationAvailability, upstreamAttempted, cls)
+			}
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
 			}
@@ -1102,10 +1119,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed || slotResult == openAISlotAcquireRotationBlocked {
+			rotationReselected = rotationReselected || slotResult == openAISlotAcquireRotationBlocked
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
-				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				cls := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: profitVetoExhaustedMessage}
+				if rotationReselected && !imageIntent {
+					cls = classifyResponsesAccountRotation(c.Request.Context(), h.gatewayService, apiKey, rotationAvailability, upstreamAttempted, cls)
+				}
+				reqLog.Warn("openai.profit_veto_attempts_exhausted", zap.Int("profit_veto_count", profitVetoCount))
+				markOpsRoutingCapacityLimited(c)
+				h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, streamStarted, false)
 				return
 			}
 			continue
@@ -1133,6 +1157,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
+		upstreamAttempted = true
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -2686,6 +2711,35 @@ func withOpenAIWSTurnBillingGroup(ctx context.Context, turnKey *service.APIKey) 
 		return ctx
 	}
 	return context.WithValue(ctx, ctxkey.Group, turnKey.Group)
+}
+
+// classifyResponsesAccountRotation refines only local selection failures. The
+// read-only pool check cannot explain an error from an attempted upstream call.
+func classifyResponsesAccountRotation(
+	ctx context.Context,
+	availability interface {
+		RoutingAvailability(context.Context, *service.APIKey, service.RoutingAvailabilityRequest) service.RoutingAvailability
+	},
+	apiKey *service.APIKey,
+	request service.RoutingAvailabilityRequest,
+	upstreamAttempted bool,
+	fallback noAccountErrorClassification,
+) noAccountErrorClassification {
+	if upstreamAttempted || availability == nil || ctx.Err() != nil || fallback.ModelNotFound ||
+		(fallback.Status != http.StatusServiceUnavailable && fallback.Status != http.StatusBadGateway) ||
+		apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformOpenAI {
+		return fallback
+	}
+	switch fallback.Code {
+	case "", "no_available_accounts", "model_capacity_exhausted":
+	default:
+		return fallback
+	}
+	state := availability.RoutingAvailability(ctx, apiKey, request)
+	if state.State == "busy" && state.Reason == "account_rotation" {
+		fallback.Code = "account_rotation"
+	}
+	return fallback
 }
 
 // recordOpenAIProfitVeto 记录 OpenAI 侧选号循环的一次利润门终检否决：把账号
