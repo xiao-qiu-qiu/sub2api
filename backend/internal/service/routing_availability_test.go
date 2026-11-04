@@ -63,12 +63,18 @@ type routingAvailabilitySnapshotCache struct {
 	*openAISnapshotCacheStub
 	buckets map[SchedulerBucket][]*Account
 	read    []SchedulerBucket
+	err     error
 }
 
 func (c *routingAvailabilitySnapshotCache) GetSnapshot(_ context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
 	c.read = append(c.read, bucket)
 	accounts, hit := c.buckets[bucket]
-	return accounts, hit, nil
+	// Redis treats an empty published bucket as a miss.
+	return accounts, hit && len(accounts) > 0, c.err
+}
+
+func (c *routingAvailabilitySnapshotCache) GetLocalSnapshot(ctx context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
+	return c.GetSnapshot(ctx, bucket)
 }
 
 func routingAvailabilityFixture() (*OpenAIGatewayService, *APIKey, *routingAvailabilityTestRepo, *routingAvailabilityTestCache) {
@@ -361,7 +367,7 @@ func TestRoutingAvailabilityRecoversWithoutAdmission(t *testing.T) {
 }
 
 func TestRoutingAvailabilityKeepsEmptyPrimaryGroupSeparateFromReadyBackupGroup(t *testing.T) {
-	for _, source := range []string{"repo", "snapshot"} {
+	for _, source := range []string{"repo", "snapshot", "snapshot_miss", "snapshot_miss_repo_error", "snapshot_miss_no_repo", "snapshot_read_error", "regional_miss", "regional_read_error"} {
 		t.Run(source, func(t *testing.T) {
 			svc, primaryKey, repo, _ := routingAvailabilityFixture()
 			svc.cfg.RunMode = config.RunModeStandard
@@ -375,8 +381,10 @@ func TestRoutingAvailabilityKeepsEmptyPrimaryGroupSeparateFromReadyBackupGroup(t
 			repo.accounts = append(repo.accounts, backupAccount)
 			primaryBucket := SchedulerBucket{GroupID: primaryGroup.ID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
 			backupBucket := SchedulerBucket{GroupID: backupGroup.ID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
+			wantPrimary, wantBackup := "empty", "ready"
+			wantRepoReads := []int64{primaryGroup.ID, backupGroup.ID, primaryGroup.ID}
 			var snapshot *routingAvailabilitySnapshotCache
-			if source == "snapshot" {
+			if source != "repo" {
 				snapshot = &routingAvailabilitySnapshotCache{
 					openAISnapshotCacheStub: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{
 						1: &repo.accounts[0], 2: &repo.accounts[1],
@@ -387,21 +395,57 @@ func TestRoutingAvailabilityKeepsEmptyPrimaryGroupSeparateFromReadyBackupGroup(t
 					},
 				}
 				svc.schedulerSnapshot = &SchedulerSnapshotService{cache: snapshot, cfg: svc.cfg}
-				repo.err = errors.New("snapshot availability must not query the repository")
+				switch source {
+				case "snapshot":
+					wantRepoReads = nil
+					repo.err = errors.New("snapshot availability must not query the repository")
+				case "snapshot_miss", "snapshot_miss_repo_error", "snapshot_miss_no_repo":
+					// Group 2 has no accounts and an empty published bucket; group 5
+					// has an eligible account but no cached bucket yet.
+					snapshot.buckets = map[SchedulerBucket][]*Account{primaryBucket: nil}
+					repo.accounts = []Account{backupAccount}
+					if source == "snapshot_miss_repo_error" {
+						repo.err = errors.New("candidate query failed")
+						wantPrimary, wantBackup = "unknown", "unknown"
+					}
+					if source == "snapshot_miss_no_repo" {
+						svc.accountRepo = nil
+						wantPrimary, wantBackup, wantRepoReads = "unknown", "unknown", nil
+					}
+				case "snapshot_read_error", "regional_miss", "regional_read_error":
+					wantPrimary, wantBackup, wantRepoReads = "unknown", "unknown", nil
+					repo.err = errors.New("failed or regional snapshots must not query the repository")
+					if source == "regional_miss" || source == "regional_read_error" {
+						snapshot.buckets = nil
+						svc.schedulerSnapshot.localSnapshotReader = snapshot
+					}
+					if source != "regional_miss" {
+						snapshot.err = errors.New("snapshot read failed")
+					}
+				}
 			}
 			request := RoutingAvailabilityRequest{Model: "gpt-5.4"}
 			primary := svc.RoutingAvailability(t.Context(), primaryKey, request)
 			backup := svc.RoutingAvailability(t.Context(), backupKey, request)
 			again := svc.RoutingAvailability(t.Context(), primaryKey, request)
-			assert.Equal(t, "empty", primary.State, primary)
-			assert.Equal(t, "ready", backup.State, backup)
-			assert.Equal(t, "empty", again.State, "another group's ready result must not change primary availability")
-			if source == "snapshot" {
-				assert.Equal(t, []SchedulerBucket{primaryBucket, backupBucket, primaryBucket}, snapshot.read)
-				assert.Empty(t, repo.groupIDs)
-			} else {
-				assert.Equal(t, []int64{primaryGroup.ID, backupGroup.ID, primaryGroup.ID}, repo.groupIDs)
+			assert.Equal(t, wantPrimary, primary.State, primary)
+			assert.Equal(t, wantBackup, backup.State, backup)
+			assert.Equal(t, wantPrimary, again.State, "another group's result must not change primary availability")
+			for _, result := range []RoutingAvailability{primary, backup, again} {
+				switch result.State {
+				case "empty":
+					assert.Equal(t, "no_eligible_accounts", result.Reason)
+				case "ready":
+					assert.Equal(t, "capacity_available", result.Reason)
+				case "unknown":
+					assert.Equal(t, "evaluation_unavailable", result.Reason)
+				}
 			}
+			if snapshot != nil {
+				assert.Equal(t, []SchedulerBucket{primaryBucket, backupBucket, primaryBucket}, snapshot.read)
+			}
+			assert.Equal(t, wantRepoReads, repo.groupIDs)
+			assert.Nil(t, svc.openaiScheduler, "availability must not select or admit an account")
 		})
 	}
 }

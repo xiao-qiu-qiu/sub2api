@@ -215,6 +215,7 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 func (s *OpenAIGatewayService) listRoutingAvailabilityAccounts(ctx context.Context, req OpenAIAccountScheduleRequest) ([]Account, error) {
 	var accounts []Account
 	var err error
+	var snapshotHit bool
 	if snapshot := s.schedulerSnapshot; snapshot != nil {
 		bucket := snapshot.bucketFor(req.GroupID, req.Platform, snapshot.resolveMode(req.Platform, false))
 		var projected []*Account
@@ -227,33 +228,43 @@ func (s *OpenAIGatewayService) listRoutingAvailabilityAccounts(ctx context.Conte
 		if err != nil {
 			return nil, err
 		}
-		// Do not build/publish a missing snapshot from a read-only probe.
-		if !hit {
+		// Only a central Redis miss may fall back to a read-only candidate
+		// query. Regional snapshots remain authoritative; never rebuild here.
+		if !hit && (snapshot.localSnapshotReader != nil || snapshot.cache == nil) {
 			return nil, ErrSchedulerCacheNotReady
 		}
-		ids := make([]int64, 0, len(projected))
-		for _, account := range projected {
-			if account != nil {
-				ids = append(ids, account.ID)
+		snapshotHit = hit
+		if hit {
+			ids := make([]int64, 0, len(projected))
+			for _, account := range projected {
+				if account != nil {
+					ids = append(ids, account.ID)
+				}
+			}
+			full, readErr := snapshot.GetAccounts(ctx, ids)
+			if readErr != nil {
+				return nil, readErr
+			}
+			for _, id := range ids {
+				account := full[id]
+				if account == nil {
+					return nil, ErrSchedulerCacheNotReady
+				}
+				accounts = append(accounts, *account)
 			}
 		}
-		full, readErr := snapshot.GetAccounts(ctx, ids)
-		if readErr != nil {
-			return nil, readErr
+	}
+	if !snapshotHit {
+		if s.accountRepo == nil {
+			return nil, ErrSchedulerCacheNotReady
 		}
-		for _, id := range ids {
-			account := full[id]
-			if account == nil {
-				return nil, ErrSchedulerCacheNotReady
-			}
-			accounts = append(accounts, *account)
+		if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+			accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, req.Platform)
+		} else if req.GroupID != nil {
+			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *req.GroupID, req.Platform)
+		} else {
+			accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, req.Platform)
 		}
-	} else if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
-		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, req.Platform)
-	} else if req.GroupID != nil {
-		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *req.GroupID, req.Platform)
-	} else {
-		accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, req.Platform)
 	}
 	if err != nil {
 		return nil, err
