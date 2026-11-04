@@ -2005,7 +2005,10 @@
           <input
             v-model.number="form.priority"
             type="number"
-            min="1"
+            :min="MIN_ACCOUNT_PRIORITY"
+            :max="MAX_ACCOUNT_PRIORITY"
+            step="1"
+            required
             class="input"
             data-tour="account-form-priority"
           />
@@ -3673,6 +3676,7 @@
 </template>
 
 <script setup lang="ts">
+import { MIN_ACCOUNT_PRIORITY, MAX_ACCOUNT_PRIORITY, isAccountPriority } from '@/utils/accountPriority'
 import CodexFingerprintSettings from './CodexFingerprintSettings.vue'
 import { readCodexFingerprintSettings, codexFingerprintSettingsPatch, validateCodexFingerprintSettings } from '@/utils/codexFingerprintSettings'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
@@ -6147,6 +6151,10 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
 const handleSubmit = async () => {
   if (bpsDefaults.loading.value) return
   if (!props.account) return
+  if (!isAccountPriority(form.priority)) {
+    appStore.showError(t('admin.accounts.priorityInvalid'))
+    return
+  }
   if (props.account.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token')) {
     const fingerprintError = validateCodexFingerprintSettings(codexAdvancedSettings.value, props.account.extra)
     if (fingerprintError) {

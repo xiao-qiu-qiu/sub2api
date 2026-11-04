@@ -63,8 +63,11 @@ func ValidateOAuthAutoConfig(c OAuthAutoConfig) error {
 	if !slices.Contains([]string{PlatformOpenAI, PlatformAnthropic, PlatformGemini, PlatformAntigravity, PlatformGrok}, c.Platform) {
 		return bad("unsupported OAuth platform")
 	}
-	if c.Priority < 0 || c.Priority > 10000 || c.LoadFactor < 1 || c.LoadFactor > 10000 || c.Concurrency < 1 || c.Concurrency > 10000 {
-		return bad("priority must be 0–10000; concurrency and load factor must be 1–10000")
+	if err := ValidateAccountPriority(c.Priority); err != nil {
+		return bad(infraerrors.Message(err))
+	}
+	if c.LoadFactor < 1 || c.LoadFactor > 10000 || c.Concurrency < 1 || c.Concurrency > 10000 {
+		return bad("concurrency and load factor must be 1–10000")
 	}
 	if _, ok := accountCostMultiplierNumber(c.CostMultiplier); !ok {
 		return bad("cost multiplier must be a finite number between 0 and 1000000")

@@ -136,7 +136,7 @@ type crsClaudeAccount struct {
 	AuthType    string         `json:"authType"` // oauth/setup-token
 	IsActive    bool           `json:"isActive"`
 	Schedulable bool           `json:"schedulable"`
-	Priority    int            `json:"priority"`
+	Priority    *int           `json:"priority"`
 	Status      string         `json:"status"`
 	Proxy       *crsProxy      `json:"proxy"`
 	Credentials map[string]any `json:"credentials"`
@@ -151,7 +151,7 @@ type crsConsoleAccount struct {
 	Platform           string         `json:"platform"`
 	IsActive           bool           `json:"isActive"`
 	Schedulable        bool           `json:"schedulable"`
-	Priority           int            `json:"priority"`
+	Priority           *int           `json:"priority"`
 	Status             string         `json:"status"`
 	MaxConcurrentTasks int            `json:"maxConcurrentTasks"`
 	Proxy              *crsProxy      `json:"proxy"`
@@ -166,7 +166,7 @@ type crsOpenAIResponsesAccount struct {
 	Platform    string         `json:"platform"`
 	IsActive    bool           `json:"isActive"`
 	Schedulable bool           `json:"schedulable"`
-	Priority    int            `json:"priority"`
+	Priority    *int           `json:"priority"`
 	Status      string         `json:"status"`
 	Proxy       *crsProxy      `json:"proxy"`
 	Credentials map[string]any `json:"credentials"`
@@ -182,7 +182,7 @@ type crsOpenAIOAuthAccount struct {
 	AuthType    string         `json:"authType"` // oauth
 	IsActive    bool           `json:"isActive"`
 	Schedulable bool           `json:"schedulable"`
-	Priority    int            `json:"priority"`
+	Priority    *int           `json:"priority"`
 	Status      string         `json:"status"`
 	Proxy       *crsProxy      `json:"proxy"`
 	Credentials map[string]any `json:"credentials"`
@@ -198,7 +198,7 @@ type crsGeminiOAuthAccount struct {
 	AuthType    string         `json:"authType"` // oauth
 	IsActive    bool           `json:"isActive"`
 	Schedulable bool           `json:"schedulable"`
-	Priority    int            `json:"priority"`
+	Priority    *int           `json:"priority"`
 	Status      string         `json:"status"`
 	Proxy       *crsProxy      `json:"proxy"`
 	Credentials map[string]any `json:"credentials"`
@@ -213,7 +213,7 @@ type crsGeminiAPIKeyAccount struct {
 	Platform    string         `json:"platform"`
 	IsActive    bool           `json:"isActive"`
 	Schedulable bool           `json:"schedulable"`
-	Priority    int            `json:"priority"`
+	Priority    *int           `json:"priority"`
 	Status      string         `json:"status"`
 	Proxy       *crsProxy      `json:"proxy"`
 	Credentials map[string]any `json:"credentials"`
@@ -1277,11 +1277,11 @@ func defaultName(name, id string) string {
 	return "CRS " + id
 }
 
-func clampPriority(priority int) int {
-	if priority < 1 || priority > 100 {
+func clampPriority(priority *int) int {
+	if priority == nil || ValidateAccountPriority(*priority) != nil {
 		return 50
 	}
-	return priority
+	return *priority
 }
 
 func sanitizeCredentialsMap(input map[string]any) map[string]any {

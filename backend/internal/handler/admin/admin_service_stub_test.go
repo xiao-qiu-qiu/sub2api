@@ -42,6 +42,7 @@ type stubAdminService struct {
 	getUserErr                          error
 	createAccountErr                    error
 	createSparkShadowErr                error
+	lastCreateShadowOptions             *service.ShadowOptions
 	updateAccountErr                    error
 	lastUpdateAccountInput              *service.UpdateAccountInput
 	bulkUpdateAccountErr                error
@@ -841,16 +842,21 @@ func (s *stubAdminService) RevertAccountProxyFallback(ctx context.Context, id in
 }
 
 func (s *stubAdminService) CreateShadow(ctx context.Context, parentID int64, opts service.ShadowOptions) (*service.Account, error) {
+	s.lastCreateShadowOptions = &opts
 	if s.createSparkShadowErr != nil {
 		return nil, s.createSparkShadowErr
 	}
 	pid := parentID
+	priority := 0
+	if opts.Priority != nil {
+		priority = *opts.Priority
+	}
 	return &service.Account{
 		ID:              9001,
 		Name:            opts.Name,
 		Platform:        service.PlatformOpenAI,
 		Type:            service.AccountTypeOAuth,
-		Priority:        opts.Priority,
+		Priority:        priority,
 		Concurrency:     opts.Concurrency,
 		GroupIDs:        opts.GroupIDs,
 		ParentAccountID: &pid,

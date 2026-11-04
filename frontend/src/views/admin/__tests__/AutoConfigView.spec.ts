@@ -29,6 +29,23 @@ beforeEach(() => {
  vi.mocked(getAll).mockResolvedValue([{ id: 5, name: 'OpenAI test', platform: 'openai', status: 'active' }, { id: 6, name: 'Anthropic test', platform: 'anthropic', status: 'active' }] as Group[])
 })
 describe('AutoConfigView', () => {
+ it.each([-9999, -1, 0, 9999])('saves initial account priority %s', async priority => {
+  const w = mount(AutoConfigView); await flushPromises()
+  const input = w.get('[data-testid="priority"]')
+  expect(input.attributes()).toMatchObject({ min: '-9999', max: '9999', step: '1' })
+  await input.setValue(priority)
+  await w.get('form').trigger('submit'); await flushPromises()
+  expect(saveAutoConfig).toHaveBeenCalledWith(expect.objectContaining({ priority }))
+  w.unmount()
+ })
+ it.each([-10000, 10000, 1.5, '', '-'])('rejects invalid initial account priority %s', async priority => {
+  const w = mount(AutoConfigView); await flushPromises()
+  await w.get('[data-testid="priority"]').setValue(priority)
+  await w.get('form').trigger('submit'); await flushPromises()
+  expect(saveAutoConfig).not.toHaveBeenCalled()
+  expect(w.get('[role="alert"]').text()).toContain('autoConfig.invalid')
+  w.unmount()
+ })
  it('starts with the Luna 10x rule disabled and saves model billing independently', async () => {
   const w = mount(AutoConfigView); await flushPromises()
   expect(w.get<HTMLInputElement>('[data-testid="model-billing-enabled"]').element.checked).toBe(false)

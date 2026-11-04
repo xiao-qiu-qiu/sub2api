@@ -1546,6 +1546,7 @@ export default {
       loadFactorHint: '提高负载因子可以提高对账号的调度频率',
       priority: '优先级',
       priorityHint: '优先级越小的账号优先使用',
+      priorityInvalid: '优先级必须是 -9999 到 9999 之间的整数。',
       billingRateMultiplier: '账号计费倍率',
       costMultiplier: '成本倍率',
       costMultiplierHint: '默认 0.1，跟随上游自动更新，关闭后可手填实际成本，不影响账单。',

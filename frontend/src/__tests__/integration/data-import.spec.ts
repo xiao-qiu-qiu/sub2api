@@ -59,6 +59,26 @@ const setInputFiles = (element: Element, files: File[]) => {
 }
 
 describe('ImportDataModal', () => {
+  it('preserves signed account priorities when merging import files', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0, proxy_reused: 0, proxy_failed: 0, account_created: 4, account_failed: 0
+    })
+    const wrapper = mountModal()
+    const input = wrapper.get('input[type="file"]')
+    const accounts = [-9999, -1, 0, 9999].map(priority => ({ name: `priority ${priority}`, priority }))
+    setInputFiles(input.element, accounts.map((account, i) =>
+      makeJsonFile(`accounts-${i}.json`, JSON.stringify({ proxies: [], accounts: [account] }))
+    ))
+    await input.trigger('change')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ accounts })
+    }))
+    wrapper.unmount()
+  })
+
   beforeEach(async () => {
     showError.mockReset()
     showSuccess.mockReset()

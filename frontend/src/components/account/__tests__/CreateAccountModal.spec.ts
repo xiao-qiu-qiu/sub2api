@@ -252,6 +252,32 @@ function expectWSAcceleration(extra: unknown, enabled: boolean) {
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
+  it.each([-9999, -1, 0, 9999])('creates accounts with priority %s', async priority => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    const input = wrapper.get('[data-tour="account-form-priority"]')
+    expect(input.attributes()).toMatchObject({ min: '-9999', max: '9999', step: '1' })
+    await input.setValue(priority)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Priority example')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('#create-account-form').trigger('submit')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ priority }))
+  })
+
+  it.each([-10000, 10000, 1.5, '', '-'])('blocks priority %s even for a custom submit event', async priority => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('[data-tour="account-form-priority"]').setValue(priority)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Priority example')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('#create-account-form').trigger('submit')
+    await flushPromises()
+    expect(createAccountMock).not.toHaveBeenCalled()
+  })
+
   it('saves extra image models only for OpenAI API-key accounts', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'OpenAI')

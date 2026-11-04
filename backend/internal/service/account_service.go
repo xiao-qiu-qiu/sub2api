@@ -241,6 +241,9 @@ func NewAccountService(accountRepo AccountRepository, groupRepo GroupRepository)
 
 // Create 创建账号
 func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (*Account, error) {
+	if err := ValidateAccountPriority(req.Priority); err != nil {
+		return nil, err
+	}
 	if err := ValidateModelMappingMode(req.Credentials); err != nil {
 		return nil, err
 	}
@@ -339,6 +342,11 @@ func (s *AccountService) ListByGroup(ctx context.Context, groupID int64) ([]Acco
 
 // Update 更新账号
 func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccountRequest) (*Account, error) {
+	if req.Priority != nil {
+		if err := ValidateAccountPriority(*req.Priority); err != nil {
+			return nil, err
+		}
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)

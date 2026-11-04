@@ -39,8 +39,8 @@ describe('AccountPriorityCell', () => {
     expect(wrapper.emitted('updated')?.[0]?.[0]).toMatchObject({ id: 7, priority: 4 })
   })
 
-  it('does not go below 1', async () => {
-    const wrapper = mountCell(account({ priority: 1 }))
+  it('does not go below -9999', async () => {
+    const wrapper = mountCell(account({ priority: -9999 }))
     const dec = wrapper.get('[data-testid="account-priority-decrement"]')
     expect(dec.attributes('disabled')).toBeDefined()
     // 到达下限时按钮仍应随悬停显隐，而不是常驻半透明
@@ -49,6 +49,67 @@ describe('AccountPriorityCell', () => {
     await dec.trigger('click')
     await vi.runAllTimersAsync()
     expect(update).not.toHaveBeenCalled()
+  })
+
+  it('does not go above 9999', async () => {
+    const wrapper = mountCell(account({ priority: 9999 }))
+    const inc = wrapper.get('[data-testid="account-priority-increment"]')
+    expect(inc.attributes('disabled')).toBeDefined()
+    await inc.trigger('click')
+    await vi.runAllTimersAsync()
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it.each([-9999, -1, 0, 9999])('saves the signed integer %s without clamping', async priority => {
+    const wrapper = mountCell()
+    await wrapper.get('[data-testid="account-priority-value"]').trigger('click')
+    await wrapper.get('[data-testid="account-priority-input"]').setValue(String(priority))
+    await wrapper.get('[data-testid="account-priority-input"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(update).toHaveBeenCalledWith(7, { priority })
+  })
+
+  it.each([
+    { from: 1, button: 'decrement', to: -1 },
+    { from: -1, button: 'increment', to: 1 },
+  ])('steps across zero from $from to $to', async ({ from, button, to }) => {
+    const wrapper = mountCell(account({ priority: from }))
+    const control = wrapper.get(`[data-testid="account-priority-${button}"]`)
+    await control.trigger('click')
+    expect(wrapper.get('[data-testid="account-priority-value"]').text()).toBe('0')
+    await control.trigger('click')
+    await vi.runAllTimersAsync()
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith(7, { priority: to })
+  })
+
+  it.each(['', '-', '+', '1.5', '-1.5', '12abc', '1e2', '10000', '-10000'])('does not submit invalid input %j on Enter or blur', async value => {
+    const wrapper = mountCell()
+    await wrapper.get('[data-testid="account-priority-value"]').trigger('click')
+    const input = wrapper.get('[data-testid="account-priority-input"]')
+    await input.setValue(value)
+    await input.trigger('keydown', { key: 'Enter' })
+    await input.trigger('blur')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    await wrapper.get('[data-testid="account-priority-increment"]').trigger('click')
+    await vi.runAllTimersAsync()
+    expect(update).not.toHaveBeenCalled()
+    expect(input.attributes('aria-invalid')).toBe('true')
+  })
+
+  it('allows a lone minus while typing and nudges a valid value across zero', async () => {
+    const wrapper = mountCell()
+    await wrapper.get('[data-testid="account-priority-value"]').trigger('click')
+    const input = wrapper.get<HTMLInputElement>('[data-testid="account-priority-input"]')
+    await input.setValue('-')
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    expect(input.element.value).toBe('-')
+    await input.setValue('-1')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    expect(input.element.value).toBe('0')
+    await input.trigger('blur')
+    await flushPromises()
+    expect(update).toHaveBeenCalledWith(7, { priority: 0 })
   })
 
   it('saves a typed value on Enter and ignores unchanged input', async () => {

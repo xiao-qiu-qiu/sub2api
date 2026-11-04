@@ -459,7 +459,7 @@ type CreateAccountInput struct {
 // The shadow holds no credentials — the scheduler transparently delegates to the parent account's tokens.
 type ShadowOptions struct {
 	Name        string
-	Priority    int
+	Priority    *int // nil inherits the parent's priority; zero and negative values are explicit.
 	Concurrency int
 	GroupIDs    []int64
 }

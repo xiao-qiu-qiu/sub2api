@@ -340,6 +340,30 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it.each([-9999, -1, 0, 9999])('updates accounts with priority %s', async priority => {
+    const account = buildAccount()
+    updateAccountMock.mockReset().mockResolvedValue({ ...account, priority })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const input = wrapper.get('[data-tour="account-form-priority"]')
+    expect(input.attributes()).toMatchObject({ min: '-9999', max: '9999', step: '1' })
+    await input.setValue(priority)
+    await wrapper.get('#edit-account-form').trigger('submit')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledWith(1, expect.objectContaining({ priority }))
+  })
+
+  it.each([-10000, 10000, 1.5, '', '-'])('blocks priority %s even for a custom submit event', async priority => {
+    updateAccountMock.mockReset()
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.get('[data-tour="account-form-priority"]').setValue(priority)
+    await wrapper.get('#edit-account-form').trigger('submit')
+    await flushPromises()
+    expect(updateAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenLastCalledWith('admin.accounts.priorityInvalid')
+  })
+
   it('round-trips and clears API-key image grants without affecting other extra fields', async () => {
     const account = buildAccount()
     account.extra = { extra_image_models: ['my-nai'], extra_image_model_prefixes: ['nai-diffusion-'], unrelated: 'preserve' }

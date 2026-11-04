@@ -1445,6 +1445,7 @@ export default {
       loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',
       priorityHint: 'Lower value accounts are used first',
+      priorityInvalid: 'Priority must be an integer between -9999 and 9999.',
       billingRateMultiplier: 'Billing Rate Multiplier',
       costMultiplier: 'Cost multiplier',
       costMultiplierHint: 'Defaults to 0.1; follow upstream updates or turn off to enter your actual cost, without changing billing.',

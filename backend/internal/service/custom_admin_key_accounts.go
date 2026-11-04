@@ -148,8 +148,11 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		if !slices.Contains([]string{"oauth", "setup-token", "apikey", "upstream", "bedrock", "service_account"}, input.Type) {
 			return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_INPUT", "账户类型无效")
 		}
-		if !slices.Contains(domain.ConcretePlatformIDs(), input.Platform) || input.Concurrency < 0 || input.Priority < 0 {
+		if !slices.Contains(domain.ConcretePlatformIDs(), input.Platform) || input.Concurrency < 0 {
 			return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_INPUT", "创建参数无效")
+		}
+		if err := ValidateAccountPriority(input.Priority); err != nil {
+			return nil, err
 		}
 		resource := adminaccess.Account{Type: input.Type, Platform: input.Platform, GroupIDs: input.GroupIDs}
 		if input.Type == "" || input.Platform == "" || !principal.Policy.AllowsAccount("accounts.create", resource) {

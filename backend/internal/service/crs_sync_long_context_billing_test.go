@@ -23,6 +23,7 @@ type crsOpenAILongContextSource struct {
 	collection  string
 	credentials map[string]any
 	extra       map[string]any
+	priority    *int
 }
 
 func newCRSLongContextAccountRepo(existing ...*Account) *crsLongContextAccountRepo {
@@ -140,6 +141,9 @@ func runCRSOpenAILongContextSync(t *testing.T, repo AccountRepository, source cr
 	}
 	if source.extra != nil {
 		account["extra"] = source.extra
+	}
+	if source.priority != nil {
+		account["priority"] = *source.priority
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

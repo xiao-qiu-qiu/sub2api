@@ -926,7 +926,10 @@
             v-model.number="priority"
             id="bulk-edit-priority"
             type="number"
-            min="1"
+            :min="MIN_ACCOUNT_PRIORITY"
+            :max="MAX_ACCOUNT_PRIORITY"
+            step="1"
+            required
             :disabled="!enablePriority"
             class="input"
             :class="!enablePriority && 'cursor-not-allowed opacity-50'"
@@ -1572,6 +1575,7 @@
 </template>
 
 <script setup lang="ts">
+import { MIN_ACCOUNT_PRIORITY, MAX_ACCOUNT_PRIORITY, isAccountPriority } from '@/utils/accountPriority'
 import CodexFingerprintSettings from './CodexFingerprintSettings.vue'
 import { readCodexFingerprintSettings, codexFingerprintSettingsPatch, validateCodexFingerprintSettings } from '@/utils/codexFingerprintSettings'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
@@ -2394,6 +2398,10 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
 }
 
 const handleSubmit = async () => {
+  if (enablePriority.value && !isAccountPriority(priority.value)) {
+    appStore.showError(t('admin.accounts.priorityInvalid'))
+    return
+  }
   if (enableCodexAdvancedSettings.value && allOpenAIOAuth.value) {
     const fingerprintError = validateCodexFingerprintSettings(codexAdvancedSettings.value, undefined, true)
     if (fingerprintError) {

@@ -320,6 +320,10 @@ func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if err := service.ValidateAccountPriority(req.Priority); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 
 	// Exchange code for tokens
 	tokenInfo, err := h.openaiOAuthService.ExchangeCode(c.Request.Context(), &service.OpenAIExchangeCodeInput{
@@ -384,9 +388,11 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 		response.BadRequest(c, "concurrency must be >= 0")
 		return
 	}
-	if req.Priority != nil && *req.Priority < 0 {
-		response.BadRequest(c, "priority must be >= 0")
-		return
+	if req.Priority != nil {
+		if err := service.ValidateAccountPriority(*req.Priority); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
 	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
@@ -552,7 +558,7 @@ func (h *OpenAIOAuthHandler) RefreshQuota(c *gin.Context) {
 // CreateShadowRequest is the request body for CreateShadow.
 type CreateShadowRequest struct {
 	Name        string  `json:"name"`
-	Priority    int     `json:"priority"`
+	Priority    *int    `json:"priority"`
 	Concurrency int     `json:"concurrency"`
 	GroupIDs    []int64 `json:"group_ids"`
 }
@@ -570,6 +576,12 @@ func (h *OpenAIOAuthHandler) CreateShadow(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
+	}
+	if req.Priority != nil {
+		if err := service.ValidateAccountPriority(*req.Priority); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
 	}
 
 	shadow, err := h.adminService.CreateShadow(c.Request.Context(), parentID, service.ShadowOptions{

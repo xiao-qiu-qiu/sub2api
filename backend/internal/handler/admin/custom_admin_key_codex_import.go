@@ -27,7 +27,12 @@ func validateScopedCodexRequest(req scopedCodexSessionImportRequest) error {
 	if req.GroupIDs == nil || (req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk) {
 		return infraerrors.BadRequest("SCOPED_CODEX_INPUT", "须明确提供 group_ids，不能跳过分组风险检查")
 	}
-	if (req.Concurrency != nil && *req.Concurrency < 0) || (req.Priority != nil && *req.Priority < 0) || (req.LoadFactor != nil && (*req.LoadFactor < 1 || *req.LoadFactor > 10000)) || (req.RateMultiplier != nil && *req.RateMultiplier < 0) {
+	if req.Priority != nil {
+		if err := service.ValidateAccountPriority(*req.Priority); err != nil {
+			return err
+		}
+	}
+	if (req.Concurrency != nil && *req.Concurrency < 0) || (req.LoadFactor != nil && (*req.LoadFactor < 1 || *req.LoadFactor > 10000)) || (req.RateMultiplier != nil && *req.RateMultiplier < 0) {
 		return infraerrors.BadRequest("SCOPED_CODEX_INPUT", "导入参数无效")
 	}
 	for key := range req.CredentialExtras {

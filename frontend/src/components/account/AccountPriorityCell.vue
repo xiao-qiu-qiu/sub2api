@@ -12,7 +12,7 @@
       type="button"
       class="flex h-full w-6 items-center justify-center rounded-l-lg text-gray-500 opacity-0 transition hover:bg-gray-200/70 hover:text-primary-600 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent disabled:hover:text-gray-300 dark:disabled:text-dark-600 dark:disabled:hover:text-dark-600 group-hover/priority:opacity-100 group-focus-within/priority:opacity-100 dark:text-gray-400 dark:hover:bg-dark-600 dark:hover:text-primary-400 [@media(hover:none)]:opacity-100"
       :class="{ '!opacity-100': editing || dirty }"
-      :disabled="saving || draft <= MIN_PRIORITY"
+      :disabled="saving || draft <= MIN_ACCOUNT_PRIORITY"
       :title="t('admin.accounts.priorityQuick.raise')"
       :aria-label="t('admin.accounts.priorityQuick.raise')"
       data-testid="account-priority-decrement"
@@ -28,8 +28,10 @@
       ref="inputRef"
       v-model="inputValue"
       type="text"
-      inputmode="numeric"
-      class="h-full w-10 border-0 bg-transparent p-0 text-center font-mono text-sm tabular-nums text-gray-900 focus:outline-none focus:ring-0 dark:text-white"
+      inputmode="text"
+      pattern="[+\-]?[0-9]+"
+      :aria-invalid="parseAccountPriority(inputValue) === null"
+      class="h-full w-14 border-0 bg-transparent p-0 text-center font-mono text-sm tabular-nums text-gray-900 focus:outline-none focus:ring-0 dark:text-white"
       :aria-label="t('admin.accounts.columns.priority')"
       data-testid="account-priority-input"
       @keydown.enter.prevent="commitInput"
@@ -60,7 +62,7 @@
       type="button"
       class="flex h-full w-6 items-center justify-center rounded-r-lg text-gray-500 opacity-0 transition hover:bg-gray-200/70 hover:text-primary-600 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent disabled:hover:text-gray-300 dark:disabled:text-dark-600 dark:disabled:hover:text-dark-600 group-hover/priority:opacity-100 group-focus-within/priority:opacity-100 dark:text-gray-400 dark:hover:bg-dark-600 dark:hover:text-primary-400 [@media(hover:none)]:opacity-100"
       :class="{ '!opacity-100': editing || dirty }"
-      :disabled="saving || draft >= MAX_PRIORITY"
+      :disabled="saving || draft >= MAX_ACCOUNT_PRIORITY"
       :title="t('admin.accounts.priorityQuick.lower')"
       :aria-label="t('admin.accounts.priorityQuick.lower')"
       data-testid="account-priority-increment"
@@ -78,10 +80,9 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { update as updateAccount } from '@/api/admin/accounts'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { MIN_ACCOUNT_PRIORITY, MAX_ACCOUNT_PRIORITY, parseAccountPriority } from '@/utils/accountPriority'
 import type { Account } from '@/types'
 
-const MIN_PRIORITY = 1
-const MAX_PRIORITY = 9999
 // 连续点击时合并为一次保存，避免每次 +/- 都打一次接口
 const SAVE_DEBOUNCE_MS = 450
 
@@ -109,7 +110,7 @@ watch(
   }
 )
 
-const clamp = (value: number) => Math.min(MAX_PRIORITY, Math.max(MIN_PRIORITY, Math.round(value)))
+const clamp = (value: number) => Math.min(MAX_ACCOUNT_PRIORITY, Math.max(MIN_ACCOUNT_PRIORITY, value))
 
 const clearTimer = () => {
   if (saveTimer) {
@@ -141,6 +142,7 @@ const scheduleSave = () => {
 
 const step = (delta: number) => {
   if (saving.value) return
+  if (editing.value && parseAccountPriority(inputValue.value) === null) return
   const next = clamp(draft.value + delta)
   if (next === draft.value) return
   draft.value = next
@@ -158,15 +160,19 @@ const startEditing = async () => {
 }
 
 const nudgeInput = (delta: number) => {
-  const current = Number.parseInt(inputValue.value, 10)
-  inputValue.value = String(clamp((Number.isFinite(current) ? current : draft.value) + delta))
+  const current = parseAccountPriority(inputValue.value)
+  if (current !== null) inputValue.value = String(clamp(current + delta))
 }
 
 const commitInput = () => {
   if (!editing.value) return
+  const parsed = parseAccountPriority(inputValue.value)
+  if (parsed === null) {
+    emit('error', t('admin.accounts.priorityInvalid'))
+    return
+  }
   editing.value = false
-  const parsed = Number.parseInt(inputValue.value.trim(), 10)
-  if (Number.isFinite(parsed)) draft.value = clamp(parsed)
+  draft.value = parsed
   void save()
 }
 

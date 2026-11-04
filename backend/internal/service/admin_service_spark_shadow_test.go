@@ -141,7 +141,7 @@ func TestCreateShadow(t *testing.T) {
 	require.NoError(t, repo.Create(ctx, parent))
 
 	// Test 1: 基本生成
-	shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "p-spark", Priority: 50})
+	shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "p-spark", Priority: ptr(50)})
 	require.NoError(t, err)
 	require.NotNil(t, shadow)
 	require.Equal(t, parent.ID, *shadow.ParentAccountID)
@@ -278,7 +278,7 @@ func TestCreateShadow_InheritsParentPriorityWhenOmitted(t *testing.T) {
 		}
 		require.NoError(t, repo.Create(ctx, parent))
 
-		// 模拟前端一键创建:只传 name,priority 省略=0。
+		// 模拟前端一键创建：只传 name，priority 省略为 nil。
 		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "prio-shadow"})
 		require.NoError(t, err)
 		require.Equal(t, 30, shadow.Priority, "未指定优先级应继承母账号(而非 0=最高优先级)")
@@ -295,10 +295,32 @@ func TestCreateShadow_InheritsParentPriorityWhenOmitted(t *testing.T) {
 		}
 		require.NoError(t, repo.Create(ctx, parent))
 
-		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "prio-shadow2", Priority: 7})
+		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "prio-shadow2", Priority: ptr(7)})
 		require.NoError(t, err)
 		require.Equal(t, 7, shadow.Priority, "显式正优先级应保留")
 	})
+}
+
+func TestCreateShadowPreservesSignedPriority(t *testing.T) {
+	for _, priority := range []int{MinAccountPriority, -1, 0, MaxAccountPriority} {
+		repo := newSparkShadowRepoStub()
+		svc := &adminServiceImpl{accountRepo: repo}
+		parent := &Account{Name: "parent", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: 30}
+		require.NoError(t, repo.Create(t.Context(), parent))
+		shadow, err := svc.CreateShadow(t.Context(), parent.ID, ShadowOptions{Priority: &priority})
+		require.NoError(t, err)
+		require.Equal(t, priority, shadow.Priority)
+		require.Equal(t, priority, repo.accounts[shadow.ID].Priority)
+	}
+	for _, priority := range []int{-1, 0} {
+		repo := newSparkShadowRepoStub()
+		svc := &adminServiceImpl{accountRepo: repo}
+		parent := &Account{Name: "parent", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Priority: priority}
+		require.NoError(t, repo.Create(t.Context(), parent))
+		shadow, err := svc.CreateShadow(t.Context(), parent.ID, ShadowOptions{})
+		require.NoError(t, err)
+		require.Equal(t, priority, shadow.Priority)
+	}
 }
 
 // TestPersistAccountCredentials_SkipsShadow 验证外审第6轮 P1:凭据写入唯一汇聚点
