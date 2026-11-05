@@ -1,6 +1,9 @@
 # 确保所有 SQL 迁移文件使用 LF 换行符
 backend/migrations/*.sql text eol=lf
 
+# 指纹题库按原始字节校验哈希，保持与已审阅快照一致。
+backend/internal/pkg/modeltrace/data/unified_bank.json text eol=lf
+
 # Go 源代码文件
 *.go text eol=lf
 

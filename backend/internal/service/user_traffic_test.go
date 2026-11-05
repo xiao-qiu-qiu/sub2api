@@ -116,11 +116,17 @@ func TestTrafficCalendarBucketsCrossSkippedDaysAndMidnights(t *testing.T) {
 func TestTrafficCalendarUsesFirstMidnightWhenRepeated(t *testing.T) {
 	loc, err := time.LoadLocation("America/Havana")
 	require.NoError(t, err)
-	f, err := newTrafficFilter("day", "2026-11-01", time.Now(), loc)
+	// Use a historical fold: tzdata 2026f canceled Havana's 2026-11-01
+	// rollback, so that date no longer has a repeated midnight on newer tzdata.
+	f, err := newTrafficFilter("day", "2020-11-01", time.Now(), loc)
 	require.NoError(t, err)
-	require.Equal(t, "2026-11-01T00:00:00-04:00", f.Start.Format(time.RFC3339))
+	require.Equal(t, "2020-11-01T00:00:00-04:00", f.Start.Format(time.RFC3339))
+	require.Equal(t, "2020-11-02T00:00:00-05:00", f.End.Format(time.RFC3339))
 	require.Equal(t, 25*time.Hour, f.End.Sub(f.Start))
-	require.Len(t, TrafficBuckets(f), 25)
+	buckets := TrafficBuckets(f)
+	require.Len(t, buckets, 25)
+	require.Equal(t, "2020-11-01 00:00 -04:00", buckets[0].Label)
+	require.Equal(t, "2020-11-01 00:00 -05:00", buckets[1].Label)
 }
 
 func TestTrafficDeliverySurvivesDatabaseOutageAndRestart(t *testing.T) {

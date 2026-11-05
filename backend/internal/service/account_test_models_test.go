@@ -45,6 +45,8 @@ func TestFetchOpenAIAccountModelsOAuthPopulatesPickerFields(t *testing.T) {
 	}
 	require.Contains(t, ids, "gpt-image-2.5-flare")
 	require.Contains(t, ids, "gpt-image-2.5-sunburst")
+	require.Contains(t, ids, "gpt-image-2.6-flare")
+	require.Contains(t, ids, "gpt-image-2.6-sunburst")
 
 	after, err := gateway.FetchOpenAIModelsList(ctx, account)
 	require.NoError(t, err)
@@ -157,6 +159,26 @@ func pickerModelIDs(models []openai.Model) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func TestFetchOpenAIAccountModelsGPTImage26AllowlistAndAlias(t *testing.T) {
+	for _, imageModel := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		t.Run(imageModel, func(t *testing.T) {
+			newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"gpt-6-astra"}]}`)
+			svc := &AccountTestService{openaiGatewayService: &OpenAIGatewayService{}}
+			account := newCodexModelsTestAccount()
+			account.Credentials["model_mapping"] = map[string]any{imageModel: imageModel}
+			models, err := svc.FetchOpenAIAccountModels(context.Background(), account)
+			require.NoError(t, err)
+			require.Equal(t, []string{imageModel}, pickerModelIDs(models))
+			require.Equal(t, openaiCodexDisplayName(imageModel), models[0].DisplayName)
+
+			account.Credentials["model_mapping"] = map[string]any{"paint": imageModel}
+			models, err = svc.FetchOpenAIAccountModels(context.Background(), account)
+			require.NoError(t, err)
+			require.Equal(t, []string{"paint"}, pickerModelIDs(models))
+		})
+	}
 }
 
 // The picker is scoped to the account mapping: an upstream slug the account does

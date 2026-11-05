@@ -23,6 +23,9 @@ const workspaces: string[] = []
 const input = { apiKey: 'sk-secret-value', baseUrl: 'https://example.com', platform: 'openai' as const }
 const nativeUnix = process.platform !== 'win32'
 const powershell = process.env.SUB2API_TEST_POWERSHELL || (process.platform === 'win32' ? 'powershell.exe' : '')
+// PowerShell startup can exceed 20s while the full suite runs other workers.
+const windowsProcessTimeoutMs = 60_000
+const windowsTestTimeoutMs = windowsProcessTimeoutMs * 2 + 5_000
 const require = createRequire(import.meta.url)
 let batchParserPromise: Promise<Parser> | null = null
 
@@ -38,7 +41,8 @@ async function getBatchParser() {
 }
 
 function workspace() {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-quick-config-'))
+  // TEMP can use an 8.3 alias that .NET expands when resolving config paths.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'codex-quick-config-')))
   workspaces.push(dir)
   return dir
 }
@@ -70,7 +74,7 @@ function psRunner(codeHome?: string, useCmd = false, environment: NodeJS.Process
         writeFileSync(file, script.replace('$shell = New-Object -ComObject WScript.Shell', "throw 'Dialog unavailable in test'"))
         return spawnSync(process.env.SUB2API_TEST_CMD || process.env.ComSpec || 'cmd.exe', ['/d', '/v:off', '/s', '/c', `""${file}""`], {
           encoding: 'utf8', env: { ...process.env, CODEX_HOME: configDir, ...environment },
-          windowsVerbatimArguments: true, input: '\r\n', timeout: 20000
+          windowsVerbatimArguments: true, input: '\r\n', timeout: windowsProcessTimeoutMs
         })
       }
       const ps = script.slice(script.lastIndexOf('# SUB2API_POWERSHELL') + '# SUB2API_POWERSHELL'.length)
@@ -79,7 +83,7 @@ function psRunner(codeHome?: string, useCmd = false, environment: NodeJS.Process
       const file = join(dir, 'configure.ps1')
       writeFileSync(file, `\uFEFF${testScript}`)
       return spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], {
-        encoding: 'utf8', env: { ...process.env, CODEX_HOME: configDir, ...environment }, timeout: 20000
+        encoding: 'utf8', env: { ...process.env, CODEX_HOME: configDir, ...environment }, timeout: windowsProcessTimeoutMs
       })
     }
   }
@@ -109,6 +113,15 @@ describe('codexQuickConfig', () => {
     expect(config).toContain('experimental_bearer_token = "sk-quick-\\"test\\""')
     expect(config).toContain('base_url = "https://example.com/v1"')
     expect(config).not.toContain('model_catalog_json')
+  })
+
+  it('requests Fast at the TOML root only for OpenAI quick setup', () => {
+    const config = buildCodexQuickConfigToml(input)
+    expect(config.split('\n[')[0]).toContain('service_tier = "fast"')
+    expect(config.match(/^service_tier = /gm)).toHaveLength(1)
+    for (const platform of ['anthropic', 'grok', 'composite'] as const) {
+      expect(buildCodexQuickConfigToml({ ...input, platform })).not.toContain('service_tier')
+    }
   })
 
   it('embeds model catalog data only when requested', () => {
@@ -158,6 +171,7 @@ describe('codexQuickConfig', () => {
     const payload = windowsScript.match(/\$configPayload = @\(\s*'([^']+)'/)?.[1]
     expect(payload).toBeDefined()
     expect(decodeBase64Utf8(payload!)).toContain('experimental_bearer_token')
+    expect(decodeBase64Utf8(payload!).split('\n[')[0]).toContain('service_tier = "fast"')
     expect(encodeUtf8Base64('中文')).not.toBe('')
   })
 
@@ -214,6 +228,7 @@ describe('codexQuickConfig', () => {
     const config = readFileSync(join(configDir, 'config.toml'), 'utf8')
     expect(config).toContain(`model_catalog_json = "${realpathSync(configDir)}/codex-models.json"`)
     expect(config).toContain('experimental_bearer_token = "sk-secret-value"')
+    expect(config.split('\n[')[0]).toContain('service_tier = "fast"')
     expect(readFileSync(join(configDir, 'codex-models.json'), 'utf8')).toBe(catalog)
     expect(statSync(join(configDir, 'config.toml')).mode & 0o777).toBe(0o600)
     expect(readdirSync(configDir).sort()).toEqual(['codex-models.json', 'config.toml'])
@@ -314,6 +329,7 @@ describe('codexQuickConfig', () => {
     const script = buildWindowsCmdCodexQuickConfigScript({ ...input, apiKey: 'sk-' + 'x'.repeat(20000), modelCatalogContent: catalog })
     for (let i = 0; i < 2; i++) {
       const result = runner.run(script)
+      expect(result.error).toBeUndefined()
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toContain('Codex 配置成功。')
     }
@@ -324,7 +340,7 @@ describe('codexQuickConfig', () => {
     expect(catalogPath).toBe(join(runner.configDir, 'codex-models.json'))
     expect(readFileSync(catalogPath, 'utf8')).toBe(catalog)
     expect(readdirSync(runner.configDir).sort()).toEqual(['codex-models.json', 'config.toml'])
-  }, 60000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(process.platform === 'win32')('runs the downloaded CMD against existing config and catalog files', () => {
     const runner = psRunner(undefined, true)
@@ -341,7 +357,7 @@ describe('codexQuickConfig', () => {
       expect(readFileSync(join(runner.configDir, 'codex-models.json'), 'utf8')).toBe(catalog)
       expect(readdirSync(runner.configDir).sort()).toEqual(['codex-models.json', 'config.toml'])
     }
-  }, 60000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(process.platform === 'win32')('creates the config through CMD without PATH dependencies or inherited exit codes', () => {
     const runner = psRunner(undefined, true, { PATH: '', Path: '', ERRORLEVEL: '1' })
@@ -350,7 +366,7 @@ describe('codexQuickConfig', () => {
     expect(result.status, result.stdout + result.stderr).toBe(0)
     expect(readFileSync(join(runner.configDir, 'config.toml'), 'utf8')).toContain('experimental_bearer_token = "sk-secret-value"')
     expect(readdirSync(runner.configDir)).toEqual(['config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(process.platform === 'win32')('propagates a CMD failure exit code and keeps the existing config', () => {
     const runner = psRunner(undefined, true, { ERRORLEVEL: '0' })
@@ -361,17 +377,18 @@ describe('codexQuickConfig', () => {
     expect(result.status, result.stdout + result.stderr).toBe(1)
     expect(readFileSync(join(runner.configDir, 'config.toml'), 'utf8')).toBe('original config')
     expect(readdirSync(runner.configDir).sort()).toEqual(['codex-models.json', 'config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(Boolean(powershell))('reports Windows write failures without leftover temporary files', () => {
     const runner = psRunner()
     mkdirSync(runner.configDir, { recursive: true })
     mkdirSync(join(runner.configDir, 'config.toml'))
     const result = runner.run(buildWindowsCmdCodexQuickConfigScript(input))
+    expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
     expect(result.stdout).toContain('Codex 配置失败。')
     expect(readdirSync(runner.configDir)).toEqual(['config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(Boolean(powershell))('restores the original catalog when the config cannot be published', () => {
     const runner = psRunner()
@@ -379,19 +396,21 @@ describe('codexQuickConfig', () => {
     const originalCatalog = '{"models":[{"slug":"original-model"}]}'
     writeFileSync(join(runner.configDir, 'codex-models.json'), originalCatalog)
     const result = runner.run(buildWindowsCmdCodexQuickConfigScript({ ...input, modelCatalogContent: '{"models":[]}' }))
+    expect(result.error).toBeUndefined()
     expect(result.status, result.stdout + result.stderr).toBe(1)
     expect(result.stdout).toContain('Codex 配置失败。')
     expect(readFileSync(join(runner.configDir, 'codex-models.json'), 'utf8')).toBe(originalCatalog)
     expect(readdirSync(runner.configDir).sort()).toEqual(['codex-models.json', 'config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(Boolean(powershell))('removes a newly published catalog when the config cannot be published', () => {
     const runner = psRunner()
     mkdirSync(join(runner.configDir, 'config.toml'), { recursive: true })
     const result = runner.run(buildWindowsCmdCodexQuickConfigScript({ ...input, modelCatalogContent: '{}' }))
+    expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
     expect(readdirSync(runner.configDir)).toEqual(['config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(Boolean(powershell))('keeps a recoverable backup and reports its path if rollback also fails', () => {
     const runner = psRunner()
@@ -402,13 +421,14 @@ describe('codexQuickConfig', () => {
     const script = buildWindowsCmdCodexQuickConfigScript({ ...input, modelCatalogContent: '{}' })
       .replace('Publish-File $catalogBackup $catalogFile', "throw 'Catalog is locked during rollback'")
     const result = runner.run(script)
+    expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
     const backup = readdirSync(runner.configDir).find((name) => name.startsWith('codex-models.json.backup.'))
     expect(backup).toBeDefined()
     expect(readFileSync(join(runner.configDir, backup!), 'utf8')).toBe(originalCatalog)
     expect(result.stdout).toContain(join(runner.configDir, backup!))
     expect(readdirSync(runner.configDir).some((name) => name.includes('.tmp.'))).toBe(false)
-  }, 30000)
+  }, windowsTestTimeoutMs)
 
   it.runIf(Boolean(powershell))('cleans Windows staging files and preserves the config on catalog decode failure', () => {
     const runner = psRunner()
@@ -417,8 +437,9 @@ describe('codexQuickConfig', () => {
     const script = buildWindowsCmdCodexQuickConfigScript({ ...input, modelCatalogContent: '{}' })
       .replace(/(\$catalogPayload = @\(\s*)'[^']*'/, "$1'@@@'")
     const result = runner.run(script)
+    expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
     expect(readFileSync(join(runner.configDir, 'config.toml'), 'utf8')).toBe('original config')
     expect(readdirSync(runner.configDir)).toEqual(['config.toml'])
-  }, 30000)
+  }, windowsTestTimeoutMs)
 })

@@ -48,6 +48,8 @@
 
 账号检测、失败处置和自动恢复，请阅读[质量运维](docs/account-quality-operations.md)；BPS OAuth 登录、工具兼容和 403 恢复配置，请阅读[Excel / BPS 协议](docs/excel-bps.md)。
 
+2.19.2 新增默认关闭的账号性能监控，支持指标阈值和独立暂停；启用、人工解除与区域传播边界见[账号性能监控](docs/account-performance-monitor.md)。
+
 已经托管账号或完成部署，想在 Codex 中使用？请阅读[新人入门：使用 Sub2API 接入 Codex](docs/新人入门-使用Sub2API.md)，按步骤创建 API Key、配置 Cockpit Tools 并验证调用。
 
 
@@ -82,6 +84,12 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 - **管理后台** - Web 界面进行监控和管理
 - **外部系统集成** - 支持通过 iframe 嵌入外部系统（如工单等），扩展管理后台功能
 
+### OpenAI API Key 的 UltraFast 档位计费
+
+账号新增/编辑页提供默认关闭的 **UltraFast 档位计费** 开关。开启后，按该账号所有有价 token 模型的上游响应 `service_tier` 结算；`ultrafast` 使用标准单价×6，包含缓存读写，再应用有效账号/分组倍率。响应未返回档位时按请求档位回退，该开关不强制上游加速。
+
+客户端明确请求 `ultrafast` 且最终仍按该档位结算时，关闭此开关也按6倍收费。开关控制是否采用上游响应升档，不豁免客户端请求的 UltraFast 价格。配置字段、响应降档、长上下文和计费范围见 [UltraFast 账号计费说明](docs/openai-ultrafast-billing.md)。
+
 ### Anthropic API Key 客户端模拟与计费
 
 创建或编辑 Anthropic API Key 账号时, 可开启 "模拟 Claude Code 客户端", 为要求 Claude Code 客户端的上游补齐缺失的请求头, system 身份句和会话信息. 原有 system 指令及缓存断点会保留, count_tokens 仅补请求头. 此选项与 "抹除 Claude Code 身份" 互斥, 同时存储为开启时以抹除身份为准. 身份句可能影响模型自述.
@@ -93,6 +101,12 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 ### 首次初始化管理员
 
 全新自动安装时，`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 留空会生成随机登录邮箱和密码，可从首次启动日志中的 `Generated admin` 获取。显式指定时，邮箱必须符合登录格式，密码必须为 8–72 字节。已有管理员或已有用户的部署跳过创建与此项校验。详细配置见 [部署说明](deploy/README.md)。
+
+## OpenAI Images 2.6
+
+内置 `gpt-image-2.6-flare` 和 `gpt-image-2.6-sunburst`，支持文生图、图片编辑及流式返回，沿用 PNG、JPEG、WebP 输出链路。`complexity` 接受 `low`、`medium`、`high`，省略时使用上游默认值；JSON 和 multipart 请求均可传入。
+
+OAuth 账号优先使用 Codex 图片端点，API Key 账号使用标准 `/v1/images/generations`、`/v1/images/edits`。显式账号模型白名单仍按配置执行，需要自行勾选新型号。内置价格和缺价回退采用两个型号的官方 token 价格，分组和渠道自定义计费继续优先。参数及价格见 [图片生成指南](https://developers.openai.com/api/docs/guides/image-generation)、[Flare](https://developers.openai.com/api/docs/models/gpt-image-2.6-flare) 和 [Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst)。
 
 ## API Key 并发等待队列
 

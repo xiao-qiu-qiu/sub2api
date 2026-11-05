@@ -146,6 +146,7 @@ docs/*
 !docs/anonymous-api-guard.md
 !docs/registration-email-alias-block.md
 !docs/openai-ws-sse-acceleration.md
+!docs/openai-ultrafast-billing.md
 !docs/openai-ws-mode.md
 !docs/openai-outbound-identity.md
 !docs/codex-fingerprint-fusion.md
@@ -212,6 +213,7 @@ issues/
 **/*.sealed
 
 !docs/astra-candy-beta.md
+!docs/api-key-model-policy.md
 
 # PR screenshots belong in PR attachments; retain text evidence in docs/screenshots.
 !docs/screenshots/

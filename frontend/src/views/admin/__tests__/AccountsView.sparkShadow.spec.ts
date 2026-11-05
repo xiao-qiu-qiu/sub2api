@@ -222,7 +222,7 @@ const mountViewWithRow = () =>
         DataTable: {
           props: ['data', 'columns', 'loading'],
           template: `<div>
-            <div v-for="(row, idx) in (data || [])" :key="idx">
+            <div v-for="(row, idx) in (data || [])" :key="idx" :data-account-id="row.id">
               <slot name="cell-name" :row="row" :value="row.name" />
               <slot name="cell-platform_type" :row="row" />
             </div>
@@ -324,7 +324,7 @@ describe('admin AccountsView — 账号行展示', () => {
     const wrapper = mountViewWithRow()
     await flushPromises()
 
-    const links = wrapper.findAll('a')
+    const links = wrapper.findAll('[data-account-id] a')
     expect(links).toHaveLength(1)
     const [link] = links
     expect(link.text()).toBe('relay-account')
@@ -345,6 +345,9 @@ describe('admin AccountsView — 账号行展示', () => {
     expect(tooltip.classes()).toEqual(expect.arrayContaining(['self-start']))
     expect(wrapper.text()).toContain('oauth-account')
     expect(wrapper.text()).toContain('invalid-url')
+    expect(wrapper.get('[data-account-id="102"]').find('a').exists()).toBe(false)
+    expect(wrapper.get('[data-account-id="103"]').find('a').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="manage-upstream-channels"]').attributes('href')).toBe('/admin/upstream-channels')
 
     wrapper.unmount()
   })

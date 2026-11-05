@@ -1,3 +1,6 @@
+import autoCredit from './autoCredit'
+import accountPerformance from './accountPerformance'
+import apiKeyModelPolicy from './apiKeyModelPolicy'
 import lottery from './lottery'
 import accountTestTiming from './accountTestTiming'
 import openaiAuth from './openaiAuth'
@@ -37,6 +40,9 @@ import trash from './trash'
 
 export default {
   trash,
+  apiKeyModelPolicy,
+  autoCredit,
+  accountPerformance,
   lottery,
   accountTestTiming,
   openaiAuth,

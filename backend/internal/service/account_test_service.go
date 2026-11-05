@@ -402,6 +402,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.sendErrorAndEnd(c, "Account not found")
 	}
 	bindAccountTestPlatform(c, account)
+	recordQualityBatchRoute(c, account, modelID, account.Platform+":"+account.GetAPIProtocol())
 	if expected, ok := ctx.Value(modelTraceContextKey{}).(modelTraceEnvironment); ok {
 		actual, err := modelTraceEnvironmentForAccount(account, modelID)
 		if err != nil || actual != expected {
@@ -424,6 +425,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	// interactions, but intentionally do not send their placeholder credentials
 	// to an upstream provider.
 	if account.IsSyntheticUITest() {
+		recordQualityBatchRoute(c, account, modelID, "synthetic")
 		testModelID := modelID
 		if testModelID == "" {
 			testModelID = claude.DefaultTestModel
@@ -484,6 +486,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 }
 
 func (s *AccountTestService) testPrismBrowserConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+	recordQualityBatchRoute(c, account, modelID, "openai:prism")
 	if s.openaiGatewayService == nil {
 		return s.sendErrorAndEnd(c, "Prism gateway service is unavailable")
 	}
@@ -913,6 +916,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 
 // testOpenAIAccountConnection tests an OpenAI account's connection
 func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account *Account, modelID string, prompt string, mode string, opts ...AccountTestOptions) error {
+	recordQualityBatchRoute(c, account, modelID, "openai:account")
 	ctx := c.Request.Context()
 	mode = normalizeAccountTestMode(mode)
 	if account.IsExcelOAuth() {
@@ -926,6 +930,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	if account.IsSIWCEnabled() {
+		recordQualityBatchRoute(c, account, modelID, "openai:siwc")
 		if s.openaiGatewayService == nil {
 			return s.sendErrorAndEnd(c, "SIWC gateway is unavailable")
 		}
@@ -947,6 +952,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// Image models use the image test below, which applies the gateway's BPS
 	// image routing; the text BPS test would send them to /responses.
 	if account.IsExcelBPSEnabled() && s.openaiGatewayService != nil && s.openaiGatewayService.excelBPSGloballyEnabled(ctx) && !isOpenAIImageModel(account.GetMappedModel(strings.TrimSpace(modelID))) {
+		recordQualityBatchRoute(c, account, modelID, "openai:bps")
 		return s.testExcelBPSAccountConnection(c, account, modelID, prompt)
 	}
 
@@ -2443,6 +2449,10 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	}
 	applyModelTracePayload(ctx, payload)
 	payloadBytes, _ := json.Marshal(payload)
+	payloadBytes, err := normalizeMistralChatRequest(account, payloadBytes)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 /v1/chat/completions 测试连接"})
@@ -2488,7 +2498,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) returned %d: %s", resp.StatusCode, string(body)))
 	}
 
-	return s.processOpenAIChatCompletionsStream(accountTestResponseContext(c, resp), resp.Body)
+	return s.processOpenAIChatCompletionsStream(accountTestResponseContext(c, resp), resp.Body, account)
 }
 
 // testOpenAICompactConnection probes native remote compaction v2 (streaming
@@ -3244,7 +3254,7 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 
 // processOpenAIChatCompletionsStream processes SSE chunks from the
 // OpenAI-compatible Chat Completions API.
-func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, body io.Reader) error {
+func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, body io.Reader, account *Account) error {
 	defer accountTestStream(c)()
 	reader := bufio.NewReader(body)
 	usage := startPelicanTestStream(c, "chat")
@@ -3284,8 +3294,12 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 			return nil
 		}
 
+		normalized, normalizeErr := normalizeMistralChatResponse(account, []byte(jsonStr), false)
+		if normalizeErr != nil {
+			return s.sendErrorAndEnd(c, normalizeErr.Error())
+		}
 		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		if err := json.Unmarshal(normalized, &data); err != nil {
 			return s.sendErrorAndEnd(c, "Invalid Chat Completions response from /v1/chat/completions: expected JSON data")
 		}
 		seenJSON = true

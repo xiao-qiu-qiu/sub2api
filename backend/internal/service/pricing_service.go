@@ -49,6 +49,19 @@ var (
 		Mode:                    "image_generation",
 		SupportsPromptCaching:   true,
 	}
+	// Official GPT Image 2.6 rates; keep a separate fallback when mirrors lag.
+	// https://developers.openai.com/api/docs/models/gpt-image-2.6-flare
+	// https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst
+	openAIGPTImage26FallbackPricing = &LiteLLMModelPricing{
+		InputCostPerToken:            5e-06,
+		CacheReadInputTokenCost:      1.25e-06,
+		InputCostPerImageToken:       8e-06,
+		CacheReadInputImageTokenCost: 2e-06,
+		OutputCostPerImageToken:      3e-05,
+		LiteLLMProvider:              "openai",
+		Mode:                         "image_generation",
+		SupportsPromptCaching:        true,
+	}
 	openAIGPT54FallbackPricing = &LiteLLMModelPricing{
 		InputCostPerToken:       2.5e-06, // $2.5 per MTok
 		OutputCostPerToken:      1.5e-05, // $15 per MTok
@@ -1688,8 +1701,11 @@ func (s *PricingService) matchOpenAIModel(model string) *LiteLLMModelPricing {
 		return openAIGPT54FallbackPricing
 	}
 
-	// Remote price mirrors can lag new releases. Never bill GPT Image 2.5
+	// Remote price mirrors can lag new releases. Never bill GPT Image 2.5/2.6
 	// using the older image model's rates when its entry is absent.
+	if model == "gpt-image-2.6-flare" || model == "gpt-image-2.6-sunburst" {
+		return openAIGPTImage26FallbackPricing
+	}
 	for _, imageModel := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"} {
 		if model == imageModel || model == imageModel+"-2026-09-08" {
 			return openAIGPTImage25FallbackPricing

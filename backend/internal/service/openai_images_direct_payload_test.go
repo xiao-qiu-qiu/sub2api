@@ -52,6 +52,156 @@ func TestCodexDirectImagesMultipartEdit(t *testing.T) {
 	require.False(t, gjson.GetBytes(upstreamBody, "tools").Exists())
 }
 
+func TestOpenAIImagesComplexityPayloads(t *testing.T) {
+	for _, model := range []string{"gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		for _, complexity := range []string{"", "low", "medium", "high"} {
+			for _, format := range []string{"json-generate", "json-edit", "multipart-edit"} {
+				t.Run(model+"/"+complexity+"/"+format, func(t *testing.T) {
+					endpoint := openAIImagesGenerationsEndpoint
+					if format != "json-generate" {
+						endpoint = openAIImagesEditsEndpoint
+					}
+					contentType := "application/json"
+					var body []byte
+					if format == "multipart-edit" {
+						var buffer bytes.Buffer
+						writer := multipart.NewWriter(&buffer)
+						require.NoError(t, writer.WriteField("model", model))
+						require.NoError(t, writer.WriteField("prompt", "edit"))
+						if complexity != "" {
+							require.NoError(t, writer.WriteField("complexity", complexity))
+						}
+						part, err := writer.CreateFormFile("image", "input.png")
+						require.NoError(t, err)
+						_, err = part.Write([]byte("png-content"))
+						require.NoError(t, err)
+						require.NoError(t, writer.Close())
+						body, contentType = buffer.Bytes(), writer.FormDataContentType()
+					} else {
+						payload := map[string]any{"model": model, "prompt": "draw"}
+						if complexity != "" {
+							payload["complexity"] = complexity
+						}
+						if endpoint == openAIImagesEditsEndpoint {
+							payload["images"] = []map[string]string{{"image_url": "data:image/png;base64,AA=="}}
+						}
+						var err error
+						body, err = json.Marshal(payload)
+						require.NoError(t, err)
+					}
+					c, _ := newOpenAIImagesTestContext(t, body)
+					c.Request.URL.Path = endpoint
+					c.Request.Header.Set("Content-Type", contentType)
+					parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
+					require.NoError(t, err)
+					require.Equal(t, complexity, parsed.Complexity)
+					require.Equal(t, complexity != "", parsed.HasNativeOptions)
+
+					direct, target, err := buildOpenAIImagesOAuthPayload(parsed, model)
+					require.NoError(t, err)
+					require.Equal(t, "https://chatgpt.com/backend-api/codex"+strings.TrimPrefix(endpoint, "/v1"), target)
+					require.Equal(t, complexity, gjson.GetBytes(direct, "complexity").String())
+					require.Equal(t, complexity != "", gjson.GetBytes(direct, "complexity").Exists(), "omission must keep the upstream default")
+					if parsed.IsEdits() {
+						require.Len(t, gjson.GetBytes(direct, "images").Array(), 1)
+					}
+
+					responses, err := buildOpenAIImagesResponsesRequest(parsed, model)
+					require.NoError(t, err)
+					require.Equal(t, complexity, gjson.GetBytes(responses, "tools.0.complexity").String())
+					require.Equal(t, complexity != "", gjson.GetBytes(responses, "tools.0.complexity").Exists())
+				})
+			}
+		}
+	}
+}
+
+func TestOpenAIImagesComplexityNullUsesUpstreamDefault(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw","complexity":null}`, model))
+		c, _ := newOpenAIImagesTestContext(t, body)
+		parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
+		require.NoError(t, err)
+		payload, _, err := buildOpenAIImagesOAuthPayload(parsed, model)
+		require.NoError(t, err)
+		require.False(t, gjson.GetBytes(payload, "complexity").Exists())
+	}
+}
+
+func TestOpenAIImagesComplexityRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{`true`, `1`, `{}`, `[]`, `""`, `"auto"`, `"LOW"`, `"unknown"`} {
+		t.Run("json/"+value, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"model":"gpt-image-2.6-flare","prompt":"draw","complexity":%s}`, value))
+			c, _ := newOpenAIImagesTestContext(t, body)
+			_, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
+			require.ErrorContains(t, err, "complexity")
+		})
+	}
+	for _, value := range []string{"", "auto", "LOW", "unknown"} {
+		t.Run("multipart/"+value, func(t *testing.T) {
+			var buffer bytes.Buffer
+			writer := multipart.NewWriter(&buffer)
+			require.NoError(t, writer.WriteField("model", "gpt-image-2.6-sunburst"))
+			require.NoError(t, writer.WriteField("prompt", "draw"))
+			require.NoError(t, writer.WriteField("complexity", value))
+			require.NoError(t, writer.Close())
+			c, _ := newOpenAIImagesTestContext(t, buffer.Bytes())
+			c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+			_, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, buffer.Bytes())
+			require.ErrorContains(t, err, "complexity")
+		})
+	}
+}
+
+func TestGPTImage26APIKeyPreservesComplexity(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		for _, multipartRequest := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/multipart=%t", model, multipartRequest), func(t *testing.T) {
+				endpoint := openAIImagesGenerationsEndpoint
+				contentType := "application/json"
+				body := []byte(`{"model":"gpt-image-2","prompt":"draw","complexity":"medium"}`)
+				if multipartRequest {
+					endpoint = openAIImagesEditsEndpoint
+					var buffer bytes.Buffer
+					writer := multipart.NewWriter(&buffer)
+					for key, value := range map[string]string{"model": "gpt-image-2", "prompt": "edit", "complexity": "medium"} {
+						require.NoError(t, writer.WriteField(key, value))
+					}
+					part, err := writer.CreateFormFile("image", "input.png")
+					require.NoError(t, err)
+					_, err = part.Write([]byte("original-image"))
+					require.NoError(t, err)
+					require.NoError(t, writer.Close())
+					body, contentType = buffer.Bytes(), writer.FormDataContentType()
+				}
+				c, _ := newOpenAIImagesTestContext(t, body)
+				c.Request.URL.Path = endpoint
+				c.Request.Header.Set("Content-Type", contentType)
+				upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
+				svc := newOpenAIImagesTestService(upstream)
+				parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+				require.NoError(t, err)
+				account := newOpenAIImagesAPIKeyAccount()
+				account.Credentials["model_mapping"] = map[string]any{"gpt-image-2": model}
+				result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
+				require.NoError(t, err)
+				require.Equal(t, endpoint, upstream.lastReq.URL.Path)
+				require.Equal(t, model, result.UpstreamModel)
+				forwarded := &OpenAIImagesRequest{Endpoint: endpoint}
+				if multipartRequest {
+					require.NoError(t, parseOpenAIImagesMultipartRequest(upstream.lastBody, upstream.lastReq.Header.Get("Content-Type"), forwarded))
+					require.Len(t, forwarded.Uploads, 1)
+					require.Equal(t, []byte("original-image"), forwarded.Uploads[0].Data)
+				} else {
+					require.NoError(t, parseOpenAIImagesJSONRequest(upstream.lastBody, forwarded))
+				}
+				require.Equal(t, model, forwarded.Model)
+				require.Equal(t, "medium", forwarded.Complexity)
+			})
+		}
+	}
+}
+
 func TestCodexDirectImagesPricingAndUsage(t *testing.T) {
 	prices := &PricingService{pricingData: map[string]*LiteLLMModelPricing{"gpt-image-2": {InputCostPerToken: 1}}}
 	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08"} {

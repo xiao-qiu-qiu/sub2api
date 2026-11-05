@@ -18,7 +18,7 @@ func directImagesTestAccount() *Account {
 }
 
 func TestCodexDirectImagesRouting(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08"} {
+	for _, model := range []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
 		t.Run(model, func(t *testing.T) {
 			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"  原样保留 prompt  ","quality":"max","size":"auto","response_format":"url","extra":{"preserve":true}}`, model))
 			c, rec := newOpenAIImagesTestContext(t, body)
@@ -71,7 +71,8 @@ func TestCodexDirectImagesMappingBeforeRouting(t *testing.T) {
 			require.Equal(t, "gpt-image-2.5-flare", gjson.GetBytes(upstream.lastBody, "model").String())
 		})
 	}
-	for _, model := range []string{"gpt-image-1", "gpt-image-future"} {
+	for _, model := range []string{"gpt-image-1", "gpt-image-future", "gpt-image-2.6-flare-2026-11-05", "gpt-image-2.6-sunburst-2026-11-05", "gpt-image-2.6-flare-preview"} {
+		require.False(t, usesCodexDirectImages(model))
 		body, target, err := buildOpenAIImagesOAuthPayload(&OpenAIImagesRequest{Prompt: "draw"}, model)
 		require.NoError(t, err)
 		require.Equal(t, chatgptCodexURL, target)
@@ -80,34 +81,134 @@ func TestCodexDirectImagesMappingBeforeRouting(t *testing.T) {
 	}
 }
 
-func TestCodexDirectImagesHTTPErrorFallbacksOnlyWhenEndpointUnavailable(t *testing.T) {
-	for _, status := range []int{400, 401, 403, 429, 500, 502, 503, 404, 405} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			calls := 0
-			upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-				calls++
-				if calls == 1 {
+func TestGPTImage26DirectProductionAndAccountTest(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
+			t.Run(model+"/"+accountType, func(t *testing.T) {
+				const alias = "gpt-image-2"
+				account := directImagesTestAccount()
+				account.Type = accountType
+				account.Credentials["model_mapping"] = map[string]any{alias: model}
+				calls := 0
+				upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+					calls++
 					require.Equal(t, "/backend-api/codex/images/generations", req.URL.Path)
-					return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"server_error","message":"image request rejected"}}`))}, nil
-				}
-				require.Contains(t, req.URL.Path, "/backend-api/codex/responses")
-				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\"}]}}\n\n"))}, nil
-			}}
-			body := []byte(`{"model":"gpt-image-2.5-sunburst","prompt":"draw"}`)
-			c, _ := newOpenAIImagesTestContext(t, body)
-			svc := newOpenAIImagesTestService(upstream)
-			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
-			require.NoError(t, err)
-			result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
-			if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+					body, err := io.ReadAll(req.Body)
+					require.NoError(t, err)
+					require.Equal(t, model, gjson.GetBytes(body, "model").String())
+					require.False(t, gjson.GetBytes(body, "tools").Exists(), "2.6 must not be sent through a Luna Responses driver")
+					return openAIImagesJSONResponse(), nil
+				}}
+				body := []byte(`{"model":"gpt-image-2","prompt":"draw"}`)
+				c, _ := newOpenAIImagesTestContext(t, body)
+				gateway := newOpenAIImagesTestService(upstream)
+				parsed, err := gateway.ParseOpenAIImagesRequest(c, body)
 				require.NoError(t, err)
-				require.NotNil(t, result)
-				require.Equal(t, 2, calls)
-			} else {
-				require.Error(t, err)
-				require.Equal(t, 1, calls)
+				result, err := gateway.ForwardImages(context.Background(), c, account, body, parsed, "")
+				require.NoError(t, err)
+				require.Equal(t, model, result.UpstreamModel)
+				require.Equal(t, 1, calls, "successful forwarding must make only one direct request")
+
+				c, recorder := newOpenAIImagesTestContext(t, body)
+				tester := &AccountTestService{httpUpstream: upstream}
+				require.NoError(t, tester.testOpenAIImageOAuth(c, context.Background(), account, alias, "draw"))
+				require.Equal(t, 2, calls, "the admin test must use the same direct endpoint")
+				require.Contains(t, recorder.Body.String(), `"success":true`)
+				require.NotContains(t, recorder.Body.String(), "gpt-5.6-luna")
+			})
+		}
+	}
+}
+
+func TestGPTImage26DirectEditsAndStreaming(t *testing.T) {
+	encoded := encodeOpenAIImageTestPNG(t, 1536, 1024)
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		for _, endpoint := range []string{openAIImagesGenerationsEndpoint, openAIImagesEditsEndpoint} {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%t", model, endpoint, stream), func(t *testing.T) {
+					body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw","size":"1024x1024","complexity":"low","stream":%t,"images":[{"image_url":"data:image/png;base64,AA=="}]}`, model, stream))
+					c, _ := newOpenAIImagesTestContext(t, body)
+					c.Request.URL.Path = endpoint
+					calls := 0
+					upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+						calls++
+						require.Equal(t, "/backend-api/codex"+strings.TrimPrefix(endpoint, "/v1"), req.URL.Path)
+						payload, err := io.ReadAll(req.Body)
+						require.NoError(t, err)
+						require.Equal(t, model, gjson.GetBytes(payload, "model").String())
+						require.Equal(t, "low", gjson.GetBytes(payload, "complexity").String())
+						require.Equal(t, "1024x1024", gjson.GetBytes(payload, "size").String())
+						require.False(t, gjson.GetBytes(payload, "tools").Exists())
+						if endpoint == openAIImagesEditsEndpoint {
+							require.Len(t, gjson.GetBytes(payload, "images").Array(), 1)
+						}
+						response := fmt.Sprintf(`{"data":[{"b64_json":%q}]}`, encoded)
+						if stream {
+							response = fmt.Sprintf("data: {\"type\":\"image_generation.completed\",\"b64_json\":%q}\n\n", encoded)
+						}
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(response))}, nil
+					}}
+					svc := newOpenAIImagesTestService(upstream)
+					parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+					require.NoError(t, err)
+					result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
+					require.NoError(t, err)
+					require.Equal(t, 1, calls)
+					require.Equal(t, model, result.UpstreamModel)
+					require.Equal(t, 1, result.ImageCount)
+					require.Equal(t, []string{"1536x1024"}, result.ImageOutputSizes)
+					require.Empty(t, result.UpstreamResponseModel, "a response without model must not invent a served model")
+				})
 			}
-		})
+		}
+	}
+}
+
+func TestGPTImage26DoesNotEnableBPS(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		require.False(t, excelBPSImagesAccount(model).IsExcelBPSImagesEnabledForModel(model))
+	}
+	require.True(t, excelBPSImagesAccount("gpt-image-2").IsExcelBPSImagesEnabledForModel("gpt-image-2"))
+}
+
+func TestCodexDirectImagesHTTPErrorFallbacksOnlyWhenEndpointUnavailable(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		for _, endpoint := range []string{openAIImagesGenerationsEndpoint, openAIImagesEditsEndpoint} {
+			for _, status := range []int{400, 401, 403, 429, 500, 502, 503, 404, 405} {
+				t.Run(fmt.Sprintf("%s/%s/%d", model, endpoint, status), func(t *testing.T) {
+					calls := 0
+					upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+						calls++
+						payload, err := io.ReadAll(req.Body)
+						require.NoError(t, err)
+						if calls == 1 {
+							require.Equal(t, "/backend-api/codex"+strings.TrimPrefix(endpoint, "/v1"), req.URL.Path)
+							require.Equal(t, model, gjson.GetBytes(payload, "model").String())
+							return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"server_error","message":"image request rejected"}}`))}, nil
+						}
+						require.Equal(t, "/backend-api/codex/responses", req.URL.Path)
+						require.Equal(t, model, gjson.GetBytes(payload, "tools.0.model").String())
+						require.Equal(t, "low", gjson.GetBytes(payload, "tools.0.complexity").String())
+						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\"}]}}\n\n"))}, nil
+					}}
+					body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw","complexity":"low","images":[{"image_url":"data:image/png;base64,AA=="}]}`, model))
+					c, _ := newOpenAIImagesTestContext(t, body)
+					c.Request.URL.Path = endpoint
+					svc := newOpenAIImagesTestService(upstream)
+					parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+					require.NoError(t, err)
+					result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
+					if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+						require.NoError(t, err)
+						require.NotNil(t, result)
+						require.Equal(t, 2, calls)
+					} else {
+						require.Error(t, err)
+						require.Equal(t, 1, calls)
+					}
+				})
+			}
+		}
 	}
 }
 

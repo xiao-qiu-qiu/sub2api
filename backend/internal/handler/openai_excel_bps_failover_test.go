@@ -5,6 +5,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -210,6 +211,7 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 		{name: "json", retryAfter: "30", wantRetryAfter: "30"},
 		{name: "stream request", retryAfter: "30", wantRetryAfter: "30", stream: true},
 		{name: "load-aware scheduling", retryAfter: "30", wantRetryAfter: "30", loadBatch: true},
+		{name: "load-aware stream request", retryAfter: "30", wantRetryAfter: "30", stream: true, loadBatch: true},
 		{name: "invalid retry after", retryAfter: "soon"},
 		{name: "retry after beyond a week", retryAfter: "999999"},
 	} {
@@ -223,7 +225,7 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 			calls := upstream.calls()
 			require.Len(t, calls, 2)
 			require.NotEqual(t, calls[0], calls[1])
-			require.Equal(t, http.StatusTooManyRequests, rec.Code)
+			require.Equal(t, http.StatusTooManyRequests, rec.Code, "exhausting upstream 429s must preserve the rate limit")
 			require.Equal(t, "rate_limit_error", gjson.Get(rec.Body.String(), "error.type").String())
 			require.Equal(t, "basispoints_rate_limited", gjson.Get(rec.Body.String(), "error.code").String())
 			require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
@@ -235,9 +237,54 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 			handler.Responses(c)
 
 			require.Len(t, upstream.calls(), 2)
-			require.Equal(t, http.StatusTooManyRequests, rec.Code)
+			require.Equal(t, http.StatusTooManyRequests, rec.Code, "BPS cooldowns must remain a rate limit on subsequent requests")
 			require.Equal(t, "rate_limit_error", gjson.Get(rec.Body.String(), "error.type").String())
 			require.Contains(t, rec.Body.String(), "rate-limited")
+		})
+	}
+}
+
+func TestOpenAIResponsesExcelBPSSelectionFailureClassification(t *testing.T) {
+	fallback := noAccountErrorClassification{
+		Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: "Service temporarily unavailable",
+		Diagnosis: service.ModelAvailabilityDiagnosis{
+			Complete: true, HasAccountsInPool: true, HasModelSupport: true,
+			ConfiguredAccounts: 2, ModelSupportedAccounts: 2,
+		},
+	}
+	modelNotFound := noAccountErrorClassification{
+		Status: http.StatusNotFound, ErrType: "model_not_found", Code: "model_not_found", ModelNotFound: true,
+	}
+	modelCapacity := fallback
+	modelCapacity.Code = "model_capacity_exhausted"
+	bpsEmpty := fmt.Errorf("%w (pool=2, filtered: excel_bps_rate_limited=2)", service.ErrNoAvailableAccounts)
+	for _, tc := range []struct {
+		name     string
+		err      error
+		fallback noAccountErrorClassification
+		status   int
+		code     string
+	}{
+		{name: "BPS cooldown overrides generic empty selection", err: bpsEmpty, fallback: fallback, status: 429},
+		{name: "ordinary empty selection", err: service.ErrNoAvailableAccounts, fallback: fallback, status: 503, code: "no_available_accounts"},
+		{name: "persisted quota diagnosis", err: bpsEmpty, fallback: modelCapacity, status: 503, code: "model_capacity_exhausted"},
+		{name: "unsupported model", err: bpsEmpty, fallback: modelNotFound, status: 404, code: "model_not_found"},
+		{name: "repository failure", err: errors.New("database unavailable"), fallback: fallback, status: 503},
+		{name: "zero BPS cooldowns", err: fmt.Errorf("%w (excel_bps_rate_limited=0)", service.ErrNoAvailableAccounts), fallback: fallback, status: 503, code: "no_available_accounts"},
+		{name: "other rate limit", err: fmt.Errorf("%w (model_rate_limited=2)", service.ErrNoAvailableAccounts), fallback: fallback, status: 503, code: "no_available_accounts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyOpenAIResponsesSelectionFailure(tc.err, tc.fallback)
+			require.Equal(t, tc.status, got.Status)
+			require.Equal(t, tc.code, got.Code)
+			require.Equal(t, tc.fallback.Diagnosis, got.Diagnosis)
+			if tc.status == http.StatusTooManyRequests {
+				require.Equal(t, "rate_limit_error", got.ErrType)
+				require.Contains(t, got.Message, "rate-limited")
+			} else {
+				require.Equal(t, tc.fallback.ErrType, got.ErrType)
+				require.Equal(t, tc.fallback.Message, got.Message)
+			}
 		})
 	}
 }

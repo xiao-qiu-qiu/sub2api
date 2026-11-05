@@ -52,6 +52,15 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gpt-6-luna')
   })
 
+  it('openai 图片目录保留旧型号并提供两个精确的 2.6 型号', () => {
+    const models = getModelsByPlatform('openai')
+    for (const model of ['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
+      expect(models.filter(id => id === model)).toHaveLength(1)
+    }
+    expect(models).not.toContain('gpt-image-2.6-flare-2026-11-05')
+    expect(models).not.toContain('gpt-image-2.6-sunburst-2026-11-05')
+  })
+
   it('openai 预设映射包含 GPT-6 别名和 Astra', () => {
     expect(getPresetMappingsByPlatform('openai')).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: 'GPT-6.1 Sol', from: 'gpt-6.1-sol', to: 'gpt-6.1-sol' }),
