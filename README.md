@@ -104,7 +104,9 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 
 ## OpenAI Images 2.6
 
-内置 `gpt-image-2.6-flare` 和 `gpt-image-2.6-sunburst`，支持文生图、图片编辑及流式返回，沿用 PNG、JPEG、WebP 输出链路。`complexity` 接受 `low`、`medium`、`high`，省略时使用上游默认值；JSON 和 multipart 请求均可传入。
+内置 `gpt-image-2.6-flare` 和 `gpt-image-2.6-sunburst`，支持文生图、图片编辑及流式返回。PNG、JPEG、WebP 保持原有行为；GIF 仅支持 `/v1/images/generations`，需要上游账号已开放 GIF 权限。`complexity` 接受 `low`、`medium`、`high`，省略时使用上游默认值；JSON 和 multipart 请求均可传入。
+
+GIF 使用 `output_format: "gif"`，可选 `frame_count`（2–64）和 `frame_duration_ms`（20–2000）；省略时沿用上游默认值 9 帧、200 ms，时长由上游按 10 ms 量化。帧参数仅能用于 GIF；GIF 不支持编辑、mask、流式、`partial_images`、`output_compression` 和 `prompt_rewriter`。尺寸可用 `auto` 或正数且均为 16 倍数的 `WIDTHxHEIGHT`，模型尺寸上限及总像素预算由上游校验。GIF 原始动画字节、MIME、尺寸和 `.gif` 存储扩展名贯通响应与后台预览，不回退 PNG 或 Responses 图片工具。帧数范围按当前图片生成指南的 2–64 实现，Python reference 仍列旧的 2–16 预览限制。
 
 OAuth 账号优先使用 Codex 图片端点，API Key 账号使用标准 `/v1/images/generations`、`/v1/images/edits`。显式账号模型白名单仍按配置执行，需要自行勾选新型号。内置价格和缺价回退采用两个型号的官方 token 价格，分组和渠道自定义计费继续优先。参数及价格见 [图片生成指南](https://developers.openai.com/api/docs/guides/image-generation)、[Flare](https://developers.openai.com/api/docs/models/gpt-image-2.6-flare) 和 [Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst)。
 

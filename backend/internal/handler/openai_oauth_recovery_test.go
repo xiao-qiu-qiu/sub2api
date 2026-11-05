@@ -704,6 +704,8 @@ func TestOpenAIOAuthRecoveryWS_HTTPBridgeRetriesCurrentTurn(t *testing.T) {
 			router.GET("/v1/responses", func(c *gin.Context) {
 				fixture, _ := oauthRecoveryHandlerRequest(t, c.Request.Context(), "responses")
 				key, _ := middleware2.GetAPIKeyFromContext(fixture)
+				// Later turns use previous_response_id to exercise OAuth recovery.
+				key.AllowLongContext = true
 				c.Set(string(middleware2.ContextKeyAPIKey), key)
 				c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 100, Concurrency: 2})
 				h.ResponsesWebSocket(c)

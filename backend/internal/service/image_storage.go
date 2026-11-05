@@ -227,6 +227,14 @@ func (u *ImageResultUploader) Rewrite(ctx context.Context, taskID string, result
 		if err != nil {
 			return nil, fmt.Errorf("image %d: %w", i, err)
 		}
+		var outputFormat string
+		_ = json.Unmarshal(item["output_format"], &outputFormat)
+		if outputFormat == "" {
+			_ = json.Unmarshal(top["output_format"], &outputFormat)
+		}
+		if outputFormat == "gif" && contentType != "image/gif" {
+			return nil, fmt.Errorf("image %d: expected GIF bytes, got %s", i, contentType)
+		}
 		key := u.buildKey(taskID, i, contentType)
 		url, err := u.storage.Save(ctx, key, contentType, data)
 		if err != nil {
@@ -258,6 +266,9 @@ func (u *ImageResultUploader) fetchImageBytes(ctx context.Context, item map[stri
 		if err := json.Unmarshal(raw, &b64); err == nil {
 			if b64 = strings.TrimSpace(b64); b64 != "" {
 				data, err := base64.StdEncoding.DecodeString(b64)
+				if err != nil && !strings.Contains(b64, "=") {
+					data, err = base64.RawStdEncoding.DecodeString(b64)
+				}
 				if err != nil {
 					return nil, "", fmt.Errorf("decode b64_json: %w", err)
 				}
@@ -317,7 +328,11 @@ func (u *ImageResultUploader) decodeImageDataURL(rawURL string) ([]byte, string,
 	if limit <= 0 {
 		limit = defaultImageMaxDownloadBytes
 	}
-	decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))
+	encoding := base64.StdEncoding
+	if !strings.Contains(payload, "=") {
+		encoding = base64.RawStdEncoding
+	}
+	decoder := base64.NewDecoder(encoding, strings.NewReader(payload))
 	data, err := io.ReadAll(io.LimitReader(decoder, limit+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("decode image data URL base64 payload: %w", err)

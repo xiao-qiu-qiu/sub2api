@@ -287,7 +287,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
-		if !parsed.Stream && !jsonKeepaliveStarted {
+		// GIF validation can fail after generation; keep its real HTTP status
+		// available until the complete animation has been checked.
+		if !parsed.Stream && parsed.OutputFormat != "gif" && !jsonKeepaliveStarted {
 			stopJSONKeepalive = service.StartOpenAIImagesJSONKeepalive(c, h.openAIImagesJSONKeepaliveInterval())
 			jsonKeepaliveStarted = true
 		}
@@ -330,6 +332,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			} else {
 				var imageUpstreamErr *service.OpenAIImagesUpstreamError
 				if errors.As(err, &imageUpstreamErr) {
+					service.WriteOpenAIImagesUpstreamErrorResponse(c, imageUpstreamErr)
 					retryableServerError := service.IsOpenAIImagesRetryableUpstreamError(imageUpstreamErr)
 					if retryableServerError {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestModel, false, result), false, nil, err)

@@ -45,6 +45,9 @@ func buildOpenAIImagesOAuthPayload(parsed *OpenAIImagesRequest, model string) ([
 	if parsed == nil {
 		return nil, "", fmt.Errorf("parsed images request is required")
 	}
+	if err := validateOpenAIImagesGIFRequest(parsed, model); err != nil {
+		return nil, "", err
+	}
 	if !usesCodexDirectImages(model) {
 		body, err := buildOpenAIImagesResponsesRequest(parsed, model)
 		return body, chatgptCodexURL, err
@@ -84,6 +87,12 @@ func buildOpenAIImagesOAuthPayload(parsed *OpenAIImagesRequest, model string) ([
 	}
 	if parsed.PartialImages != nil {
 		payload["partial_images"] = *parsed.PartialImages
+	}
+	if parsed.FrameCount != nil {
+		payload["frame_count"] = *parsed.FrameCount
+	}
+	if parsed.FrameDurationMS != nil {
+		payload["frame_duration_ms"] = *parsed.FrameDurationMS
 	}
 	if parsed.Stream {
 		payload["stream"] = true
@@ -206,12 +215,16 @@ func codexDirectImagesUsage(body []byte) (OpenAIUsage, bool) {
 	return usage, true
 }
 
-func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp *http.Response, c *gin.Context, parsed *OpenAIImagesRequest) (OpenAIUsage, int, []string, error) {
+func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, parsed *OpenAIImagesRequest) (OpenAIUsage, int, []string, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
 		if shouldClassifyOpenAIUpstreamStreamReadError(err) {
 			err = newOpenAIUpstreamStreamReadError(err)
 		}
+		return OpenAIUsage{}, 0, nil, err
+	}
+	body, err = s.prepareOpenAIImagesGIFResponse(ctx, c, account, resp, body, parsed)
+	if err != nil {
 		return OpenAIUsage{}, 0, nil, err
 	}
 	results, err := parseCodexDirectImagesResponse(body)
@@ -232,6 +245,12 @@ func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp 
 		}
 	}
 	for i, item := range gjson.GetBytes(body, "data").Array() {
+		if format := detectOpenAIImageResultFormat(item.Get("b64_json").String()); format != "" {
+			body, _ = sjson.SetBytes(body, fmt.Sprintf("data.%d.output_format", i), format)
+			if i == 0 {
+				body, _ = sjson.SetBytes(body, "output_format", format)
+			}
+		}
 		if actualSize := detectOpenAIImageResultSize(item.Get("b64_json").String()); actualSize != "" {
 			body, _ = sjson.SetBytes(body, fmt.Sprintf("data.%d.size", i), actualSize)
 			if i == 0 {

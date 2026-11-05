@@ -94,6 +94,9 @@ type OpenAIImagesRequest struct {
 	Style              string
 	OutputCompression  *int
 	PartialImages      *int
+	FrameCount         *int
+	FrameDurationMS    *int
+	HasPromptRewriter  bool
 	HasMask            bool
 	HasNativeOptions   bool
 	RequiredCapability OpenAIImagesCapability
@@ -254,6 +257,9 @@ func (s *OpenAIGatewayService) ParseOpenAIImagesRequest(c *gin.Context, body []b
 		}
 	}
 	mapping, _ := s.ResolveChannelMappingAndRestrict(c.Request.Context(), groupID, req.Model)
+	if err := validateOpenAIImagesGIFRequest(req, firstNonEmptyString(mapping.MappedModel, req.Model)); err != nil {
+		return nil, err
+	}
 	if err := s.ValidateImagesRouting(c, req, mapping.MappedModel); err != nil {
 		return nil, err
 	}
@@ -307,6 +313,19 @@ func parseOpenAIImagesJSONRequest(body []byte, req *OpenAIImagesRequest) error {
 	req.InputFidelity = strings.TrimSpace(gjson.GetBytes(body, "input_fidelity").String())
 	req.Style = strings.TrimSpace(gjson.GetBytes(body, "style").String())
 	req.HasMask = gjson.GetBytes(body, "mask").Exists()
+	req.HasPromptRewriter = gjson.GetBytes(body, "prompt_rewriter").Exists()
+	for _, field := range []struct {
+		name string
+		dest **int
+	}{{"frame_count", &req.FrameCount}, {"frame_duration_ms", &req.FrameDurationMS}} {
+		if value := gjson.GetBytes(body, field.name); value.Exists() && value.Type != gjson.Null {
+			n, ok := boundedJSONNonNegativeInt(value)
+			if !ok {
+				return fmt.Errorf("%s must be an integer", field.name)
+			}
+			*field.dest = &n
+		}
+	}
 	if outputCompression := gjson.GetBytes(body, "output_compression"); outputCompression.Exists() {
 		if outputCompression.Type != gjson.Number {
 			return fmt.Errorf("invalid output_compression field type")
@@ -391,6 +410,12 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 		}
 
 		fileName := strings.TrimSpace(part.FileName())
+		if name == "mask" {
+			req.HasMask = true
+		}
+		if name == "prompt_rewriter" {
+			req.HasPromptRewriter = true
+		}
 		if fileName != "" {
 			partContentType := strings.TrimSpace(part.Header.Get("Content-Type"))
 			if name == "mask" && len(data) > 0 {
@@ -481,6 +506,17 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 				return fmt.Errorf("invalid partial_images field value")
 			}
 			req.PartialImages = &n
+			req.HasNativeOptions = true
+		case "frame_count", "frame_duration_ms":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("%s must be an integer", name)
+			}
+			if name == "frame_count" {
+				req.FrameCount = &n
+			} else {
+				req.FrameDurationMS = &n
+			}
 			req.HasNativeOptions = true
 		default:
 			if isOpenAINativeImageOption(name) && value != "" {
@@ -621,6 +657,8 @@ func hasOpenAINativeImageOptions(exists func(path string) bool) bool {
 		"moderation",
 		"input_fidelity",
 		"partial_images",
+		"frame_count",
+		"frame_duration_ms",
 	} {
 		if exists(path) {
 			return true
@@ -631,7 +669,7 @@ func hasOpenAINativeImageOptions(exists func(path string) bool) bool {
 
 func isOpenAINativeImageOption(name string) bool {
 	switch strings.TrimSpace(strings.ToLower(name)) {
-	case "background", "quality", "complexity", "style", "output_format", "output_compression", "moderation", "input_fidelity", "partial_images":
+	case "background", "quality", "complexity", "style", "output_format", "output_compression", "moderation", "input_fidelity", "partial_images", "frame_count", "frame_duration_ms":
 		return true
 	default:
 		return false
@@ -752,6 +790,9 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		respBody := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
+		if gifErr := terminalOpenAIImagesGIFAccessError(c, parsed, resp.StatusCode, resp.Header, respBody); gifErr != nil {
+			return nil, gifErr
+		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
@@ -1031,7 +1072,13 @@ func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(
 	if err != nil {
 		return OpenAIUsage{}, 0, nil, err
 	}
-	body = s.backfillOpenAIImagesB64JSON(ctx, account, parsed, body)
+	if parsed == nil || parsed.OutputFormat != "gif" {
+		body = s.backfillOpenAIImagesB64JSON(ctx, account, parsed, body)
+	}
+	body, err = s.prepareOpenAIImagesGIFResponse(ctx, c, account, resp, body, parsed)
+	if err != nil {
+		return OpenAIUsage{}, 0, nil, err
+	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	contentType := "application/json"
 	if s.cfg != nil && !s.cfg.Security.ResponseHeaders.Enabled {
@@ -1045,6 +1092,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(
 	c.Data(resp.StatusCode, contentType, body)
 
 	usage, _ := extractOpenAIUsageFromJSONBytes(body)
+	if parsed != nil && (supportsOpenAIImagesGIF(parsed.Model) || supportsOpenAIImagesGIF(c.GetString(OpsUpstreamModelKey))) {
+		usage, _ = codexDirectImagesUsage(body)
+	}
 	return usage, extractOpenAIImageCountFromJSONBytes(body), collectOpenAIResponseImageOutputSizesFromJSONBytes(body), nil
 }
 
@@ -1557,7 +1607,8 @@ func normalizeOpenAIImageBase64(raw string) string {
 		}
 	}
 	raw = strings.TrimSpace(raw)
-	raw = strings.TrimRight(raw, "=") + strings.Repeat("=", (4-len(raw)%4)%4)
+	raw = strings.TrimRight(raw, "=")
+	raw += strings.Repeat("=", (4-len(raw)%4)%4)
 	if raw == "" {
 		return ""
 	}

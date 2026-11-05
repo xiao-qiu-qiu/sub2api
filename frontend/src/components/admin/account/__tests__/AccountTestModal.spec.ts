@@ -151,6 +151,53 @@ describe('AccountTestModal', () => {
     expect(preview.attributes('src')).toBe('data:image/png;base64,QUJD')
   })
 
+  it.each([
+    { label: 'API Key', type: 'apikey' },
+    { label: 'OAuth', type: 'oauth' }
+  ])('OpenAI $label 账号原样预览 SSE image event 中的 GIF 并完成测试', async ({ label, type }) => {
+    const model = 'gpt-image-2.6-flare'
+    const imageUrl = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+    const prompt = 'draw a tiny orange cat astronaut'
+    getAvailableModels.mockResolvedValue([{ id: model, display_name: 'GPT Image 2.6 Flare' }])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse([
+        `data: ${JSON.stringify({ type: 'test_start', model })}\n\n`,
+        `data: ${JSON.stringify({ type: 'image', image_url: imageUrl, mime_type: 'image/gif' })}\n\n`,
+        'data: {"type":"test_complete","success":true}\n\n'
+      ])
+    ) as any
+
+    const wrapper = mountModal({
+      id: 42,
+      name: `OpenAI ${label}`,
+      platform: 'openai',
+      type,
+      status: 'active'
+    })
+    try {
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+      expect(wrapper.find('img[alt="test-image-1"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('admin.accounts.testCompleted')
+      await wrapper.get('textarea.textarea-stub').setValue(prompt)
+
+      const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+      await start.trigger('click')
+      await flushPromises()
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      const [url, request] = (global.fetch as any).mock.calls[0]
+      expect(url).toMatch(/\/admin\/accounts\/42\/test$/)
+      expect(request.method).toBe('POST')
+      expect(JSON.parse(request.body)).toEqual({ model_id: model, prompt, mode: 'default' })
+      expect(wrapper.get('img[alt="test-image-1"]').attributes('src')).toBe(imageUrl)
+      expect(wrapper.text()).toContain('received-1')
+      expect(wrapper.text()).toContain('admin.accounts.testCompleted')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('grok 账号测试默认选择 Grok 模型', async () => {
     getAvailableModels.mockResolvedValue([
       { id: 'grok-4.3', display_name: 'Grok 4.3' },

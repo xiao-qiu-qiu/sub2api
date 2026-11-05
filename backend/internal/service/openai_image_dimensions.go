@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -15,16 +16,26 @@ import (
 const maxOpenAIImageDimensionProbeBytes int64 = 1 << 20
 
 func detectOpenAIImageResultSize(encoded string) string {
+	size, _ := detectOpenAIImageResultMetadata(encoded)
+	return size
+}
+
+func detectOpenAIImageResultFormat(encoded string) string {
+	_, format := detectOpenAIImageResultMetadata(encoded)
+	return format
+}
+
+func detectOpenAIImageResultMetadata(encoded string) (size, format string) {
 	payload := strings.TrimSpace(encoded)
 	if strings.HasPrefix(strings.ToLower(payload), "data:") {
 		comma := strings.IndexByte(payload, ',')
 		if comma < 0 || comma+1 >= len(payload) {
-			return ""
+			return "", ""
 		}
 		payload = strings.TrimSpace(payload[comma+1:])
 	}
 	if payload == "" {
-		return ""
+		return "", ""
 	}
 
 	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
@@ -32,15 +43,21 @@ func detectOpenAIImageResultSize(encoded string) string {
 		buffered := bufio.NewReader(io.LimitReader(decoded, maxOpenAIImageDimensionProbeBytes))
 		prefix, _ := buffered.Peek(30)
 		if width, height, ok := detectOpenAIWebPDimensions(prefix); ok {
-			return fmt.Sprintf("%dx%d", width, height)
+			return fmt.Sprintf("%dx%d", width, height), "webp"
 		}
-		cfg, _, err := image.DecodeConfig(buffered)
+		// GIF DecodeConfig reports the logical screen size, even when animation
+		// frames cover only part of that canvas.
+		cfg, decodedFormat, err := image.DecodeConfig(buffered)
 		if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 			continue
 		}
-		return fmt.Sprintf("%dx%d", cfg.Width, cfg.Height)
+		switch decodedFormat {
+		case "png", "jpeg", "webp", "gif":
+			format = decodedFormat
+		}
+		return fmt.Sprintf("%dx%d", cfg.Width, cfg.Height), format
 	}
-	return ""
+	return "", ""
 }
 
 func detectOpenAIWebPDimensions(header []byte) (int, int, bool) {
@@ -76,11 +93,19 @@ func detectOpenAIWebPDimensions(header []byte) (int, int, bool) {
 }
 
 func reconcileOpenAIResponsesImageResultSizes(results []openAIResponsesImageResult, firstMeta *openAIResponsesImageResult) {
+	var firstActualFormat string
 	for i := range results {
 		// ChatGPT OAuth can normalize requested controls to "auto". The final
 		// image bytes are authoritative for response metadata and tier billing.
-		if actualSize := detectOpenAIImageResultSize(results[i].Result); actualSize != "" {
+		actualSize, actualFormat := detectOpenAIImageResultMetadata(results[i].Result)
+		if actualSize != "" {
 			results[i].Size = actualSize
+		}
+		if actualFormat != "" {
+			results[i].OutputFormat = actualFormat
+			if i == 0 {
+				firstActualFormat = actualFormat
+			}
 		}
 	}
 	if firstMeta == nil || len(results) == 0 {
@@ -88,5 +113,8 @@ func reconcileOpenAIResponsesImageResultSizes(results []openAIResponsesImageResu
 	}
 	if size := strings.TrimSpace(results[0].Size); size != "" {
 		firstMeta.Size = size
+	}
+	if firstActualFormat != "" {
+		firstMeta.OutputFormat = firstActualFormat
 	}
 }

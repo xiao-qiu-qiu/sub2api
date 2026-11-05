@@ -75,6 +75,9 @@ func (r *OpenAIImagesRequest) ValidateAccountModels(account *Account, channelMod
 	}
 	requestModel := firstNonEmptyString(strings.TrimSpace(channelModel), r.Model)
 	upstreamModel := account.GetMappedModel(requestModel)
+	if err := validateOpenAIImagesGIFRequest(r, upstreamModel); err != nil {
+		return err
+	}
 	models := []string{r.Model, requestModel, upstreamModel}
 	if r.needsExtraImageAuthorization(channelModel) || validateCompatibleImagesModel(upstreamModel) != nil {
 		models = append(models, r.clientModel)

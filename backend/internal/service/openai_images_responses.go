@@ -38,6 +38,8 @@ type OpenAIImagesUpstreamError struct {
 	Message           string
 	Param             string
 	UpstreamRequestID string
+	// Retained for failed image attempts; never included in the client error.
+	UpstreamUsage *OpenAIUsage
 
 	// SynthesizedFromModelText marks an error the gateway inferred from the
 	// model's plain-text output instead of reading it off a structured upstream
@@ -104,7 +106,9 @@ func (e *OpenAIImagesUpstreamError) clientMessage() string {
 // IsOpenAIImagesRetryableUpstreamError reports whether an Images error is an
 // upstream server failure that may be retried on another account.
 func IsOpenAIImagesRetryableUpstreamError(err *OpenAIImagesUpstreamError) bool {
-	return err != nil && err.StatusCode >= http.StatusInternalServerError
+	// The upstream already produced output in this case. Replaying generation
+	// would incur another charge without guaranteeing the requested format.
+	return err != nil && err.Code != "invalid_gif_output" && err.StatusCode >= http.StatusInternalServerError
 }
 
 func openAIImagesSSEErrorStatus(errType, code string) int {
@@ -320,6 +324,8 @@ func openAIImageOutputMIMEType(outputFormat string) string {
 		return "image/jpeg"
 	case "webp":
 		return "image/webp"
+	case "gif":
+		return "image/gif"
 	default:
 		return "image/png"
 	}
@@ -359,6 +365,9 @@ func isOpenAIImagesSelfBuiltRequest(ctx context.Context) bool {
 func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel string) ([]byte, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
+	}
+	if parsed.OutputFormat == "gif" || parsed.FrameCount != nil || parsed.FrameDurationMS != nil {
+		return nil, fmt.Errorf("GIF output requires the Images generations endpoint; Responses fallback is not supported")
 	}
 	prompt := strings.TrimSpace(parsed.Prompt)
 	if prompt == "" {
@@ -1906,7 +1915,10 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		respBody := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
-		if direct && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
+		if gifErr := terminalOpenAIImagesGIFAccessError(c, parsed, resp.StatusCode, resp.Header, respBody); gifErr != nil {
+			return nil, gifErr
+		}
+		if direct && parsed.OutputFormat != "gif" && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
 			return s.forwardOpenAIImagesOAuth(withOpenAIImagesForceResponses(ctx), c, account, parsed, channelMappedModel)
 		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
@@ -2000,7 +2012,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		}
 	} else {
 		if direct {
-			usage, imageCount, imageOutputSizes, err = s.handleCodexDirectImagesNonStreamingResponse(resp, c, parsed)
+			usage, imageCount, imageOutputSizes, err = s.handleCodexDirectImagesNonStreamingResponse(upstreamCtx, resp, c, account, parsed)
 		} else {
 			usage, imageCount, imageOutputSizes, err = s.handleOpenAIImagesOAuthNonStreamingResponse(resp, c, parsed.ResponseFormat, requestModel)
 		}
@@ -2137,6 +2149,10 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 	}
 	var upstreamErr *OpenAIImagesUpstreamError
 	if !errors.As(err, &upstreamErr) {
+		return err
+	}
+	if upstreamErr.Code == "invalid_gif_output" {
+		writeOpenAIImagesUpstreamErrorResponse(c, upstreamErr)
 		return err
 	}
 	if isOpenAIImagesMainModelError(upstreamErr.StatusCode, openAIImagesUpstreamErrorResponseBody(upstreamErr)) {

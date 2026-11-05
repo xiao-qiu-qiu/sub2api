@@ -102,6 +102,8 @@ func TestOpenAIOAuthRecoveryWS_ExternalTokenChangeRebuildsCurrentTurn(t *testing
 			router.GET("/v1/responses", func(c *gin.Context) {
 				fixture, _ := oauthRecoveryHandlerRequest(t, c.Request.Context(), "responses")
 				key, _ := middleware2.GetAPIKeyFromContext(fixture)
+				// Continuation references are required to verify credential rebuilds.
+				key.AllowLongContext = true
 				c.Set(string(middleware2.ContextKeyAPIKey), key)
 				c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 100, Concurrency: 2})
 				c.Request = c.Request.WithContext(service.WithAPIKeyQueueAuthRevalidator(c.Request.Context(), func(context.Context) (int, error) { authChecks.Add(1); return 0, nil }))

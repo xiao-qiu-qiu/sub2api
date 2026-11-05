@@ -331,7 +331,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSImages(ctx context.Context, c *gin
 	}
 
 	SetActualOpenAIUpstreamEndpoint(c, endpoint)
-	usage, imageCount, imageOutputSizes, err := s.handleCodexDirectImagesNonStreamingResponse(resp, c, parsed)
+	usage, imageCount, imageOutputSizes, err := s.handleCodexDirectImagesNonStreamingResponse(ctx, resp, c, account, parsed)
 	if err != nil {
 		if _, _, ok := OpenAIUpstreamStreamReadErrorDetails(err); ok {
 			if lease != nil && ctx.Err() == nil {

@@ -3490,32 +3490,21 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
-	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
-	var result struct {
-		Data []struct {
-			B64JSON       string `json:"b64_json"`
-			RevisedPrompt string `json:"revised_prompt"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	results, err := parseCodexDirectImagesResponse(body)
+	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to parse response: %s", err.Error()))
 	}
 
-	if len(result.Data) == 0 {
-		return s.sendErrorAndEnd(c, "No images returned from API")
-	}
-
-	for _, item := range result.Data {
+	for _, item := range results {
 		if item.RevisedPrompt != "" {
 			s.sendEvent(c, TestEvent{Type: "content", Text: item.RevisedPrompt})
 		}
-		if item.B64JSON != "" {
-			s.sendEvent(c, TestEvent{
-				Type:     "image",
-				ImageURL: "data:image/png;base64," + item.B64JSON,
-				MimeType: "image/png",
-			})
-		}
+		mimeType := openAIImageOutputMIMEType(item.OutputFormat)
+		s.sendEvent(c, TestEvent{
+			Type:     "image",
+			ImageURL: "data:" + mimeType + ";base64," + item.Result,
+			MimeType: mimeType,
+		})
 	}
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
