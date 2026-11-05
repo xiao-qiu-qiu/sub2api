@@ -22,9 +22,7 @@
                 v-for="tab in settingsTabs"
                 :key="tab.key"
                 role="presentation"
-                class="settings-tab-wrapper relative flex min-w-0 flex-1 basis-0"
-                :class="tab.key === 'features' && 'settings-tab-wrapper-new-feature'"
-                :style="tab.key === 'features' ? { flex: '2.2 1 0%', minWidth: '11rem' } : undefined"
+                class="settings-tab-wrapper relative min-w-0"
               >
                 <button
                   :id="`settings-tab-${tab.key}`"
@@ -36,7 +34,6 @@
                     'settings-tab',
                     activeTab === tab.key && 'settings-tab-active',
                   ]"
-                  :style="['features', 'gateway', 'email'].includes(tab.key) ? { paddingRight: '7rem' } : undefined"
                   @click="selectSettingsTab(tab.key)"
                   @keydown="handleSettingsTabKeydown($event, tab.key)"
                 >
@@ -51,19 +48,22 @@
                   v-if="tab.key === 'features'"
                   :notice-id="NEW_FEATURE_NOTICES.protocolFeatureSwitches"
                   :user-id="authStore.user?.id"
-                  class="absolute right-2 top-1/2 z-10 -translate-y-1/2"
+                  compact
+                  class="settings-tab-notice"
                 />
                 <NewFeatureBadge
                   v-if="tab.key === 'email'"
                   :notice-id="NEW_FEATURE_NOTICES.balanceForecast"
                   :user-id="authStore.user?.id"
-                  class="absolute right-2 top-1/2 z-10 -translate-y-1/2"
+                  compact
+                  class="settings-tab-notice"
                 />
                 <NewFeatureBadge
                   v-if="tab.key === 'gateway'"
                   :notice-id="NEW_FEATURE_NOTICES.serverlessIPRouting"
                   :user-id="authStore.user?.id"
-                  class="absolute right-2 top-1/2 z-10 -translate-y-1/2"
+                  compact
+                  class="settings-tab-notice"
                 />
               </div>
             </div>
@@ -14093,35 +14093,37 @@ h2[id^="settings-section-"]:target {
 }
 
 .settings-tabs-scroll {
-  @apply overflow-x-auto;
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+  @apply overflow-x-auto overscroll-x-contain p-1;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.6) transparent;
 }
 
 .settings-tabs-scroll::-webkit-scrollbar {
-  display: none;
+  height: 4px;
+}
+
+.settings-tabs-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgb(148 163 184 / 0.6);
 }
 
 .settings-tabs {
-  @apply flex min-w-max items-center gap-1;
+  @apply grid grid-flow-col gap-1;
+  grid-auto-columns: minmax(7.5rem, 1fr);
 }
 
 .settings-tab {
-  @apply relative isolate flex h-10 min-w-[6.75rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-transparent px-3 text-sm font-medium text-gray-600 outline-none transition-colors duration-200 ease-out dark:text-gray-300;
+  @apply relative isolate flex h-12 w-full items-center justify-center gap-1.5 rounded-xl border border-transparent px-2 text-sm font-medium text-gray-600 outline-none transition-colors duration-200 ease-out dark:text-gray-300;
 }
 
-@media (min-width: 768px) {
-  .settings-tabs {
-    @apply min-w-full;
-  }
+.settings-tab-notice {
+  @apply absolute right-1.5 top-1 z-10;
+}
 
-  .settings-tab {
-    @apply min-w-0 flex-1 basis-0 overflow-hidden px-2 text-[13px];
-  }
-
-  .settings-tab-icon {
-    @apply h-6 w-6;
-  }
+.settings-tab-notice::after {
+  position: absolute;
+  inset: -0.375rem;
+  content: "";
 }
 
 .settings-tab::before {
@@ -14162,7 +14164,7 @@ h2[id^="settings-section-"]:target {
 }
 
 .settings-tab-icon {
-  @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors duration-200 dark:text-gray-400;
+  @apply flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors duration-200 dark:text-gray-400;
 }
 
 .settings-tab:hover .settings-tab-icon,
@@ -14175,7 +14177,7 @@ h2[id^="settings-section-"]:target {
 }
 
 .settings-tab-label {
-  @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap leading-none;
+  @apply min-w-0 whitespace-normal break-words text-center leading-5;
 }
 </style>
 
