@@ -50,7 +50,7 @@ func (c *openAIRotationConcurrencyCache) AcquireAccountSlotWithRotation(ctx cont
 	if c.phases[id] == "resting" || (c.phases[id] == "draining" && (policy.Mode != AccountRotationModeSticky || !sticky)) {
 		return false, nil
 	}
-	return c.schedulerTestConcurrencyCache.AcquireAccountSlot(ctx, id, max, requestID)
+	return c.AcquireAccountSlot(ctx, id, max, requestID)
 }
 
 func (*openAIRotationConcurrencyCache) RefreshAccountRotationSlot(context.Context, int64, string) error {

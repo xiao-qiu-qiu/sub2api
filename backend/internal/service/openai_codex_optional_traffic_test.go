@@ -129,7 +129,7 @@ func TestCodexOptionalTrafficExistingCookieTicketAndConnectionPriority(t *testin
 	s.observeCodexOptionalTraffic(req, codexOptionalTestResponse(200, "jar"), a, "")
 	withCookie := req.Clone(req.Context())
 	withCookie.Header["cookie"] = []string{"__oailb=existing"}
-	require.Equal(t, []string{"__oailb=existing"}, s.applyCodexOptionalTraffic(withCookie, a, "").Header["cookie"])
+	require.Equal(t, []string{"__oailb=existing"}, s.applyCodexOptionalTraffic(withCookie, a, "").Header["cookie"]) //nolint:staticcheck // SA1008: verify the deliberately noncanonical raw key is preserved without adding a canonical Cookie header.
 	require.Empty(t, s.applyCodexOptionalTraffic(withCookie, a, "").Header.Get("Cookie"))
 	bound := req.WithContext(context.WithValue(req.Context(), boundAstraTicketContextKey{}, true))
 	require.Empty(t, s.applyCodexOptionalTraffic(bound, a, "").Header.Get("Cookie"))
@@ -258,7 +258,7 @@ func TestCodexOptionalTrafficWSSchedulesAfterSendWithActualRegionalProxy(t *test
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		for {
 			kind, payload, err := conn.Read(req.Context())
 			if err != nil {
@@ -298,7 +298,7 @@ func TestCodexOptionalTrafficWSSchedulesAfterSendWithActualRegionalProxy(t *test
 	defer cancel()
 	conn, _, _, err := dialer.Dial(ctx, "wss://chatgpt.com/backend-api/codex/responses", req.Header, "")
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	wrapped := conn.(*coderOpenAIWSClientConn)
 	require.Equal(t, actualProxy, wrapped.optionalTrafficProxy)
 	require.Nil(t, wrapped.optionalTrafficContext.Value(privateContextKey{}))

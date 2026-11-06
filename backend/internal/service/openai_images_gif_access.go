@@ -17,8 +17,8 @@ func terminalOpenAIImagesGIFAccessError(c *gin.Context, parsed *OpenAIImagesRequ
 	// Do not accept the extractor's top-level message fallback or raw-body echoes.
 	messageField := gjson.GetBytes(body, "error.message")
 	detailField := gjson.GetBytes(body, "detail")
-	if !(messageField.Type == gjson.String && strings.TrimSpace(messageField.String()) != "") &&
-		!(detailField.Type == gjson.String && strings.TrimSpace(detailField.String()) != "") {
+	if (messageField.Type != gjson.String || strings.TrimSpace(messageField.String()) == "") &&
+		(detailField.Type != gjson.String || strings.TrimSpace(detailField.String()) == "") {
 		return nil
 	}
 	message := strings.Join(strings.Fields(extractUpstreamErrorMessage(body)), " ")

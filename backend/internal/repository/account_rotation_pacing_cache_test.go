@@ -181,10 +181,10 @@ func TestAccountRotationRecoveryRandomIntervals(t *testing.T) {
 func TestAccountRotationRecoveryCapacityAndExistingRetriesDoNotConsumeDelay(t *testing.T) {
 	f := newAccountRotationPacingFixture(t)
 	f.completeRest(1, "first", "second")
-	ok, state := f.acquireState(1, "first", 1, false)
+	ok, _ := f.acquireState(1, "first", 1, false)
 	require.True(t, ok)
 	f.advanceMS(50)
-	ok, state = f.acquireState(1, "first", 1, false)
+	ok, state := f.acquireState(1, "first", 1, false)
 	require.True(t, ok, "an existing request ID remains idempotent even at capacity during recovery")
 	require.Equal(t, int64(87), state.RetryAfterMS)
 	require.Equal(t, 1, state.WaitingCount)

@@ -504,9 +504,10 @@ func codexWindowNumberValue(value any) string {
 			raw = strconv.FormatFloat(value, 'f', -1, 64)
 		}
 	case gjson.Result:
-		if value.Type == gjson.String {
+		switch value.Type {
+		case gjson.String:
 			raw = strings.TrimSpace(value.Str)
-		} else if value.Type == gjson.Number {
+		case gjson.Number:
 			raw = value.Raw
 		}
 	}
@@ -593,7 +594,7 @@ func applyCodexFingerprintToWSPayload(c *gin.Context, account *Account, payload 
 		}
 	}
 	if ids != nil && (account == nil || ids.accountID != account.ID || !ids.identityV2 || ids.credentialNamespace != codexAccountIdentityNamespace(source)) {
-		return payload, fmt.Errorf("Codex WS fingerprint identity does not match selected credential")
+		return payload, fmt.Errorf("codex WS fingerprint identity does not match selected credential")
 	}
 	next, _, err := applyCodexFingerprintClientMetadataRaw(payload, ids)
 	if err != nil {

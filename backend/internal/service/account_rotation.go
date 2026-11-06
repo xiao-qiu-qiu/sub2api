@@ -253,7 +253,11 @@ func (s *ConcurrencyService) AccountRotationAllowed(ctx context.Context, account
 	if policy == nil {
 		return true
 	}
-	state, err := s.cache.(AccountRotationCache).CheckAccountRotation(ctx, account.ID, *policy)
+	cache, ok := s.cache.(AccountRotationCache)
+	if !ok {
+		return false
+	}
+	state, err := cache.CheckAccountRotation(ctx, account.ID, *policy)
 	return err == nil && rotationStateAllows(state, policy.Mode, sticky)
 }
 
@@ -291,9 +295,13 @@ func (s *ConcurrencyService) accountRotationStates(ctx context.Context, ids []in
 	}); ok {
 		return batch.CheckAccountRotationBatch(ctx, ids, policy)
 	}
+	cache, ok := s.cache.(AccountRotationCache)
+	if !ok {
+		return nil, ErrAccountRotationUnsupported
+	}
 	states := make(map[int64]*AccountRotationState, len(ids))
 	for _, id := range ids {
-		state, err := s.cache.(AccountRotationCache).CheckAccountRotation(ctx, id, policy)
+		state, err := cache.CheckAccountRotation(ctx, id, policy)
 		if err != nil {
 			return nil, err
 		}
@@ -376,7 +384,7 @@ type accountRotationPool struct {
 
 func (s *ConcurrencyService) accountRotationPool(ctx context.Context, id int64) (string, error) {
 	if item, ok := s.rotationPools.Load(id); ok {
-		if pool := item.(accountRotationPool); time.Now().Before(pool.expires) {
+		if pool, ok := item.(accountRotationPool); ok && time.Now().Before(pool.expires) {
 			return pool.name, nil
 		}
 	}

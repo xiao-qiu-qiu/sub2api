@@ -242,9 +242,10 @@ func (r *accountTokenGuardV2Repository) CompleteImmediateReauthVerification(ctx 
 		result.BlockedReason = "re-login task active or history reconciliation pending"
 	}
 	failures := record.FailStreak
-	if result.ProbeState == service.AccountTokenGuardV2ProbeOK {
+	switch result.ProbeState {
+	case service.AccountTokenGuardV2ProbeOK:
 		failures = 0
-	} else if result.ProbeState == service.AccountTokenGuardV2ProbeAuth {
+	case service.AccountTokenGuardV2ProbeAuth:
 		failures++
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE account_token_guard_v2_accounts

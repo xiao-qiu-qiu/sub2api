@@ -155,10 +155,11 @@ func TestImmediateReauthVerificationUsesFreshProbeWithoutCreatingTasks(t *testin
 			prober := &immediateReauthFreshProber{t: t}
 			svc.prober = prober
 			wantState := AccountTokenGuardV2ProbeOK
-			if name == "auth" {
+			switch name {
+			case "auth":
 				wantState = AccountTokenGuardV2ProbeAuth
 				prober.freshErr = &codexModelsManifestUpstreamError{statusCode: http.StatusUnauthorized, err: errors.New("synthetic private body")}
-			} else if name == "transient" {
+			case "transient":
 				wantState = AccountTokenGuardV2ProbeTransient
 				prober.freshErr = &codexModelsManifestUpstreamError{statusCode: http.StatusBadGateway, err: errors.New("synthetic private body")}
 			}

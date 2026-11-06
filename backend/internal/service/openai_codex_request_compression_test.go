@@ -59,7 +59,7 @@ func TestFinalizeCodexHTTPRequestBodyMetadataAndReplay(t *testing.T) {
 	req.Header.Set("X-Ticket", "already-consumed")
 	req.TransferEncoding = []string{"chunked"}
 	require.NoError(t, finalizeCodexHTTPRequestBody(c, codexWireHelpersTestAccount(false, true), req, body))
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	wire, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
 	require.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
@@ -71,7 +71,7 @@ func TestFinalizeCodexHTTPRequestBodyMetadataAndReplay(t *testing.T) {
 	require.NotNil(t, req.GetBody)
 	replay, err := req.GetBody()
 	require.NoError(t, err)
-	defer replay.Close()
+	defer func() { _ = replay.Close() }()
 	replayed, err := io.ReadAll(replay)
 	require.NoError(t, err)
 	require.Equal(t, wire, replayed)

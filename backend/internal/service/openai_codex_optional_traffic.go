@@ -489,7 +489,7 @@ func (s *OpenAIGatewayService) scheduleCodexOptionalSettings(main *http.Request,
 			resp, err = s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 		}
 		if resp != nil && resp.Body != nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 		}
 		if err != nil || resp == nil {
 			return

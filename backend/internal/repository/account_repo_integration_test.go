@@ -269,24 +269,66 @@ func (s *AccountRepoSuite) TestDelete() {
 }
 
 func (s *AccountRepoSuite) TestDelete_RemovesSchedulerAccountSnapshot() {
-	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "to-delete-cache"})
-	cacheRecorder := &schedulerCacheRecorder{
-		accounts: map[int64]*service.Account{
-			account.ID: {
-				ID:          account.ID,
-				Name:        account.Name,
-				Status:      service.StatusActive,
-				Schedulable: true,
-			},
-		},
+	// The suite client is inside a rollback-only transaction. Use committed
+	// fixtures to verify cache publication at the actual transaction boundary.
+	db, client := newImageUpgradeDatabase(s.T(), s.ctx)
+	for _, mode := range []string{"repository commit", "caller commit", "caller rollback", "transaction client only"} {
+		s.Run(mode, func() {
+			account := mustCreateAccount(s.T(), client, &service.Account{Name: "to-delete-cache"})
+			cacheRecorder := &schedulerCacheRecorder{
+				accounts: map[int64]*service.Account{account.ID: account},
+			}
+			repo := newAccountRepositoryWithSQL(client, db, cacheRecorder)
+			ctx := s.ctx
+			var tx *dbent.Tx
+			if mode != "repository commit" {
+				var err error
+				tx, err = client.Tx(ctx)
+				s.Require().NoError(err)
+				s.T().Cleanup(func() { _ = tx.Rollback() })
+				if mode == "transaction client only" {
+					repo = newAccountRepositoryWithSQL(tx.Client(), tx, cacheRecorder)
+				} else {
+					ctx = dbent.NewTxContext(ctx, tx)
+				}
+			}
+
+			s.Require().NoError(repo.Delete(ctx, account.ID))
+			if tx != nil {
+				s.Require().Empty(cacheRecorder.deleteIDs, "uncommitted deletion must not invalidate cache")
+				s.Require().Contains(cacheRecorder.accounts, account.ID)
+				if mode == "caller rollback" {
+					s.Require().NoError(tx.Rollback())
+				} else {
+					s.Require().NoError(tx.Commit())
+				}
+			}
+
+			committedRepo := newAccountRepositoryWithSQL(client, db, nil)
+			_, err := committedRepo.GetByID(s.ctx, account.ID)
+			if mode == "caller rollback" {
+				s.Require().NoError(err)
+				s.Require().Empty(cacheRecorder.deleteIDs)
+				s.Require().Contains(cacheRecorder.accounts, account.ID)
+				return
+			}
+			s.Require().ErrorIs(err, service.ErrAccountNotFound)
+			if mode == "transaction client only" {
+				// Without the transaction context there is no commit hook; the
+				// durable outbox propagates the committed deletion instead.
+				s.Require().Empty(cacheRecorder.deleteIDs)
+				s.Require().Contains(cacheRecorder.accounts, account.ID)
+				var events int
+				s.Require().NoError(db.QueryRowContext(s.ctx,
+					"SELECT COUNT(*) FROM scheduler_outbox WHERE event_type = $1 AND account_id = $2",
+					service.SchedulerOutboxEventAccountChanged, account.ID).Scan(&events))
+				s.Require().Equal(1, events)
+				return
+			}
+			s.Require().Equal([]int64{account.ID}, cacheRecorder.deleteIDs)
+			s.Require().NotContains(cacheRecorder.accounts, account.ID)
+		})
 	}
-	s.repo.schedulerCache = cacheRecorder
-
-	err := s.repo.Delete(s.ctx, account.ID)
-	s.Require().NoError(err, "Delete")
-
-	s.Require().Equal([]int64{account.ID}, cacheRecorder.deleteIDs)
-	s.Require().NotContains(cacheRecorder.accounts, account.ID)
 }
 
 func (s *AccountRepoSuite) TestDelete_WithGroupBindings() {
