@@ -152,6 +152,17 @@ func readQualityBatchResults(ctx context.Context, tx *sql.Tx, batchID string, pl
 			}
 		}
 		run.Plan.Quality5xxEpisode, run.Plan.TriggerSource, run.Plan.TriggerObservedAt = run.Episode, run.Trigger, run.ObservedAt
+		// Runtime-only lease metadata is omitted from the stored plan JSON.
+		// Actual sample start times preserve the recovery confirmation fence.
+		if run.Plan.PelicanConfig.Quality.RecoveryProbeActive() && len(run.Results) > 0 {
+			started := run.Results[0].StartedAt
+			for _, sample := range run.Results[1:] {
+				if sample.StartedAt.Before(started) {
+					started = sample.StartedAt
+				}
+			}
+			run.Plan.QualityRecoveryProbeStartedAt = &started
+		}
 		runs = append(runs, &run)
 	}
 	err = rows.Err()

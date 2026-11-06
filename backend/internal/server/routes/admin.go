@@ -968,6 +968,7 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/probe", h.Admin.AccountTokenGuardV2.Probe)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/relogin", h.Admin.AccountTokenGuardV2.Relogin)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/resume-relogin-budget", h.Admin.AccountTokenGuardV2.ResumeReloginBudget)
+	admin.GET("/account-quality-overview", h.Admin.ScheduledTest.AccountQualityOverview)
 	admin.GET("/account-quality-results", h.Admin.ScheduledTest.ListQualityHistory)
 	admin.GET("/account-quality-plans", h.Admin.ScheduledTest.ListQualityPlans)
 	admin.POST("/account-quality-plans/:id/run", h.Admin.ScheduledTest.TriggerQuality)

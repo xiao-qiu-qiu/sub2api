@@ -24,7 +24,7 @@ func (r *accountRepository) ApplyQuality5xx(ctx context.Context, accountID int64
 	}
 	changed := false
 	for _, p := range candidates {
-		if p.PelicanConfig == nil || p.PelicanConfig.Quality == nil || !p.Enabled || !p.PelicanConfig.Quality.TriggerOnUpstream5xx || p.PelicanConfig.Quality.Action != service.QualityActionRemoveModel {
+		if p.PelicanConfig == nil || p.PelicanConfig.Quality == nil || !p.Enabled || !p.PelicanConfig.Quality.TriggerOnUpstream5xx || (p.PelicanConfig.Quality.Action != service.QualityActionRemoveModel && !p.PelicanConfig.Quality.RecoveryProbeActive()) {
 			continue
 		}
 		applied, e := plans.applyImmediateQuality5xx(ctx, p.ID, accountID)
@@ -57,7 +57,7 @@ func (r *scheduledTestPlanRepository) applyImmediateQuality5xx(ctx context.Conte
 		return false, nil
 	}
 	policy := plan.PelicanConfig.Quality
-	if !policy.TriggerOnUpstream5xx || policy.Action != service.QualityActionRemoveModel {
+	if !policy.TriggerOnUpstream5xx || (policy.Action != service.QualityActionRemoveModel && !policy.RecoveryProbeActive()) {
 		return false, nil
 	}
 	var accountType, status string
@@ -79,6 +79,24 @@ func (r *scheduledTestPlanRepository) applyImmediateQuality5xx(ctx context.Conte
 		if err = json.Unmarshal(raw, &state); err != nil {
 			return false, err
 		}
+	}
+	if policy.RecoveryProbeActive() {
+		if !qualityRecoveryProbeOwns(&state) {
+			return false, nil
+		}
+		now := time.Now().UTC()
+		state.Quality5xxEpisode++
+		state.RecoveryProbe = &qualityRecoveryProbeState{PolicyVersion: plan.UpdatedAt, NextProbeAt: now}
+		if err = qualityUpsertState(ctx, tx, plan.ID, state); err != nil {
+			return false, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=$2 WHERE id=$1`, planID, now); err != nil {
+			return false, err
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if state.Action != "" && state.Action != service.QualityActionRemoveModel {
 		return false, nil

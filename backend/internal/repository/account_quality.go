@@ -22,7 +22,7 @@ func (r *scheduledTestPlanRepository) ListQualityPlans(ctx context.Context) ([]*
 	return scanPlans(rows, true)
 }
 func (r *scheduledTestPlanRepository) TriggerQuality(ctx context.Context, id int64) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=NOW(), updated_at=NOW()
+	result, err := r.db.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=NOW()
  WHERE id=$1 AND enabled AND pelican_config->'quality' IS NOT NULL AND (running_until IS NULL OR running_until<NOW())`, id)
 	if err != nil {
 		return err
@@ -45,6 +45,7 @@ type qualityGroup struct {
 	AllowedModels json.RawMessage `json:"allowed_models"`
 }
 type qualityState struct {
+	RecoveryProbe *qualityRecoveryProbeState `json:"recovery_probe,omitempty"`
 	// Transaction-local evidence, copied to the result even when restore rolls
 	// back. Never persist diagnostics as ownership or use them as a restore guard.
 	RestoreDiagnostic *service.QualityRestoreDiagnostic `json:"-"`
@@ -109,6 +110,26 @@ func qualityActionRollsBack(action string) bool {
 
 // Caller commits only complete actions; rejected partial transitions roll back.
 func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, until time.Time, outcome string, commit *bool) (string, error) {
+	action, err := applyQualityOutcomeCoreTx(ctx, tx, plan, until, outcome, commit)
+	if err == nil && plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RecoveryProbeActive() {
+		if action == "restore_conflict" {
+			// Roll back account changes, but record this completed attempt and its
+			// retry time under the plan/account locks acquired before the savepoint.
+			if _, err = tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT quality_recovery_action`); err != nil {
+				return "", err
+			}
+			if err = retryConflictedQualityRecovery(ctx, tx, plan, time.Now(), commit); err != nil {
+				return "", err
+			}
+		}
+		if *commit {
+			err = scheduleQualityRecoveryProbe(ctx, tx, plan, time.Now())
+		}
+	}
+	return action, err
+}
+
+func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, until time.Time, outcome string, commit *bool) (string, error) {
 	plan.QualityRestoreDiagnostic = nil
 	var valid bool
 	var err error
@@ -221,6 +242,21 @@ func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.Schedu
 		plan.QualityRestoreDiagnostic = diagnostic
 	}()
 	q := plan.PelicanConfig.Quality
+	if q.RecoveryProbeActive() {
+		if _, err = tx.ExecContext(ctx, `SAVEPOINT quality_recovery_action`); err != nil {
+			return "", err
+		}
+	}
+	if q.RecoveryProbeActive() && qualityRecoveryProbeOwns(&state) {
+		hold := advanceQualityRecoveryProbe(&state, plan, until, outcome, time.Now())
+		if err = qualityUpsertState(ctx, tx, plan.ID, state); err != nil {
+			return "", err
+		}
+		if hold {
+			*commit = true
+			return "recovery_confirmation_pending", nil
+		}
+	}
 	// Changing a rule's action does not discard its previous ownership. While
 	// holding the account lock, keep another rule from taking over that scope
 	// until the previous owner's snapshot has been restored.

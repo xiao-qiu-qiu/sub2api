@@ -57,15 +57,21 @@ type QualityPolicy struct {
 	RemoveModels         []string                    `json:"remove_models,omitempty"`
 	// RecoveryConcurrency is the temporary OAuth concurrency cap applied when
 	// this rule quarantines an account. Zero keeps the safe default of five.
-	RecoveryConcurrency int               `json:"recovery_concurrency,omitempty"`
-	AutoRestore         bool              `json:"auto_restore"`
-	BPS                 *QualityBPSPolicy `json:"bps,omitempty"`
+	RecoveryConcurrency          int               `json:"recovery_concurrency,omitempty"`
+	AutoRestore                  bool              `json:"auto_restore"`
+	RecoveryProbeEnabled         bool              `json:"recovery_probe_enabled"`
+	RecoveryProbeIntervalMinutes int               `json:"recovery_probe_interval_minutes,omitempty"`
+	RecoveryConfirmationMinutes  int               `json:"recovery_confirmation_minutes,omitempty"`
+	BPS                          *QualityBPSPolicy `json:"bps,omitempty"`
 }
 
 func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	q := plan.PelicanConfig.Quality
 	if q == nil {
 		return nil
+	}
+	if err := q.validateRecoveryProbe(); err != nil {
+		return err
 	}
 	if q.Action != QualityActionMoveGroups {
 		q.MoveGroupIDs = nil

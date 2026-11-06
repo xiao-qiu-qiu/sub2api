@@ -224,6 +224,9 @@ func EvaluateQualityBatch(run *QualityBatchRun, peers []*QualityBatchRun) string
 		return "inconclusive"
 	}
 	run.Plan.QualityModelOutcomes = qualityPlanModelOutcomes(run.Plan, effective)
+	if run.Plan.PelicanConfig.Quality.RecoveryProbeActive() {
+		return qualityOutcome(effective)
+	}
 	return qualityRoundOutcome(effective)
 }
 

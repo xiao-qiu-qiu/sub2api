@@ -140,6 +140,11 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 			logger.LegacyPrintf("service.scheduled_test_runner", "state probe plan=%d account=%d skipped: account unavailable or unsupported", plan.ID, plan.AccountID)
 			finishCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
 			defer stop()
+			if plan.PelicanConfig.Quality.RecoveryProbeActive() {
+				if _, applyErr := s.planRepo.ApplyQualityOutcome(finishCtx, plan, until, "inconclusive"); applyErr != nil {
+					logger.LegacyPrintf("service.scheduled_test_runner", "quality plan=%d reset recovery failed: %v", plan.ID, applyErr)
+				}
+			}
 			if finishErr := s.planRepo.FinishPelican(finishCtx, plan.ID, until, time.Now()); finishErr != nil {
 				logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d finish failed: %v", plan.ID, finishErr)
 			}
@@ -283,6 +288,10 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	if plan.PelicanConfig.Quality != nil {
 		qualityAction = "inconclusive"
 		outcome := qualityRoundOutcome(results)
+		if plan.PelicanConfig.Quality.RecoveryProbeActive() {
+			// Skipped samples cannot confirm the whole account has recovered.
+			outcome = qualityOutcome(results)
+		}
 		freshSignal := true
 		if plan.TriggerSource == quality5xxSource && plan.TriggerObservedAt != nil && s.qualityTrigger != nil {
 			freshSignal = s.qualityTrigger.signalIsCurrent(plan.AccountID, *plan.TriggerObservedAt)
@@ -298,7 +307,7 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 				}
 			}
 		}
-		if applyTriggeredQuality && (freshSignal || outcome == "failed") && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission) {
+		if applyTriggeredQuality && (freshSignal || outcome == "failed") && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission || plan.PelicanConfig.Quality.RecoveryProbeActive()) {
 			var actionErr error
 			qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, outcome)
 			if actionErr != nil {

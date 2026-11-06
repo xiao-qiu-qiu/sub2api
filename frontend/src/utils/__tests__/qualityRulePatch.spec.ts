@@ -29,6 +29,27 @@ const probePlan = () => {
 }
 
 describe('quality rule copy inputs', () => {
+  it('copies recovery intervals and applies them only when restoration is selected', () => {
+    const source = draft(), existing = plan()
+    Object.assign(source.pelican_config.quality, { recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 })
+    const copy = copyQualityRuleConfig(source.pelican_config)
+    expect(copy.quality).toMatchObject({ recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 })
+    const patched = buildQualityRulePatch(existing, source, ['restore'])
+    expect(patched.pelican_config!.quality).toMatchObject({ remove_group_ids: [99], auto_restore: true, recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 })
+    Object.assign(existing.pelican_config!.quality!, { auto_restore: true, recovery_probe_enabled: true, recovery_probe_interval_minutes: 120, recovery_confirmation_minutes: 10 })
+    expect(buildQualityRulePatch(existing, source, ['test']).pelican_config!.quality).toMatchObject({ recovery_probe_interval_minutes: 120, recovery_confirmation_minutes: 10 })
+    source.pelican_config.quality.recovery_probe_enabled = false
+    expect(buildQualityRulePatch(existing, source, ['restore']).pelican_config!.quality!.recovery_probe_enabled).toBe(false)
+  })
+  it('validates recovery intervals and clears recovery probes when switching to observation', () => {
+    const policy = { ...draft().pelican_config.quality, recovery_probe_enabled: true, recovery_probe_interval_minutes: 0 }
+    expect(() => qualityActionPayload(policy)).toThrow('qualityOps.recoveryIntervalInvalid')
+    policy.recovery_probe_interval_minutes = 60
+    expect(() => qualityActionPayload({ ...policy, recovery_confirmation_minutes: 1.5 })).toThrow('qualityOps.recoveryIntervalInvalid')
+    const observation = qualityActionPayload({ ...policy, action: 'observe_only' })
+    expect(observation.auto_restore).toBe(false)
+    expect(observation.recovery_probe_enabled).toBeUndefined()
+  })
   it('retains Jev choice in copy and bulk patches without importing arbitrary fields', () => {
     const source = draft()
     source.pelican_config.quality.judge = { kind: 'jev', group_id: 0, model_id: '', prompt: 'Compare values' }

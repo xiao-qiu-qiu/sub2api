@@ -884,7 +884,7 @@ const adminNavItems = computed((): NavItem[] => {
       { path: '/admin/priority-scheduling', label: t('priorityScheduling.title'), icon: AccountOpsIcon },
       { path: '/admin/channel-operations', label: t('channelOps.title'), icon: ChannelIcon },
       { path: '/admin/profit-operations', label: t('profitOps.title'), icon: PriceTagIcon },
-      { path: '/admin/account-quality', label: t('qualityOps.title'), icon: QualityOpsIcon },
+      { path: '/admin/account-quality/status', label: t('qualityOps.accountQuality'), icon: QualityOpsIcon },
       { path: '/admin/controlled-experiments', label: t('controlledExperiments.title'), icon: QualityOpsIcon },
       { path: '/admin/account-ops', label: t('accountOps.title'), icon: AccountOpsIcon },
       { path: '/admin/token-guard', label: t('tokenGuard.title'), icon: TokenGuardIcon },
@@ -1022,6 +1022,7 @@ function navBadgeText(item: NavItem): string {
 }
 
 function isActive(path: string): boolean {
+  if (path === '/admin/account-quality/status') return route.path.startsWith('/admin/account-quality')
   return route.path === path || route.path.startsWith(path + '/')
 }
 

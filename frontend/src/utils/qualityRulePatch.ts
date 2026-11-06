@@ -51,6 +51,11 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
       remove_models: action === 'remove_models' ? [...(policy.remove_models || [])] : undefined,
       recovery_concurrency: action === 'remove_models' ? policy.recovery_concurrency : undefined,
       auto_restore: action === 'observe_only' ? false : policy.auto_restore ?? false,
+      ...(policy.recovery_probe_enabled !== undefined ? {
+        recovery_probe_enabled: policy.recovery_probe_enabled,
+        recovery_probe_interval_minutes: policy.recovery_probe_interval_minutes ?? 60,
+        recovery_confirmation_minutes: policy.recovery_confirmation_minutes ?? 5,
+      } : {}),
       judge: policy.judge ? { ...(policy.judge.kind ? { kind: policy.judge.kind } : {}), group_id: policy.judge.group_id, model_id: policy.judge.model_id, prompt: policy.judge.prompt } : undefined,
       bps: bps ? {
         failure_threshold: bps.failure_threshold, usage_percent: bps.usage_percent, require_all: bps.require_all,
@@ -130,6 +135,16 @@ export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
     next.bps = qualityBPSPayload(next.bps)
   } else delete next.bps
   if (next.action === 'observe_only') next.auto_restore = false
+  if (next.recovery_probe_enabled && (!next.auto_restore || !['move_groups', 'remove_groups', 'disable_scheduling'].includes(next.action))) next.recovery_probe_enabled = false
+  if (next.recovery_probe_enabled) {
+    next.recovery_probe_interval_minutes ??= 60
+    next.recovery_confirmation_minutes ??= 5
+    if (![next.recovery_probe_interval_minutes, next.recovery_confirmation_minutes].every(n => Number.isInteger(n) && n >= 1 && n <= 10080)) throw new Error('qualityOps.recoveryIntervalInvalid')
+  } else {
+    delete next.recovery_probe_enabled
+    delete next.recovery_probe_interval_minutes
+    delete next.recovery_confirmation_minutes
+  }
   return next
 }
 
@@ -155,7 +170,7 @@ export function qualityRuleFieldValue(rule: Pick<ScheduledTestPlan, 'model_id' |
     case 'trigger': return q?.trigger_on_upstream_5xx ?? false
     case 'test': return [cfg?.question_kind, cfg?.test_channel || 'account', cfg?.prompt, cfg?.reasoning_effort, cfg?.parallel_count,
       q?.expected_answer, q?.judge?.kind || 'llm', q?.judge?.group_id, q?.judge?.model_id, q?.judge?.prompt]
-    case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage]
+    case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage, q?.recovery_probe_enabled ?? false, q?.recovery_probe_interval_minutes ?? 60, q?.recovery_confirmation_minutes ?? 5]
     case 'action': return [q?.action, q?.remove_group_ids || [], q?.action === 'move_groups' ? q.move_group_ids || [] : [], q?.remove_models || [], q?.recovery_concurrency,
       b ? [b.failure_threshold, b.usage_percent, b.require_all, b.all_models, b.models || [], b.omit_unsupported_tools,
         b.ignore_encrypted_content, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
@@ -233,7 +248,15 @@ export function buildQualityRulePatch(
   }
   // Automatic BPS switching remains a separate native-probe policy.
   if (config.quality.action === 'enable_bps' && config.question_kind !== STATE_PROBE_QUESTION) throw new Error('qualityOps.bpsRequiresProbe')
-  if (fields.includes('restore') && config.quality.action !== 'observe_only') config.quality.auto_restore = source.quality.auto_restore
+  if (fields.includes('restore') && config.quality.action !== 'observe_only') {
+    config.quality.auto_restore = source.quality.auto_restore
+    if (source.quality.recovery_probe_enabled !== undefined || config.quality.recovery_probe_enabled !== undefined) {
+      config.quality.recovery_probe_enabled = source.quality.recovery_probe_enabled ?? false
+      config.quality.recovery_probe_interval_minutes = source.quality.recovery_probe_interval_minutes ?? 60
+      config.quality.recovery_confirmation_minutes = source.quality.recovery_confirmation_minutes ?? 5
+    }
+  }
+  if (config.quality.recovery_probe_enabled) config.quality = qualityActionPayload(config.quality)
   // 满血关闭次数和「用量仍高时先不关」跟着「自动恢复」走：勾选修改自动恢复且开着时才用表单里的值，
   // 否则各规则保留自己的；原本不是开 BPS 的规则用默认值。
   if (config.quality.action === 'enable_bps' && config.quality.bps) {

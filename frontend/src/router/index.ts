@@ -582,6 +582,12 @@ const routes: RouteRecordRaw[] = [
   { path: '/admin/token-guard-v2', name: 'AdminTokenGuardV2', component: () => import('@/views/admin/ops/TokenGuardV2View.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Operations', titleKey: 'tokenGuardV2.title', descriptionKey: 'tokenGuardV2.description' } },
   { path: '/admin/account-ops', name: 'AdminAccountOps', component: () => import('@/views/admin/AccountOpsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Account operations', titleKey: 'accountOps.title', descriptionKey: 'accountOps.description' } },
   {
+    path: '/admin/account-quality/status',
+    name: 'AdminAccountQualityStatus',
+    component: () => import('@/views/admin/AccountQualityStatusView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'Account Quality', titleKey: 'qualityOps.statusTitle' }
+  },
+  {
     path: '/admin/account-quality',
     name: 'AdminAccountQuality',
     component: () => import('@/views/admin/AccountQualityView.vue'),

@@ -33,8 +33,10 @@ type PelicanTestConfig struct {
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
-	QualityBatchEvaluated bool              `json:"-"`
-	QualityBatchModels    map[string]string `json:"-"`
+	// Set by the lease claimant; recovery confirmation must start after its wait.
+	QualityRecoveryProbeStartedAt *time.Time        `json:"-"`
+	QualityBatchEvaluated         bool              `json:"-"`
+	QualityBatchModels            map[string]string `json:"-"`
 	// Request-only: importing configuration preserves this target's ownership.
 	PreserveQualityState     bool                      `json:"-"`
 	QualityRestoreDiagnostic *QualityRestoreDiagnostic `json:"-"`

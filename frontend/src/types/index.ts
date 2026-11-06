@@ -2777,6 +2777,9 @@ export interface QualityPolicy {
   remove_models?: string[]
   recovery_concurrency?: number
   auto_restore: boolean
+  recovery_probe_enabled?: boolean
+  recovery_probe_interval_minutes?: number
+  recovery_confirmation_minutes?: number
   bps?: QualityBPSPolicy
 }
 

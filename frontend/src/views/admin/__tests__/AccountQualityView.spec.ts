@@ -10,6 +10,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { ScheduledTestPlan } from '@/types'
 import { defaultQualityBPS } from '@/utils/qualityRulePatch'
 vi.mock('@/components/admin/operations/SmartOpsNav.vue', () => ({ default: { template: '<nav />' } }))
+vi.mock('@/components/admin/operations/QualityTabs.vue', () => ({ default: { template: '<nav />' } }))
 vi.mock('@/stores/auth', async () => {
   const { reactive } = await import('vue')
   const auth = reactive({ user: { id: 1, role: 'admin' } })
@@ -60,10 +61,14 @@ describe('quality operations', () => {
     expect(wrapper.get('.editor-error').text()).toContain('qualityOps.selectMoveGroups')
     await wrapper.get('[data-testid="quality-move-group-21"]').setValue(true)
     await wrapper.get('[data-testid="quality-auto-restore"]').setValue(true)
+    await wrapper.get('[data-testid="quality-recovery-enabled"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-interval"]').element.value).toBe('60')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-confirmation"]').element.value).toBe('5')
     await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
     expect(scheduledTests.update).toHaveBeenCalledWith(1, expect.objectContaining({
       pelican_config: expect.objectContaining({ quality: expect.objectContaining({
         action: 'move_groups', move_group_ids: [21], remove_group_ids: [], auto_restore: true,
+        recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5,
       }) }),
     }))
     wrapper.unmount()

@@ -139,6 +139,10 @@ func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.
 		if _, err = tx.ExecContext(ctx, `DELETE FROM account_quality_states WHERE plan_id=$1`, plan.ID); err != nil {
 			return nil, err
 		}
+		state = qualityState{}
+	}
+	if err = resetQualityRecoveryProbe(ctx, tx, updated, &state, time.Now()); err != nil {
+		return nil, err
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -393,10 +397,28 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 			return false, err
 		}
 	}
+	if n == 1 && plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RecoveryProbeActive() {
+		state, readErr := readQualityState(ctx, tx, plan.ID)
+		if readErr != nil {
+			return false, readErr
+		}
+		if qualityRecoveryProbeOwns(&state) {
+			// A process dying during the probe still leaves a durable retry time.
+			plan.Quality5xxEpisode = state.Quality5xxEpisode
+			next = claimQualityRecoveryProbe(&state, plan, now, until)
+			if err = qualityUpsertState(ctx, tx, plan.ID, state); err != nil {
+				return false, err
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=$2 WHERE id=$1`, plan.ID, next); err != nil {
+				return false, err
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
 	if n == 1 && plan.PelicanConfig != nil {
+		plan.QualityRecoveryProbeStartedAt = &now
 		config := *plan.PelicanConfig
 		config.BPSRecoveryPending = bpsRecoveryPending
 		plan.PelicanConfig = &config

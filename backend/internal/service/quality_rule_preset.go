@@ -45,7 +45,10 @@ func reusableQualityConfig(source *PelicanTestConfig) (*PelicanTestConfig, error
 		Action: action, RemoveGroupIDs: append([]int64(nil), q.RemoveGroupIDs...),
 		MoveGroupIDs: append([]int64(nil), q.MoveGroupIDs...),
 		RemoveModels: append([]string(nil), q.RemoveModels...), RecoveryConcurrency: q.RecoveryConcurrency,
-		AutoRestore: q.AutoRestore,
+		AutoRestore:                  q.AutoRestore,
+		RecoveryProbeEnabled:         q.RecoveryProbeEnabled,
+		RecoveryProbeIntervalMinutes: q.RecoveryProbeIntervalMinutes,
+		RecoveryConfirmationMinutes:  q.RecoveryConfirmationMinutes,
 	}
 	if q.Judge != nil {
 		judge := *q.Judge

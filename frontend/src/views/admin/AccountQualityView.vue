@@ -2,6 +2,7 @@
   <AppLayout>
     <div class="quality-workspace">
       <SmartOpsNav />
+      <QualityTabs />
       <div class="workspace-heading">
         <div><p class="workspace-eyebrow">{{ t('qualityOps.workspaceLabel') }}</p><h2>{{ t('qualityOps.workspaceTitle') }}</h2><p class="workspace-subtitle">{{ t('qualityOps.workspaceHint') }}</p></div>
         <div class="heading-actions"><span class="updated-label" aria-live="polite">{{ store.updatedAt ? t('qualityOps.updatedAt', { time: clock(store.updatedAt) }) : t('qualityOps.loading') }}</span><button class="btn btn-secondary" :disabled="refreshing" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': refreshing }" />{{ t('qualityOps.refresh') }}</button><button class="btn btn-primary" data-testid="quality-create-rule" @click="newPlan"><Icon name="plus" size="sm" />{{ t('qualityOps.create') }}</button></div>
@@ -212,7 +213,7 @@
         </fieldset>
         <template v-if="editsField('restore') && !bpsSettingsShown && form.pelican_config.quality.action !== 'observe_only'">
           <QualityBPSRestoreOptions v-if="form.pelican_config.quality.action === 'enable_bps'" v-model:bps="form.pelican_config.quality.bps" v-model:auto-restore="form.pelican_config.quality.auto_restore" class="text-sm" always-show-hold />
-          <template v-else><label class="flex items-center gap-2"><input v-model="form.pelican_config.quality.auto_restore" type="checkbox" data-testid="quality-auto-restore" />{{ t('qualityOps.autoRestore') }}</label><p class="text-sm text-gray-500">{{ t(form.pelican_config.quality.action === 'isolate_models' ? 'qualityOps.isolationRestoreHelp' : form.pelican_config.quality.action === 'move_groups' ? 'qualityOps.moveRestoreHelp' : 'qualityOps.restoreHelp') }}</p></template>
+          <template v-else><label class="flex items-center gap-2"><input v-model="form.pelican_config.quality.auto_restore" type="checkbox" data-testid="quality-auto-restore" />{{ t('qualityOps.autoRestore') }}</label><p class="text-sm text-gray-500">{{ t(form.pelican_config.quality.action === 'isolate_models' ? 'qualityOps.isolationRestoreHelp' : form.pelican_config.quality.action === 'move_groups' ? 'qualityOps.moveRestoreHelp' : 'qualityOps.restoreHelp') }}</p><QualityRecoverySettings :policy="form.pelican_config.quality" @update:policy="Object.assign(form.pelican_config.quality, $event)" /></template>
         </template>
         <template v-if="editsField('trigger')">
           <label class="flex items-center gap-2"><input v-model="form.pelican_config.quality.trigger_on_upstream_5xx" type="checkbox" data-testid="quality-trigger-5xx" />{{ t('qualityOps.trigger5xx') }}</label>
@@ -293,6 +294,8 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import QualityAccountSelector from '@/components/admin/operations/QualityAccountSelector.vue'
 import SmartOpsNav from '@/components/admin/operations/SmartOpsNav.vue'
+import QualityTabs from '@/components/admin/operations/QualityTabs.vue'
+import QualityRecoverySettings from '@/components/admin/operations/QualityRecoverySettings.vue'
 import Icon from '@/components/icons/Icon.vue'
 import QualityBPSSettings from '@/components/admin/operations/QualityBPSSettings.vue'
 import QualityBPSRestoreOptions from '@/components/admin/operations/QualityBPSRestoreOptions.vue'
@@ -459,6 +462,7 @@ function reuseFieldSummary(rule: Pick<ScheduledTestPlan, 'model_id' | 'cron_expr
   if (field === 'enabled') return t(rule.enabled ? 'qualityOps.on' : 'qualityOps.off')
   if (field === 'action') return policyTarget(q)
   if (field === 'restore') return [t(q?.auto_restore ? 'qualityOps.on' : 'qualityOps.off'),
+    q?.recovery_probe_enabled ? `${t('qualityOps.recoveryProbe')}: ${q.recovery_probe_interval_minutes ?? 60} / ${q.recovery_confirmation_minutes ?? 5} ${t('qualityOps.minutesUnit')}` : '',
     q?.bps ? `${t('qualityOps.bpsPassThreshold')}: ${q.bps.pass_threshold} · ${t('qualityOps.bpsHoldOnUsage')}: ${t(q.bps.hold_on_usage ? 'qualityOps.on' : 'qualityOps.off')}` : ''].filter(Boolean).join(' · ')
   const question = cfg?.question_kind === 'state_probe' ? 'qualityOps.questionStateProbe' : cfg?.question_kind === 'random_reasoning' ? 'qualityOps.questionRandom' : 'qualityOps.questionCandy'
   return [t(question), t(cfg?.test_channel === 'bps' ? 'qualityOps.bpsChannel' : 'qualityOps.accountChannel'),
@@ -571,6 +575,7 @@ function countedOutcome(action?: string) {
 }
 function actionKey(action?: string) { return countedOutcome(action)?.kind || action || '' }
 function actionLabel(action?: string) {
+  if (action === 'recovery_confirmation_pending') return t('qualityOps.recoveryAwaitingConfirmation')
   if (action?.startsWith('admission_')) return t('autoConfig.admission.outcomes.' + action)
   const counted = countedOutcome(action)
   if (counted?.kind === 'restore_counted') return t('qualityOps.outcomes.restore_counted_n', counted)
@@ -598,6 +603,7 @@ function tone(action?: string) {
   return 'tone-neutral'
 }
 function actionExplanation(action: string) {
+  if (action === 'recovery_confirmation_pending') return t('qualityOps.recoveryAwaitingConfirmationHint')
   const key = actionKey(action), bpsKey = `qualityOps.bpsActionHelp.${key}`
   if (detailBPS.value && te(bpsKey)) return t(bpsKey)
   return te(`qualityOps.actionHelp.${key}`) ? t(`qualityOps.actionHelp.${key}`) : t('qualityOps.actionHelp.no_change')
@@ -631,7 +637,7 @@ function resultContent(result: ScheduledTestResult) {
 function defaults() {
   return { model_id: 'gpt-6-astra', cron_expression: '*/30 * * * *', enabled: true, max_results: 100, auto_recover: false,
     pelican_config: { rule_name: '', question_kind: 'candy' as 'candy' | 'random_reasoning' | typeof STATE_PROBE_QUESTION, test_channel: 'account' as 'account' | 'bps', prompt: CANDY_PROMPT, reasoning_effort: 'high', parallel_count: 1, model_ids: [] as string[],
-      quality: { trigger_on_upstream_5xx: false, expected_answer: '21', action: 'remove_groups' as QualityPolicy['action'], remove_group_ids: [] as number[], move_group_ids: [] as number[], remove_models: [] as string[], recovery_concurrency: 5, auto_restore: false, judge: { group_id: 0, model_id: '', prompt: t('qualityOps.defaultJudgePrompt') } as QualityJudgeConfig, bps: defaultQualityBPS() } } }
+      quality: { trigger_on_upstream_5xx: false, expected_answer: '21', action: 'remove_groups' as QualityPolicy['action'], remove_group_ids: [] as number[], move_group_ids: [] as number[], remove_models: [] as string[], recovery_concurrency: 5, auto_restore: false, recovery_probe_enabled: false, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5, judge: { group_id: 0, model_id: '', prompt: t('qualityOps.defaultJudgePrompt') } as QualityJudgeConfig, bps: defaultQualityBPS() } } }
 }
 const form = ref(defaults())
 const removeModelsInput = ref('')
@@ -1220,7 +1226,22 @@ const operationsRoute = useRoute()
 onMounted(() => {
   const planId = Number(operationsRoute?.query.plan_id)
   if (Number.isSafeInteger(planId) && planId > 0) store.selectedPlanId = planId
-  void load()
+  void load().then(() => {
+    if (!alive) return
+    const target = plans.value.find(plan => plan.id === planId)
+    if (target && operationsRoute?.query.edit === '1') edit(target)
+    else if (target && operationsRoute?.query.history === '1') void history(target)
+    else if (operationsRoute?.query.recovery === '1') {
+      notice.value = t('qualityOps.recoveryConfigureHint')
+      store.search = ''
+    } else if (operationsRoute?.query.create_account) {
+      const accountId = Number(operationsRoute.query.create_account)
+      if (Number.isSafeInteger(accountId) && accountId > 0) {
+        newPlan(); accountScope.value = 'manual'; selectedAccounts.value = [accountId]
+        accountStatuses.value = []; initialForm.value = formSnapshot()
+      }
+    }
+  })
   poll = setInterval(() => { if (document.visibilityState === 'visible' && !refreshing.value && !deleting.value) { void store.refreshRules(); void store.refreshOperations() } }, 30_000)
 })
 onBeforeUnmount(() => { alive = false; accountSelectionRequest++; detailRequest++; answerRequest++; accountRequest++; judgeModelsRequest++; if (poll) clearInterval(poll); loadedAnswers.clear() })
