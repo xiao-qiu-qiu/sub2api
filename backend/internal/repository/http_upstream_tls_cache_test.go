@@ -30,9 +30,10 @@ func TestHTTPUpstreamTLSCacheProfileContent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
+			svc, ok := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
 				ConnectionPoolIsolation: config.ConnectionPoolIsolationProxy,
 			}}).(*httpUpstreamService)
+			require.True(t, ok)
 			original := newTLSCacheTestProfile()
 			entry, err := svc.acquireClientWithTLS("http://proxy.example:8080", 41, 1, original, service.HTTPUpstreamProfileDefault)
 			require.NoError(t, err)
@@ -59,9 +60,10 @@ func TestHTTPUpstreamTLSCacheAccountIsolation(t *testing.T) {
 		config.ConnectionPoolIsolationAccountProxy,
 	} {
 		t.Run(isolation, func(t *testing.T) {
-			svc := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
+			svc, ok := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
 				ConnectionPoolIsolation: isolation,
 			}}).(*httpUpstreamService)
+			require.True(t, ok)
 			first, err := svc.acquireClientWithTLS("http://proxy.example:8080", 41, 1, newTLSCacheTestProfile(), service.HTTPUpstreamProfileDefault)
 			require.NoError(t, err)
 			second, err := svc.acquireClientWithTLS("http://proxy.example:8080", 42, 1, newTLSCacheTestProfile(), service.HTTPUpstreamProfileDefault)
@@ -76,10 +78,11 @@ func TestHTTPUpstreamTLSCacheAccountIsolation(t *testing.T) {
 }
 
 func TestHTTPUpstreamTLSCacheProfileChangesRespectLRU(t *testing.T) {
-	svc := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
+	svc, ok := NewHTTPUpstream(&config.Config{Gateway: config.GatewayConfig{
 		ConnectionPoolIsolation: config.ConnectionPoolIsolationProxy,
 		MaxUpstreamClients:      2,
 	}}).(*httpUpstreamService)
+	require.True(t, ok)
 	acquire := func(cipher uint16) (*upstreamClientEntry, error) {
 		profile := &tlsfingerprint.Profile{Name: "random", CipherSuites: []uint16{cipher}}
 		return svc.acquireClientWithTLS("http://proxy.example:8080", 41, 1, profile, service.HTTPUpstreamProfileDefault)

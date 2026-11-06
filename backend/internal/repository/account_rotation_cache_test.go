@@ -30,9 +30,11 @@ func newAccountRotationCacheFixture(t *testing.T) *accountRotationCacheFixture {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
+	cache, ok := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	require.True(t, ok)
 	f := &accountRotationCacheFixture{
 		t: t, server: server, client: client, now: 1_800_000_000,
-		cache: NewConcurrencyCache(client, 15, 900).(*concurrencyCache),
+		cache: cache,
 		policy: service.AccountRotationPolicy{Mode: "aggressive", WorkSeconds: 600,
 			RestMinSeconds: 20, RestMaxSeconds: 20, Revision: "rotation-v1"},
 	}
@@ -286,7 +288,8 @@ func TestAccountRotationConcurrentAdmissionAndDeadline(t *testing.T) {
 	f.policy.WorkSeconds = 60
 	peerClient := redis.NewClient(&redis.Options{Addr: f.server.Addr()})
 	t.Cleanup(func() { _ = peerClient.Close() })
-	peer := NewConcurrencyCache(peerClient, 15, 900).(*concurrencyCache)
+	peer, ok := NewConcurrencyCache(peerClient, 15, 900).(*concurrencyCache)
+	require.True(t, ok)
 	const requests = 24
 	results := make(chan bool, requests)
 	errors := make(chan error, requests)
@@ -413,7 +416,8 @@ func TestAccountRotationRevisionResetsPersistedPlan(t *testing.T) {
 	require.Equal(t, f.now, state.StartedAt)
 	require.Equal(t, f.now+300, state.DrainAt)
 	require.Zero(t, f.client.ZCard(context.Background(), oldPool).Val())
-	peer := NewConcurrencyCache(f.client, 15, 900).(*concurrencyCache)
+	peer, ok := NewConcurrencyCache(f.client, 15, 900).(*concurrencyCache)
+	require.True(t, ok)
 	state2, err := peer.CheckAccountRotation(context.Background(), 1, f.policy)
 	require.NoError(t, err)
 	require.Equal(t, state, state2, "state is Redis-owned across cache instances")
@@ -639,7 +643,8 @@ func TestRoutingAvailabilityRealRedisReadOnly(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 	ctx := t.Context()
 	require.NoError(t, client.Ping(ctx).Err())
-	cache := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	cache, ok := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	require.True(t, ok)
 	policy := service.AccountRotationPolicy{Mode: "aggressive", WorkSeconds: 600, RestMinSeconds: 20, RestMaxSeconds: 20, Revision: "routing-readonly-test"}
 	const accountID int64 = 99123401
 	acquired, err := cache.AcquireAccountSlotWithRotation(ctx, accountID, 2, "existing", policy, false, "routing-readonly-test")

@@ -3541,7 +3541,9 @@ func TestRoutingAvailabilityAPIContract(t *testing.T) {
 				assert.Equal(t, "gpt-5.4", result["model"])
 				assert.Equal(t, "unknown", result["state"])
 				assert.Equal(t, "platform_not_supported", result["reason"])
-				assert.Greater(t, result["checked_at"].(float64), float64(0))
+				checkedAt, ok := result["checked_at"].(float64)
+				require.True(t, ok)
+				assert.Greater(t, checkedAt, float64(0))
 				assert.Equal(t, float64(3), result["retry_after_seconds"])
 			}
 		})

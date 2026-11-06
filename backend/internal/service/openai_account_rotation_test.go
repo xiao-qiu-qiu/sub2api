@@ -202,7 +202,8 @@ func TestOpenAIAccountRotationRestingStickyLookupDoesNotDeleteBinding(t *testing
 	cache.phases[48101] = "resting"
 	require.NoError(t, svc.setStickySessionAccountID(t.Context(), nil, "old-session", 48101, time.Hour))
 	ctx := svc.withAccountRotationSession(t.Context(), nil, "old-session")
-	scheduler := newDefaultOpenAIAccountScheduler(svc, nil).(*defaultOpenAIAccountScheduler)
+	scheduler, ok := newDefaultOpenAIAccountScheduler(svc, nil).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
 	selection, _, err := scheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
 		Platform: PlatformOpenAI, SessionHash: "old-session", RequestedModel: "gpt-5.1", RequiredTransport: OpenAIUpstreamTransportAny,
 	})
@@ -213,7 +214,9 @@ func TestOpenAIAccountRotationRestingStickyLookupDoesNotDeleteBinding(t *testing
 	owner, err := svc.getStickySessionAccountID(t.Context(), nil, "old-session")
 	require.NoError(t, err)
 	require.EqualValues(t, 48101, owner)
-	require.Empty(t, svc.cache.(*schedulerTestGatewayCache).deletedSessions)
+	bindings, ok := svc.cache.(*schedulerTestGatewayCache)
+	require.True(t, ok)
+	require.Empty(t, bindings.deletedSessions)
 	require.Empty(t, cache.calls)
 }
 
@@ -283,7 +286,8 @@ func TestOpenAIAccountRotationWeightedFallbackCannotBypassRest(t *testing.T) {
 		t.Run(tc.mode+"/"+tc.phase, func(t *testing.T) {
 			svc, cache := newOpenAIRotationTestService(t, true, true, true, tc.mode)
 			cache.phases[48101] = tc.phase
-			scheduler := newDefaultOpenAIAccountScheduler(svc, nil).(*defaultOpenAIAccountScheduler)
+			scheduler, ok := newDefaultOpenAIAccountScheduler(svc, nil).(*defaultOpenAIAccountScheduler)
+			require.True(t, ok)
 			ctx := svc.concurrencyService.AccountRotationContext(WithAccountRotationSticky(t.Context(), 48101))
 			selection, err := scheduler.tryFallbackToWeightedSticky(ctx, OpenAIAccountScheduleRequest{
 				Platform: PlatformOpenAI, SessionHash: "old-session", StickyAccountID: 48101,

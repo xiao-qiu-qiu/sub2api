@@ -142,7 +142,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
-          args: --timeout=30m
+          args: --timeout=30m --max-same-issues=0 --max-issues-per-linter=0
           working-directory: backend
 
   pr612-regressions:

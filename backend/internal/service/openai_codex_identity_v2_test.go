@@ -139,10 +139,13 @@ func TestCodexIdentityV2DeviceBodyInstallationMatchesCompactHeader(t *testing.T)
 			require.NotNil(t, ids)
 			require.True(t, applyCodexAccountIdentityClientMetadataMap(body, account, 0))
 			require.True(t, applyCodexFingerprintClientMetadata(body, ids))
-			metadata := body["client_metadata"].(map[string]any)
+			metadata, ok := body["client_metadata"].(map[string]any)
+			require.True(t, ok)
 			require.Equal(t, ids.installationID, metadata["installation_id"])
 			require.Equal(t, ids.installationID, metadata["x-codex-installation-id"])
-			require.Equal(t, ids.installationID, gjson.Get(metadata[openAIWSTurnMetadataHeader].(string), "installation_id").String())
+			turnMetadata, ok := metadata[openAIWSTurnMetadataHeader].(string)
+			require.True(t, ok)
+			require.Equal(t, ids.installationID, gjson.Get(turnMetadata, "installation_id").String())
 
 			// Compact has no client_metadata; its independently resolved header
 			// must reuse the exact installation identity carried in Responses.

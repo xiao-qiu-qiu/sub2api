@@ -109,7 +109,7 @@ func TestHTTPUpstreamCodexEncodingUsesFinalEndpointMethodAndProfile(t *testing.T
 			calls := 0
 			client := &http.Client{Transport: codexEncodingRoundTripper(func(sent *http.Request) (*http.Response, error) {
 				calls++
-				defer sent.Body.Close()
+				defer func() { _ = sent.Body.Close() }()
 				require.Equal(t, tc.path, sent.URL.Path)
 				require.Empty(t, sent.Header.Get("Content-Encoding"))
 				plain, err := io.ReadAll(sent.Body)
@@ -128,7 +128,7 @@ func TestHTTPUpstreamCodexEncodingUsesFinalEndpointMethodAndProfile(t *testing.T
 
 func TestHTTPUpstreamCodexEncodingGetBodyFailureReturnsError(t *testing.T) {
 	req := newCodexEncodingTestRequest(t, true)
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	getBodyErr := errors.New("codex encoding fixture cannot rewind body")
 	req.GetBody = func() (io.ReadCloser, error) { return nil, getBodyErr }
 	calls := 0

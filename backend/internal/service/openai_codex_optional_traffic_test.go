@@ -274,7 +274,8 @@ func TestCodexOptionalTrafficWSSchedulesAfterSendWithActualRegionalProxy(t *test
 	require.NoError(t, err)
 	actualProxy := "http://regional-proxy.test:8080"
 	cfg := regionalWSConfig(t, actualProxy, "chatgpt.com")
-	dialer := newConfiguredOpenAIWSClientDialer(cfg).(*coderOpenAIWSClientDialer)
+	dialer, ok := newConfiguredOpenAIWSClientDialer(cfg).(*coderOpenAIWSClientDialer)
+	require.True(t, ok)
 	// Keep the real coder/websocket handshake and frames, routing this test's
 	// selected proxy client to the local fixture without external networking.
 	transport := &http.Transport{}
@@ -299,7 +300,8 @@ func TestCodexOptionalTrafficWSSchedulesAfterSendWithActualRegionalProxy(t *test
 	conn, _, _, err := dialer.Dial(ctx, "wss://chatgpt.com/backend-api/codex/responses", req.Header, "")
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
-	wrapped := conn.(*coderOpenAIWSClientConn)
+	wrapped, ok := conn.(*coderOpenAIWSClientConn)
+	require.True(t, ok)
 	require.Equal(t, actualProxy, wrapped.optionalTrafficProxy)
 	require.Nil(t, wrapped.optionalTrafficContext.Value(privateContextKey{}))
 	require.Equal(t, "__oailb=regional", (<-handshakes).Get("Cookie"))

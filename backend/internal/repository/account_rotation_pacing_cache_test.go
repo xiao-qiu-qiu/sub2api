@@ -461,7 +461,8 @@ func TestAccountRotationRecoveryCoordinatesConcurrentCacheClients(t *testing.T) 
 	f := newAccountRotationPacingFixture(t)
 	peerClient := redis.NewClient(&redis.Options{Addr: f.server.Addr()})
 	t.Cleanup(func() { _ = peerClient.Close() })
-	peer := NewConcurrencyCache(peerClient, 15, 900).(*concurrencyCache)
+	peer, ok := NewConcurrencyCache(peerClient, 15, 900).(*concurrencyCache)
+	require.True(t, ok)
 	const requests = 16
 	remaining := make([]string, requests)
 	for i := range remaining {
