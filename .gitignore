@@ -151,6 +151,7 @@ docs/*
 !docs/openai-ws-mode.md
 !docs/openai-outbound-identity.md
 !docs/codex-fingerprint-fusion.md
+!docs/proxy-exit-geolocation.md
 !docs/codeq-release.md
 !docs/account-rotation.md
 !docs/openai-2fa-dual-oauth.md
