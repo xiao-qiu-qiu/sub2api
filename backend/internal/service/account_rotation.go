@@ -407,7 +407,10 @@ func (s *ConcurrencyService) accountRotationPool(ctx context.Context, id int64) 
 }
 
 func (s *ConcurrencyService) acquireAccountRotationSlot(ctx context.Context, accountID int64, maxConcurrency int, policy AccountRotationPolicy) (*AcquireResult, error) {
-	cache := s.cache.(AccountRotationCache)
+	cache, ok := s.cache.(AccountRotationCache)
+	if !ok {
+		return nil, ErrAccountRotationUnsupported
+	}
 	pool, err := s.accountRotationPool(ctx, accountID)
 	if err != nil {
 		return nil, err

@@ -32,7 +32,7 @@ func newCodexEncodingTestRequest(t *testing.T, enabled bool) *http.Request {
 
 func TestHTTPUpstreamCodexEncodingKeepsRoutingJSONUntilNativeSend(t *testing.T) {
 	req := newCodexEncodingTestRequest(t, true)
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	// Exercise the actual repository routing predicate before the native send.
 	// The compression marker must not hide model JSON from Astra ticket routing.
 	require.True(t, codexGatewayPinRequest(req))
@@ -44,7 +44,7 @@ func TestHTTPUpstreamCodexEncodingKeepsRoutingJSONUntilNativeSend(t *testing.T) 
 	var firstWire []byte
 	client := &http.Client{Transport: codexEncodingRoundTripper(func(sent *http.Request) (*http.Response, error) {
 		calls++
-		defer sent.Body.Close()
+		defer func() { _ = sent.Body.Close() }()
 		require.Equal(t, "zstd", sent.Header.Get("Content-Encoding"))
 		require.Equal(t, "application/json", sent.Header.Get("Content-Type"))
 		wire, err := io.ReadAll(sent.Body)

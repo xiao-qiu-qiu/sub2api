@@ -50,7 +50,7 @@ func TestCodexWireHTTPTransportBoundary(t *testing.T) {
 	require.Equal(t, plain, decoded)
 	replay, err := wire.GetBody()
 	require.NoError(t, err)
-	defer replay.Close()
+	defer func() { _ = replay.Close() }()
 	copy, err := io.ReadAll(replay)
 	require.NoError(t, err)
 	require.Equal(t, encoded, copy)

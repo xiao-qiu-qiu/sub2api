@@ -13,7 +13,11 @@ func (s *OpenAIGatewayService) openAIStickyRotationWaiting(ctx context.Context, 
 	if err != nil || policy == nil {
 		return false
 	}
-	state, err := s.concurrencyService.cache.(AccountRotationCache).CheckAccountRotation(ctx, accountID, *policy)
+	cache, ok := s.concurrencyService.cache.(AccountRotationCache)
+	if !ok {
+		return false
+	}
+	state, err := cache.CheckAccountRotation(ctx, accountID, *policy)
 	return err == nil && state != nil && (state.Hold || state.Recovering)
 }
 

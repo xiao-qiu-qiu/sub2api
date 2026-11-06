@@ -134,7 +134,8 @@ func TestOpenAIAccountRotationStickyRequiresExistingBinding(t *testing.T) {
 				t.Run(fmt.Sprintf("advanced=%t/%s/existing=%t", advanced, mode, existing), func(t *testing.T) {
 					svc, cache := newOpenAIRotationTestService(t, advanced, true, true, mode)
 					cache.phases[48101] = "draining"
-					bindings := svc.cache.(*schedulerTestGatewayCache)
+					bindings, ok := svc.cache.(*schedulerTestGatewayCache)
+					require.True(t, ok)
 					if existing {
 						require.NoError(t, svc.setStickySessionAccountID(t.Context(), nil, "session", 48101, time.Hour))
 					}

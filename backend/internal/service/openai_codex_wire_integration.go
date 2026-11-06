@@ -113,7 +113,7 @@ func extractOpenAICodexTicketModelFromRequest(req *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return ""
