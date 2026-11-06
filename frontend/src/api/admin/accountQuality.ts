@@ -38,6 +38,7 @@ export interface QualityRuleTemplate {
   max_results: number
   pelican_config: PelicanTestConfig
   plan_ids: number[]
+  excluded_account_ids?: number[]
   last_synced_at: string | null
   created_at: string
   updated_at: string
@@ -49,6 +50,12 @@ export interface QualityRuleTemplateRequest {
   enabled?: boolean
   max_results?: number
   pelican_config?: PelicanTestConfig
+  reinclude_account_ids?: number[]
+}
+export interface QualityTemplateReincludeResult {
+  account_id: number
+  status: 'created' | 'already_covered' | 'failed'
+  reason?: string
 }
 export async function listQualityTemplates(): Promise<QualityRuleTemplate[]> {
   const { data } = await apiClient.get<QualityRuleTemplate[]>('/admin/account-quality-templates')
@@ -58,7 +65,7 @@ export async function createQualityTemplate(body: QualityRuleTemplateRequest): P
   const { data } = await apiClient.post('/admin/account-quality-templates', body)
   return data
 }
-export async function updateQualityTemplate(id: number, body: QualityRuleTemplateRequest): Promise<{ template: QualityRuleTemplate; updated: number; failed: number; created: number }> {
+export async function updateQualityTemplate(id: number, body: QualityRuleTemplateRequest): Promise<{ template: QualityRuleTemplate; updated: number; failed: number; created: number; reinclude_results?: QualityTemplateReincludeResult[] }> {
   const { data } = await apiClient.put(`/admin/account-quality-templates/${id}`, body)
   return data
 }

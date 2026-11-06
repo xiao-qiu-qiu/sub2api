@@ -127,7 +127,8 @@
           v-model:statuses="accountStatuses" v-model:scope="accountScope"
           :accounts="accounts" :groups="groups" :accounts-loading="accountsLoading" :selecting-accounts="selectingAccounts" :accounts-error="accountsError"
           :account-page="accountPage" :account-pages="accountPages" :accounts-total="accountsTotal" :bulk="bulkEditing" :scope-locked="!!editingTemplate" :hide-scope="copying" :selection-hint="copying ? t('qualityOps.copyAccountHint') : undefined" :disabled-reason="accountDisabledReason"
-          @search="searchAccounts" @select-page="selectCurrentPage" @select-all="selectMatchingAccounts" @clear="clearAccountSelection" />
+          :excluded-account-ids="editingTemplateRecord?.excluded_account_ids" :reinclude-account-ids="reincludeAccountIds" :disabled="busy"
+          @search="searchAccounts" @select-page="selectCurrentPage" @select-all="selectMatchingAccounts" @clear="clearAccountSelection" @toggle-reinclude="toggleReincludeAccount" />
         <div v-if="editsField('test')" class="space-y-2">
           <label class="block space-y-1"><span>{{ t('qualityOps.questionKind') }}</span><select v-model="form.pelican_config.question_kind" class="input" data-testid="quality-question-kind" @change="selectQuestionKind"><option value="candy">{{ t('qualityOps.questionCandy') }}</option><option value="random_reasoning">{{ t('qualityOps.questionRandom') }}</option><option :value="STATE_PROBE_QUESTION">{{ t('qualityOps.questionStateProbe') }}</option></select></label>
           <p v-if="isProbe" class="text-sm text-gray-500" data-testid="quality-probe-hint">{{ t('qualityOps.probeHint') }}</p>
@@ -370,6 +371,7 @@ const canCopyRules = computed(() => auth.user?.role === 'admin')
 const editingTemplate = ref<number | null>(null), templatePending = ref<Record<number, string>>({})
 const templateDeleteTarget = ref<QualityRuleTemplate | null>(null), deletePlansWithTemplate = ref(true), templateDeleting = ref(false)
 const editingTemplateRecord = computed(() => templates.value.find(tpl => tpl.id === editingTemplate.value))
+const reincludeAccountIds = ref<number[]>([])
 const planTemplate = computed(() => {
   const owners: Record<number, number> = {}
   for (const tpl of templates.value) for (const id of tpl.plan_ids) owners[id] = tpl.id
@@ -388,9 +390,21 @@ const pickerAccountIds = computed({
 function accountDisabledReason(account: AccountListItem) {
   if (bulkEditing.value) return existingAccountIds.value.has(account.id) ? '' : t('qualityOps.accountNoRule')
   if (editingTemplate.value && templateAccountIds.value.has(account.id)) return t('qualityOps.accountCoveredByTemplate')
+  if (editingTemplate.value && editingTemplateRecord.value?.excluded_account_ids?.includes(account.id) && !form.value.enabled) return t('qualityOps.reincludeReasons.template_disabled')
   if (!copying.value && existingAccountIds.value.has(account.id)) return t('qualityOps.accountHasRule')
   if (isProbe.value && !supportsStateProbeAccount(account)) return t('qualityOps.probeAccountUnsupported')
   return ''
+}
+function toggleReincludeAccount(accountId: number) {
+  if (busy.value || !editingTemplate.value) return
+  if (reincludeAccountIds.value.includes(accountId)) {
+    reincludeAccountIds.value = reincludeAccountIds.value.filter(id => id !== accountId)
+    return
+  }
+  const account = accounts.value.find(item => item.id === accountId)
+  if (account && editingTemplateRecord.value?.excluded_account_ids?.includes(accountId) && !accountDisabledReason(account)) {
+    reincludeAccountIds.value = [...reincludeAccountIds.value, accountId]
+  }
 }
 function supportsStateProbeAccount(account: AccountListItem) {
   return account.platform === 'openai' && ['oauth', 'setup-token'].includes(account.type) && account.extra?.synthetic_ui_test !== true
@@ -668,8 +682,8 @@ const bps = computed(() => form.value.pelican_config.quality.bps)
 const bpsSettingsShown = computed(() => editsField('action') && isProbe.value && form.value.pelican_config.quality.action === 'enable_bps')
 // 与账号批量编辑的 403 目标分组候选一致：OpenAI 分组，非简易模式下另含混合分组。
 const bpsTargetGroups = computed(() => groups.value.filter(group => group.platform === 'openai' || (!auth.isSimpleMode && group.platform === 'composite')))
-const formSnapshot = () => JSON.stringify([form.value, removeModelsInput.value, presetName.value, selectedAccounts.value, bulkRuleIds.value, bulkFields.value,
-  editingTemplate.value ? [accountGroup.value, accountType.value, search.value, accountStatuses.value] : null])
+const formSnapshot = (reinclusions = reincludeAccountIds.value) => JSON.stringify([form.value, removeModelsInput.value, presetName.value, selectedAccounts.value, bulkRuleIds.value, bulkFields.value,
+  editingTemplate.value ? [accountGroup.value, accountType.value, search.value, accountStatuses.value, reinclusions] : null])
 function message(e: unknown) { const err = e as { response?: { data?: { message?: string; error?: string } }; message?: string }; return err.response?.data?.message || err.response?.data?.error || err.message || t('qualityOps.error') }
 async function load() { await store.refresh() }
 async function refreshOperations() { await store.refreshOperations() }
@@ -720,6 +734,7 @@ async function selectMatchingAccounts() {
 }
 function newPlan() {
   if (busy.value) return
+  reincludeAccountIds.value = []
   resetReuse()
   copying.value = false; copySourceAccountId.value = null; savingPreset.value = false; editingPreset.value = null; presetName.value = ''
   sourceAccountId.value = sourceRuleId.value = selectedPresetId.value = ''
@@ -800,6 +815,7 @@ function applyPreset() {
 }
 function edit(plan: ScheduledTestPlan) {
   if (busy.value || pending.value[plan.id] || plan.pelican_config?.quality?.action === 'openai_two_fa_admission') return
+  reincludeAccountIds.value = []
   ownershipBlocked.value = false
   resetReuse()
   copying.value = false; copySourceAccountId.value = null; savingPreset.value = false; editingPreset.value = null; presetName.value = ''
@@ -814,9 +830,10 @@ function edit(plan: ScheduledTestPlan) {
   form.value.pelican_config.quality.bps = qualityBPSForm(form.value.pelican_config.quality.bps)
   showForm.value = true; initialForm.value = formSnapshot(); void loadJudgeModels()
 }
-// 编辑分组规则：沿用单条规则的表单，账户选择器只改筛选，范围固定为「所有匹配账户」。
+// 编辑分组规则：筛选决定新账号，已排除账号需显式选择重新纳入。
 function editTemplate(tpl: QualityRuleTemplate) {
   if (busy.value) return
+  reincludeAccountIds.value = []
   resetReuse()
   copying.value = false; copySourceAccountId.value = null; savingPreset.value = false; editingPreset.value = null; presetName.value = ''
   sourceAccountId.value = sourceRuleId.value = selectedPresetId.value = ''
@@ -964,12 +981,20 @@ async function save() {
       const { model_id, cron_expression, enabled, max_results, pelican_config } = payload()
       const body = { model_id, cron_expression, enabled, max_results, pelican_config, account_filter: templateFilter() }
       if (editingTemplate.value) {
-        const result = await updateQualityTemplate(editingTemplate.value, body); changed = true
+        const requested = [...reincludeAccountIds.value]
+        const result = await updateQualityTemplate(editingTemplate.value, { ...body, ...(requested.length ? { reinclude_account_ids: requested } : {}) }); changed = true
         if (!alive || scope !== identity()) return
-        if (result.failed) {
-          // 分组规则本身已保存，没同步上的账号规则再保存一次即可重试。
-          error.value = t('qualityOps.templateUpdatePartial', { failed: result.failed, updated: result.updated })
-          initialForm.value = formSnapshot(); await store.refreshRules(true); return
+        const outcomes = new Map((result.reinclude_results || []).map(item => [item.account_id, item]))
+        reincludeAccountIds.value = requested.filter(id => !['created', 'already_covered'].includes(outcomes.get(id)?.status || ''))
+        if (result.failed || reincludeAccountIds.value.length) {
+          const reasons = reincludeAccountIds.value.map(id => {
+            const reason = outcomes.get(id)?.reason || 'unconfirmed'
+            const knownReasons = ['not_matching', 'unsupported_account', 'unsupported_models', 'model_check_failed', 'rule_exists', 'template_changed', 'account_changed', 'template_disabled', 'not_excluded', 'create_failed', 'unconfirmed']
+            return `#${id} ${t(`qualityOps.reincludeReasons.${knownReasons.includes(reason) ? reason : 'create_failed'}`)}`
+          })
+          error.value = [result.failed ? t('qualityOps.templateUpdatePartial', { failed: result.failed, updated: result.updated }) : '',
+            reasons.length ? t('qualityOps.reincludePartial', { reasons: reasons.join('；') }) : ''].filter(Boolean).join(' ')
+          initialForm.value = formSnapshot([]); await store.refreshRules(true); return
         }
         notice.value = t('qualityOps.templateUpdated', { updated: result.updated, created: result.created })
       } else {

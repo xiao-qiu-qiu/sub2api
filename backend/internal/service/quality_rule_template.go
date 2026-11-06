@@ -35,17 +35,18 @@ type QualityRuleAccountFilter struct {
 // Each matching account gets its own scheduled plan; accounts that start matching
 // later get one on the next sync.
 type QualityRuleTemplate struct {
-	PelicanConfig  *PelicanTestConfig       `json:"pelican_config"`
-	LastSyncedAt   *time.Time               `json:"last_synced_at"`
-	AccountFilter  QualityRuleAccountFilter `json:"account_filter"`
-	PlanIDs        []int64                  `json:"plan_ids"`
-	ModelID        string                   `json:"model_id"`
-	CronExpression string                   `json:"cron_expression"`
-	CreatedAt      time.Time                `json:"created_at"`
-	UpdatedAt      time.Time                `json:"updated_at"`
-	ID             int64                    `json:"id"`
-	MaxResults     int                      `json:"max_results"`
-	Enabled        bool                     `json:"enabled"`
+	PelicanConfig      *PelicanTestConfig       `json:"pelican_config"`
+	LastSyncedAt       *time.Time               `json:"last_synced_at"`
+	AccountFilter      QualityRuleAccountFilter `json:"account_filter"`
+	PlanIDs            []int64                  `json:"plan_ids"`
+	ExcludedAccountIDs []int64                  `json:"excluded_account_ids"`
+	ModelID            string                   `json:"model_id"`
+	CronExpression     string                   `json:"cron_expression"`
+	CreatedAt          time.Time                `json:"created_at"`
+	UpdatedAt          time.Time                `json:"updated_at"`
+	ID                 int64                    `json:"id"`
+	MaxResults         int                      `json:"max_results"`
+	Enabled            bool                     `json:"enabled"`
 }
 
 // QualityTemplateAccount is the account data a template sync needs.
@@ -58,10 +59,42 @@ type QualityTemplateAccount struct {
 
 // QualityTemplateUpdate reports how an edit reached the template's existing rules.
 type QualityTemplateUpdate struct {
-	Template *QualityRuleTemplate `json:"template"`
-	Updated  int                  `json:"updated"`
-	Failed   int                  `json:"failed"`
-	Created  int                  `json:"created"`
+	Template         *QualityRuleTemplate             `json:"template"`
+	Updated          int                              `json:"updated"`
+	Failed           int                              `json:"failed"`
+	Created          int                              `json:"created"`
+	ReincludeResults []QualityTemplateReincludeResult `json:"reinclude_results,omitempty"`
+}
+
+// QualityTemplateReincludeResult uses stable machine codes; callers localize Reason.
+// Reinclude failures are independent of Failed, which counts existing-plan updates.
+type QualityTemplateReincludeResult struct {
+	AccountID int64  `json:"account_id"`
+	Status    string `json:"status"` // created, already_covered, failed
+	Reason    string `json:"reason,omitempty"`
+}
+
+// QualityRuleTemplateReincludeRepository is optional so existing repository adapters
+// retain ordinary update/sync behavior. prepare runs without a transaction or row
+// locks: model discovery may read or update the account on another connection.
+// Creation then locks and rechecks the template, account snapshot and NULL binding.
+type QualityRuleTemplateReincludeRepository interface {
+	ReincludeAccount(ctx context.Context, template *QualityRuleTemplate, accountID int64,
+		prepare func(context.Context, QualityTemplateAccount) (*ScheduledTestPlan, string)) (QualityTemplateReincludeResult, error)
+}
+
+const MaxQualityTemplateReincludeAccounts = 1000
+
+func validateQualityTemplateReincludeIDs(ids []int64) error {
+	if len(ids) > MaxQualityTemplateReincludeAccounts {
+		return fmt.Errorf("reinclude_account_ids must contain at most %d entries", MaxQualityTemplateReincludeAccounts)
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			return fmt.Errorf("reinclude_account_ids must contain positive account IDs")
+		}
+	}
+	return nil
 }
 
 // QualityRuleTemplateRepository stores group rules and the accounts each one has covered.
@@ -245,7 +278,11 @@ func (s *ScheduledTestService) CreateQualityTemplate(ctx context.Context, t *Qua
 // UpdateQualityTemplate saves the template and applies the same settings to every rule it
 // created (pausing the template pauses them). A changed filter only affects accounts that
 // start matching from now on.
-func (s *ScheduledTestService) UpdateQualityTemplate(ctx context.Context, t *QualityRuleTemplate) (*QualityTemplateUpdate, error) {
+func (s *ScheduledTestService) UpdateQualityTemplate(ctx context.Context, t *QualityRuleTemplate, reincludeAccountIDs ...int64) (*QualityTemplateUpdate, error) {
+	// Reject the whole request before even saving the template or updating its plans.
+	if err := validateQualityTemplateReincludeIDs(reincludeAccountIDs); err != nil {
+		return nil, err
+	}
 	if s.templateRepo == nil {
 		return nil, errQualityTemplatesUnavailable
 	}
@@ -256,6 +293,7 @@ func (s *ScheduledTestService) UpdateQualityTemplate(ctx context.Context, t *Qua
 	if err != nil {
 		return nil, err
 	}
+	reincludeVersion := saved
 	// Re-read after the update commits so rules created by a concurrent sync are included.
 	saved = s.reloadQualityTemplate(ctx, saved)
 	result := &QualityTemplateUpdate{}
@@ -293,13 +331,63 @@ func (s *ScheduledTestService) UpdateQualityTemplate(ctx context.Context, t *Qua
 		}
 		result.Updated++
 	}
+	seen := make(map[int64]struct{}, len(reincludeAccountIDs))
+	for _, accountID := range reincludeAccountIDs {
+		if _, duplicate := seen[accountID]; duplicate {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		entry := s.reincludeQualityTemplateAccount(ctx, reincludeVersion, accountID)
+		result.ReincludeResults = append(result.ReincludeResults, entry)
+		if entry.Status == "created" {
+			result.Created++
+		}
+	}
 	if saved.Enabled {
-		if result.Created, err = s.syncQualityTemplate(ctx, saved, nil); err != nil {
-			logger.LegacyPrintf("service.scheduled_test", "quality template %d sync after edit: %v", saved.ID, err)
+		created, syncErr := s.syncQualityTemplate(ctx, saved, nil)
+		result.Created += created
+		if syncErr != nil {
+			logger.LegacyPrintf("service.scheduled_test", "quality template %d sync after edit: %v", saved.ID, syncErr)
 		}
 	}
 	result.Template = s.reloadQualityTemplate(ctx, saved)
 	return result, nil
+}
+
+func (s *ScheduledTestService) reincludeQualityTemplateAccount(ctx context.Context, t *QualityRuleTemplate, accountID int64) QualityTemplateReincludeResult {
+	failed := QualityTemplateReincludeResult{AccountID: accountID, Status: "failed", Reason: "create_failed"}
+	if !t.Enabled {
+		failed.Reason = "template_disabled"
+		return failed
+	}
+	repo, ok := s.templateRepo.(QualityRuleTemplateReincludeRepository)
+	if !ok {
+		return failed
+	}
+	entry, err := repo.ReincludeAccount(ctx, t, accountID, func(ctx context.Context, account QualityTemplateAccount) (*ScheduledTestPlan, string) {
+		if isOpenAICodexStateProbePlan(t.PelicanConfig) && !qualityProbeSupportsAccount(account) {
+			return nil, "unsupported_account"
+		}
+		plan := t.planFor(accountID)
+		supported, err := s.filterQualityTemplatePlan(ctx, plan)
+		if err != nil {
+			return nil, "model_check_failed"
+		}
+		if !supported {
+			return nil, "unsupported_models"
+		}
+		next, err := nextPlanRun(plan, time.Now())
+		if err != nil {
+			return nil, "create_failed"
+		}
+		plan.NextRunAt = &next
+		return plan, ""
+	})
+	if err != nil {
+		logger.LegacyPrintf("service.scheduled_test", "quality template %d reinclude account %d: %v", t.ID, accountID, err)
+		return failed
+	}
+	return entry
 }
 
 // DeleteQualityTemplate stops following the filter. With deletePlans the rules it created

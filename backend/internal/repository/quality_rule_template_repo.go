@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -33,14 +35,20 @@ const qualityRuleTemplateColumns = `
 		JOIN accounts a ON a.id = p.account_id AND a.deleted_at IS NULL
 		WHERE l.template_id = t.id
 		ORDER BY l.plan_id
+	),
+	ARRAY(
+		SELECT l.account_id FROM quality_rule_template_accounts l
+		JOIN accounts a ON a.id = l.account_id AND a.deleted_at IS NULL
+		WHERE l.template_id = t.id AND l.plan_id IS NULL
+		ORDER BY l.account_id
 	)`
 
 func scanQualityRuleTemplate(row scannable) (*service.QualityRuleTemplate, error) {
 	t := &service.QualityRuleTemplate{}
 	var filter, config []byte
-	var planIDs pq.Int64Array
+	var planIDs, excludedAccountIDs pq.Int64Array
 	if err := row.Scan(&t.ID, &filter, &t.ModelID, &t.CronExpression, &t.Enabled, &t.MaxResults, &config,
-		&t.LastSyncedAt, &t.CreatedAt, &t.UpdatedAt, &planIDs); err != nil {
+		&t.LastSyncedAt, &t.CreatedAt, &t.UpdatedAt, &planIDs, &excludedAccountIDs); err != nil {
 		return nil, err
 	}
 	if len(filter) > 0 {
@@ -56,6 +64,10 @@ func scanQualityRuleTemplate(row scannable) (*service.QualityRuleTemplate, error
 	t.PlanIDs = []int64(planIDs)
 	if t.PlanIDs == nil {
 		t.PlanIDs = []int64{}
+	}
+	t.ExcludedAccountIDs = []int64(excludedAccountIDs)
+	if t.ExcludedAccountIDs == nil {
+		t.ExcludedAccountIDs = []int64{}
 	}
 	return t, nil
 }
@@ -119,21 +131,17 @@ func (r *qualityRuleTemplateRepository) Update(ctx context.Context, t *service.Q
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.db.ExecContext(ctx, `
-		UPDATE quality_rule_templates
+	saved, err := scanQualityRuleTemplate(r.db.QueryRowContext(ctx, `
+		UPDATE quality_rule_templates t
 		SET account_filter = $2, model_id = $3, cron_expression = $4, enabled = $5, max_results = $6,
 			pelican_config = $7, updated_at = NOW()
 		WHERE id = $1
-	`, t.ID, filter, t.ModelID, t.CronExpression, t.Enabled, t.MaxResults, marshalPelicanConfig(t.PelicanConfig))
-	if err != nil {
-		return nil, err
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return nil, err
-	} else if n == 0 {
+		RETURNING `+qualityRuleTemplateColumns,
+		t.ID, filter, t.ModelID, t.CronExpression, t.Enabled, t.MaxResults, marshalPelicanConfig(t.PelicanConfig)))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, service.ErrQualityTemplateNotFound
 	}
-	return r.Get(ctx, t.ID)
+	return saved, err
 }
 
 // Delete locks the template first so a sync in flight either finishes its plan (and it is
@@ -190,8 +198,7 @@ func (r *qualityRuleTemplateRepository) Delete(ctx context.Context, id int64) (p
 // MatchingAccounts reuses the admin account list predicates so the selector's count and the
 // accounts a group rule covers always agree.
 func (r *qualityRuleTemplateRepository) MatchingAccounts(ctx context.Context, filter service.QualityRuleAccountFilter) ([]service.QualityTemplateAccount, error) {
-	accounts := &accountRepository{client: r.client}
-	rows, err := accounts.accountListFilteredQuery("", filter.Type, strings.Join(filter.Statuses, ","), filter.Search, service.QualityTemplateGroupID(filter), "").
+	rows, err := qualityTemplateAccountsQuery(r.client, filter).
 		Order(dbent.Asc(dbaccount.FieldID)).
 		Select(dbaccount.FieldID, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldExtra).
 		All(ctx)
@@ -203,6 +210,12 @@ func (r *qualityRuleTemplateRepository) MatchingAccounts(ctx context.Context, fi
 		out = append(out, service.QualityTemplateAccount{ID: row.ID, Platform: row.Platform, Type: row.Type, Extra: row.Extra})
 	}
 	return out, nil
+}
+
+func qualityTemplateAccountsQuery(client *dbent.Client, filter service.QualityRuleAccountFilter) *dbent.AccountQuery {
+	accounts := &accountRepository{client: client}
+	return accounts.accountListFilteredQuery("", filter.Type, strings.Join(filter.Statuses, ","), filter.Search, service.QualityTemplateGroupID(filter), "").
+		Where(dbaccount.DeletedAtIsNil())
 }
 
 func (r *qualityRuleTemplateRepository) LinkedAccountIDs(ctx context.Context, id int64) (map[int64]struct{}, error) {
@@ -276,6 +289,185 @@ func (r *qualityRuleTemplateRepository) CreateLinkedPlan(ctx context.Context, t 
 		return nil, err
 	}
 	return created, nil
+}
+
+// Only configuration used by type/model validation and discovery belongs in this
+// snapshot. Traffic timestamps and other runtime fields must not invalidate it;
+// current filter membership is checked separately inside the transaction.
+const qualityTemplateAccountConfigSnapshot = `jsonb_build_array(a.platform, a.type, a.credentials, a.extra, a.proxy_id, a.parent_account_id)::text`
+
+// ReincludeAccount prepares models before opening a transaction, then consumes
+// only the same NULL binding against an unchanged account snapshot. Lock order is
+// template -> existing plans (ascending ID) -> account -> binding, following
+// plan update/deletion's plan -> account order.
+// Ordinary sync still treats every binding (including NULL) as permanent coverage.
+func (r *qualityRuleTemplateRepository) ReincludeAccount(ctx context.Context, t *service.QualityRuleTemplate, accountID int64,
+	prepare func(context.Context, service.QualityTemplateAccount) (*service.ScheduledTestPlan, string)) (service.QualityTemplateReincludeResult, error) {
+	result := service.QualityTemplateReincludeResult{AccountID: accountID, Status: "failed", Reason: "create_failed"}
+	// The config snapshot catches credential/extra changes without rejecting
+	// ordinary usage writes. Binding xmin detects NULL -> plan -> NULL during a
+	// slow discovery, so a concurrent fresh deletion cannot be undone here.
+	var accountSnapshot string
+	var bindingVersion sql.NullString
+	var priorPlanID sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT `+qualityTemplateAccountConfigSnapshot+`, l.xmin::text, l.plan_id FROM accounts a
+		LEFT JOIN quality_rule_template_accounts l ON l.account_id=a.id AND l.template_id=$1
+		WHERE a.id=$2 AND a.deleted_at IS NULL`, t.ID, accountID).Scan(&accountSnapshot, &bindingVersion, &priorPlanID)
+	if errors.Is(err, sql.ErrNoRows) {
+		result.Reason = "not_matching"
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	if !bindingVersion.Valid {
+		result.Reason = "not_excluded"
+		return result, nil
+	}
+	var plan *service.ScheduledTestPlan
+	var prepareReason string
+	if !priorPlanID.Valid {
+		account, err := qualityTemplateAccountsQuery(r.client, t.AccountFilter).Where(dbaccount.IDEQ(accountID)).Only(ctx)
+		if dbent.IsNotFound(err) {
+			prepareReason = "not_matching"
+		} else if err != nil {
+			return result, err
+		} else {
+			plan, prepareReason = prepare(ctx, service.QualityTemplateAccount{ID: account.ID, Platform: account.Platform, Type: account.Type, Extra: account.Extra})
+		}
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var enabled bool
+	var version time.Time
+	err = tx.QueryRowContext(ctx, `SELECT enabled, updated_at FROM quality_rule_templates WHERE id=$1 FOR SHARE`, t.ID).Scan(&enabled, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		result.Reason = "template_changed"
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	if !enabled {
+		result.Reason = "template_disabled"
+		return result, nil
+	}
+	if !version.Equal(t.UpdatedAt) {
+		result.Reason = "template_changed"
+		return result, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM scheduled_test_plans WHERE account_id=$1 ORDER BY id FOR UPDATE`, accountID)
+	if err != nil {
+		return result, err
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return result, err
+		}
+	}
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return result, err
+	}
+	if closeErr != nil {
+		return result, closeErr
+	}
+	var lockedSnapshot string
+	// NO KEY UPDATE still fences account edits, but permits FK KEY SHARE checks
+	// by concurrent plan inserts before they reach the unique scope constraint.
+	err = tx.QueryRowContext(ctx, `SELECT `+qualityTemplateAccountConfigSnapshot+` FROM accounts a WHERE a.id=$1 AND a.deleted_at IS NULL FOR NO KEY UPDATE`, accountID).Scan(&lockedSnapshot)
+	if errors.Is(err, sql.ErrNoRows) {
+		result.Reason = "not_matching"
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	var planID sql.NullInt64
+	var lockedBindingVersion string
+	err = tx.QueryRowContext(ctx, `SELECT plan_id, xmin::text FROM quality_rule_template_accounts WHERE template_id=$1 AND account_id=$2 FOR UPDATE`, t.ID, accountID).Scan(&planID, &lockedBindingVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		result.Reason = "not_excluded"
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	if planID.Valid {
+		result.Status, result.Reason = "already_covered", ""
+		return result, nil
+	}
+	// Reuse all admin selector predicates, on the very transaction holding the
+	// account lock. Never trust a match collected before waiting for that lock.
+	client := dbent.NewClient(dbent.Driver(entsql.NewDriver(dialect.Postgres, entsql.Conn{ExecQuerier: tx})))
+	matching, err := qualityTemplateAccountsQuery(client, t.AccountFilter).Where(dbaccount.IDEQ(accountID)).Exist(ctx)
+	if err != nil {
+		return result, err
+	}
+	if !matching {
+		result.Reason = "not_matching"
+		return result, nil
+	}
+	if lockedSnapshot != accountSnapshot {
+		result.Reason = "account_changed"
+		return result, nil
+	}
+	if priorPlanID.Valid || lockedBindingVersion != bindingVersion.String {
+		result.Reason = "not_excluded"
+		return result, nil
+	}
+	if prepareReason != "" {
+		result.Reason = prepareReason
+		return result, nil
+	}
+	if plan == nil || plan.AccountID != accountID {
+		return result, nil
+	}
+	var scopeTaken bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM scheduled_test_plans WHERE account_id=$1 AND pelican_config->'quality' IS NOT NULL
+		AND (CASE pelican_config->'quality'->>'action' WHEN 'enable_bps' THEN 'bps' WHEN 'observe_only' THEN 'observation' ELSE 'quarantine' END)
+		  = (CASE $2::text WHEN 'enable_bps' THEN 'bps' WHEN 'observe_only' THEN 'observation' ELSE 'quarantine' END)
+	)`, accountID, plan.PelicanConfig.Quality.Action).Scan(&scopeTaken)
+	if err != nil {
+		return result, err
+	}
+	if scopeTaken {
+		result.Reason = "rule_exists"
+		return result, nil
+	}
+	// The unique index is the final fence against ordinary plan creation, which
+	// need not acquire this account lock. A conflict must roll back, keeping NULL.
+	created, err := insertScheduledTestPlan(ctx, tx, plan)
+	if isUniqueViolation(err) {
+		result.Reason = "rule_exists"
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE quality_rule_template_accounts SET plan_id=$3 WHERE template_id=$1 AND account_id=$2 AND plan_id IS NULL`, t.ID, accountID, created.ID)
+	if err != nil {
+		return result, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return result, err
+	} else if n != 1 {
+		result.Reason = "not_excluded"
+		return result, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	result.Status, result.Reason = "created", ""
+	return result, nil
 }
 
 // MarkSynced leaves updated_at alone so it never invalidates a concurrent sync.

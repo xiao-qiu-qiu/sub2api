@@ -11,12 +11,13 @@ import (
 )
 
 type qualityRuleTemplateRequest struct {
-	PelicanConfig  *service.PelicanTestConfig        `json:"pelican_config"`
-	AccountFilter  *service.QualityRuleAccountFilter `json:"account_filter"`
-	Enabled        *bool                             `json:"enabled"`
-	ModelID        string                            `json:"model_id"`
-	CronExpression string                            `json:"cron_expression"`
-	MaxResults     int                               `json:"max_results"`
+	PelicanConfig       *service.PelicanTestConfig        `json:"pelican_config"`
+	AccountFilter       *service.QualityRuleAccountFilter `json:"account_filter"`
+	Enabled             *bool                             `json:"enabled"`
+	ModelID             string                            `json:"model_id"`
+	CronExpression      string                            `json:"cron_expression"`
+	MaxResults          int                               `json:"max_results"`
+	ReincludeAccountIDs []int64                           `json:"reinclude_account_ids"`
 }
 
 func parseQualityTemplateID(c *gin.Context) (int64, bool) {
@@ -111,7 +112,7 @@ func (h *ScheduledTestHandler) UpdateQualityTemplate(c *gin.Context) {
 	if req.MaxResults > 0 {
 		existing.MaxResults = req.MaxResults
 	}
-	result, err := h.scheduledTestSvc.UpdateQualityTemplate(c.Request.Context(), existing)
+	result, err := h.scheduledTestSvc.UpdateQualityTemplate(c.Request.Context(), existing, req.ReincludeAccountIDs...)
 	if errors.Is(err, service.ErrQualityTemplateNotFound) {
 		response.NotFound(c, "template not found")
 		return

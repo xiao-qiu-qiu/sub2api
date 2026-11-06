@@ -17,7 +17,10 @@ vi.mock('@/stores/auth', async () => {
   return { useAuthStore: () => auth }
 })
 vi.mock('@/components/layout/AppLayout.vue', () => ({ default: { template: '<main><slot /></main>' } }))
-vi.mock('vue-i18n', async () => ({ ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'), useI18n: () => ({ t: (key: string) => key, te: () => true }) }))
+vi.mock('vue-i18n', async () => ({ ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'), useI18n: () => ({
+  t: (key: string, params: Record<string, unknown> = {}) => key === 'qualityOps.reincludePartial' ? `${key}: ${params.reasons}` : key,
+  te: () => true,
+}) }))
 vi.mock('@/api/admin/accountQuality', () => ({ listQualityPlans: vi.fn(), runQualityPlan: vi.fn(), listQualityOperations: vi.fn().mockResolvedValue({items:[],next_cursor:0}),
   previewQualityOwnership: vi.fn().mockResolvedValue({ plan_id: 1, models: [], group_ids: [], entries: [], action: '', ownership_retained: false, relinquishable_count: 0 }), reconcileQualityOwnership: vi.fn(), restoreQualityOwnership: vi.fn(), removeQualityOwnedModel: vi.fn(), listQualityPresets: vi.fn(), createQualityPreset: vi.fn(), updateQualityPreset: vi.fn(), listQualityTemplates: vi.fn().mockResolvedValue([]), createQualityTemplate: vi.fn(), updateQualityTemplate: vi.fn(), deleteQualityTemplate: vi.fn() }))
 vi.mock('@/api/admin/scheduledTests', () => ({ default: { create: vi.fn(), update: vi.fn(), delete: vi.fn(), listResults: vi.fn(), getResult: vi.fn() } }))
@@ -2022,7 +2025,9 @@ describe('quality operations', () => {
     expect((wrapper.get('[data-testid="quality-account-status-active"]').element as HTMLInputElement).checked).toBe(true)
     expect((wrapper.get('[data-testid="quality-account-scope-all"]').element as HTMLInputElement).checked).toBe(true)
     expect(wrapper.find('[data-testid="quality-select-all"]').exists()).toBe(false)
-    expect(wrapper.get('#quality-rule-form input[type="checkbox"][value="4"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="quality-account-picker"] [aria-busy] input[type="checkbox"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="quality-account-4"]').text()).toContain('OAuth')
+    expect(wrapper.get('[data-testid="quality-account-5"]').text()).toContain('Key')
     expect(wrapper.get('[data-testid="quality-account-count"]').text()).toBe('qualityOps.accountsMatched')
     expect(vm.accountsTotal).toBe(51)
     expect(wrapper.get('button[form="quality-rule-form"]').attributes('disabled')).toBeUndefined()
@@ -2149,6 +2154,171 @@ describe('quality operations', () => {
     expect(vm.showForm).toBe(false)
     wrapper.unmount()
   })
+  describe('explicit template account reinclusion', () => {
+    const templateWithExclusions = (): QualityRuleTemplate => {
+      const template = groupRule()
+      return { ...template, excluded_account_ids: [2, 3], pelican_config: {
+        ...template.pelican_config, quality: { ...template.pelican_config.quality!,
+          auto_restore: true, recovery_probe_enabled: true, recovery_probe_interval_minutes: 75, recovery_confirmation_minutes: 8,
+        },
+      } }
+    }
+    const expectedRecovery = { auto_restore: true, recovery_probe_enabled: true, recovery_probe_interval_minutes: 75, recovery_confirmation_minutes: 8 }
+    async function openTemplate() {
+      vi.mocked(listQualityPlans).mockResolvedValue([rules()[0]])
+      vi.mocked(listQualityTemplates).mockResolvedValue([templateWithExclusions()])
+      vi.mocked(accountsAPI.list).mockResolvedValue({ items: [1, 2, 3, 4].map(id => ({
+        id, name: `Fixture account ${id}`, platform: 'openai', type: 'oauth', status: 'active', extra: {},
+      })), total: 4 } as any)
+      const wrapper = mountView(); await flushPromises()
+      await wrapper.get('[data-template-id="7"] [data-testid="quality-template-edit"]').trigger('click'); await flushPromises()
+      return wrapper
+    }
+
+    it.each(['untouched', 'undone'])('omits reinclusion ids when the template draft is %s', async mode => {
+      const wrapper = await openTemplate()
+      expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountExcluded')
+      expect(wrapper.find('[data-testid="quality-account-picker"] [aria-busy] input[type="checkbox"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="quality-reinclude-1"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="quality-reinclude-4"]').exists()).toBe(false)
+      if (mode === 'undone') {
+        await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
+        expect(wrapper.get('[data-testid="quality-reinclude-2"]').text()).toBe('qualityOps.undoReinclude')
+        await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
+        expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountExcluded')
+      }
+      expect(updateQualityTemplate).not.toHaveBeenCalled()
+      await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+
+      expect(updateQualityTemplate).toHaveBeenCalledTimes(1)
+      const [id, body] = vi.mocked(updateQualityTemplate).mock.calls[0]
+      expect(id).toBe(7)
+      expect(body).not.toHaveProperty('reinclude_account_ids')
+      expect(body.pelican_config!.quality).toMatchObject(expectedRecovery)
+      expect(scheduledTests.create).not.toHaveBeenCalled()
+      expect(scheduledTests.update).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('submits only the explicitly chosen excluded account with the template update', async () => {
+      const wrapper = await openTemplate()
+      vi.mocked(updateQualityTemplate).mockResolvedValueOnce({ template: templateWithExclusions(), updated: 1, failed: 0, created: 1,
+        reinclude_results: [{ account_id: 3, status: 'created' }] })
+
+      await wrapper.get('[data-testid="quality-reinclude-3"]').trigger('click')
+      expect(wrapper.get('[data-testid="quality-account-3"]').text()).toContain('qualityOps.accountReincludePending')
+      expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountExcluded')
+      expect(wrapper.find('[data-testid="quality-reinclude-count"]').exists()).toBe(true)
+      expect(updateQualityTemplate).not.toHaveBeenCalled()
+      await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+
+      expect(updateQualityTemplate).toHaveBeenCalledTimes(1)
+      const [id, body] = vi.mocked(updateQualityTemplate).mock.calls[0]
+      expect(id).toBe(7)
+      expect(body.reinclude_account_ids).toEqual([3])
+      expect(body.account_filter).toEqual({ group: '21', type: undefined, search: undefined, statuses: ['active'] })
+      expect(body.pelican_config!.quality).toMatchObject(expectedRecovery)
+      expect((wrapper.vm as any).reincludeAccountIds).toEqual([])
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+      expect(scheduledTests.create).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('prompts before discarding a reinclusion draft and starts clean when reopening', async () => {
+      const wrapper = await openTemplate()
+      await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
+      await wrapper.get('.editor-footer .btn-secondary').trigger('click'); await flushPromises()
+
+      expect(wrapper.text()).toContain('qualityOps.unsavedHint')
+      expect((wrapper.vm as any).discardPrompt).toBe(true)
+      await wrapper.findAll('button').find(button => button.text() === 'qualityOps.keepEditing')!.trigger('click')
+      expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountReincludePending')
+      await wrapper.get('.editor-footer .btn-secondary').trigger('click'); await flushPromises()
+      await wrapper.findAll('button').find(button => button.text() === 'qualityOps.discard')!.trigger('click'); await flushPromises()
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+      expect(updateQualityTemplate).not.toHaveBeenCalled()
+
+      await wrapper.get('[data-template-id="7"] [data-testid="quality-template-edit"]').trigger('click'); await flushPromises()
+      expect((wrapper.vm as any).reincludeAccountIds).toEqual([])
+      expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountExcluded')
+      expect(wrapper.find('[data-testid="quality-reinclude-count"]').exists()).toBe(false)
+      await wrapper.get('.editor-footer .btn-secondary').trigger('click'); await flushPromises()
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+      expect((wrapper.vm as any).discardPrompt).toBe(false)
+      expect(scheduledTests.create).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('lets the user undo a pending reinclusion after a conflicting rule appears', async () => {
+      const wrapper = await openTemplate()
+      await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
+      const conflict = { ...rules()[1], id: 22, pelican_config: templateWithExclusions().pelican_config }
+      vi.mocked(listQualityPlans).mockResolvedValue([rules()[0], conflict])
+      await useAccountQualityStore().refreshRules(true); await flushPromises()
+      const row = wrapper.get('[data-testid="quality-account-2"]')
+      const button = row.get<HTMLButtonElement>('[data-testid="quality-reinclude-2"]')
+      expect(row.text()).toContain('qualityOps.accountHasRule')
+      expect(button.text()).toBe('qualityOps.undoReinclude')
+      expect(button.element.disabled).toBe(false)
+      await button.trigger('click')
+      expect((wrapper.vm as any).reincludeAccountIds).toEqual([])
+      expect(row.get<HTMLButtonElement>('button').element.disabled).toBe(true)
+      expect(updateQualityTemplate).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it.each(['created', 'already_covered'] as const)('removes %s results from pending and retries only the failed account after refreshing', async successStatus => {
+      const wrapper = await openTemplate()
+      await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
+      await wrapper.get('[data-testid="quality-reinclude-3"]').trigger('click')
+      const afterPartial = { ...templateWithExclusions(), plan_ids: [1, 22], excluded_account_ids: [3] }
+      const covered = { ...rules()[1], id: 22, pelican_config: afterPartial.pelican_config }
+      vi.mocked(listQualityPlans).mockClear().mockResolvedValue([rules()[0], covered])
+      vi.mocked(listQualityTemplates).mockClear().mockResolvedValue([afterPartial])
+      vi.mocked(updateQualityTemplate).mockResolvedValueOnce({ template: afterPartial, updated: 1, failed: 0, created: successStatus === 'created' ? 1 : 0,
+        reinclude_results: [{ account_id: 2, status: successStatus }, { account_id: 3, status: 'failed', reason: 'model_check_failed' }] })
+
+      await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+
+      expect(vi.mocked(updateQualityTemplate).mock.calls[0][1].reinclude_account_ids).toEqual([2, 3])
+      expect((wrapper.vm as any).reincludeAccountIds).toEqual([3])
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="quality-reinclude-2"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountCoveredByTemplate')
+      expect(wrapper.get('[data-testid="quality-account-3"]').text()).toContain('qualityOps.accountReincludePending')
+      expect(wrapper.get('.editor-error').text()).toContain('#3 qualityOps.reincludeReasons.model_check_failed')
+      expect(wrapper.get('.editor-error').text()).not.toContain('#2')
+      expect(listQualityPlans).toHaveBeenCalledTimes(1)
+      expect(listQualityTemplates).toHaveBeenCalledTimes(1)
+      expect(useAccountQualityStore().templates[0]).toEqual(afterPartial)
+      expect(useAccountQualityStore().plans.map(plan => plan.id)).toEqual([1, 22])
+      await wrapper.get('.editor-footer .btn-secondary').trigger('click'); await flushPromises()
+      expect((wrapper.vm as any).discardPrompt).toBe(true)
+      await wrapper.findAll('button').find(button => button.text() === 'qualityOps.keepEditing')!.trigger('click')
+
+      const afterRetry = { ...afterPartial, plan_ids: [1, 22, 33], excluded_account_ids: [] }
+      vi.mocked(listQualityPlans).mockResolvedValue([rules()[0], covered, { ...rules()[2], id: 33, pelican_config: afterRetry.pelican_config }])
+      vi.mocked(listQualityTemplates).mockResolvedValue([afterRetry])
+      vi.mocked(updateQualityTemplate).mockResolvedValueOnce({ template: afterRetry, updated: 2, failed: 0, created: 1,
+        reinclude_results: [{ account_id: 3, status: 'created' }] })
+      await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+
+      expect(updateQualityTemplate).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(updateQualityTemplate).mock.calls.map(([id, body]) => [id, body.reinclude_account_ids])).toEqual([[7, [2, 3]], [7, [3]]])
+      for (const [, body] of vi.mocked(updateQualityTemplate).mock.calls) expect(body.pelican_config!.quality).toMatchObject(expectedRecovery)
+      expect((wrapper.vm as any).reincludeAccountIds).toEqual([])
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+      expect(wrapper.get('.workspace-message[role="status"]').text()).toContain('qualityOps.templateUpdated')
+      expect(listQualityPlans).toHaveBeenCalledTimes(2)
+      expect(listQualityTemplates).toHaveBeenCalledTimes(2)
+      expect(useAccountQualityStore().templates[0]).toEqual(afterRetry)
+      expect(useAccountQualityStore().plans.map(plan => plan.id)).toEqual([1, 22, 33])
+      expect(scheduledTests.create).not.toHaveBeenCalled()
+      expect(scheduledTests.update).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+  })
+
   it('keeps a group rule edit open when some of its rules could not be updated', async () => {
     vi.mocked(listQualityTemplates).mockResolvedValue([groupRule()])
     vi.mocked(updateQualityTemplate).mockResolvedValueOnce({ template: groupRule(), updated: 1, failed: 2, created: 0 })
