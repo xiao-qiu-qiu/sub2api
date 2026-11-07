@@ -24,7 +24,7 @@ func TestAstraSchedulingModesOwnedRestoration(t *testing.T) {
 	for _, mode := range []string{"account", "model", "groups"} {
 		t.Run(mode, func(t *testing.T) {
 			var id, gid, other int64
-			require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable,credentials,extra) VALUES('astra-mode','openai','oauth','active',true,'{"access_token":"keep","model_mapping":{"gpt-6-astra":"gpt-6-astra","gpt-5":"gpt-5"}}','{}') RETURNING id`).Scan(&id))
+			require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable,credentials,extra) VALUES('astra-mode','openai','oauth','active',true,'{"access_token":"keep","model_mapping":{"gpt-6-astra":"gpt-6-astra","gpt-6.2-astra":"gpt-6.2-astra","new-astra-alias":"gpt-6.2-astra","gpt-6.2-sol":"gpt-6.2-sol","gpt-5":"gpt-5"}}','{}') RETURNING id`).Scan(&id))
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO groups(name,platform) VALUES('astra-mode','openai') RETURNING id`).Scan(&gid))
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO groups(name,platform) VALUES('astra-other','openai') RETURNING id`).Scan(&other))
 			t.Cleanup(func() {
@@ -53,6 +53,9 @@ func TestAstraSchedulingModesOwnedRestoration(t *testing.T) {
 			require.Equal(t, mode != "account", a.Schedulable)
 			if mode == "model" {
 				require.False(t, a.IsModelSupported("gpt-6-astra"))
+				require.False(t, a.IsModelSupported("gpt-6.2-astra"))
+				require.False(t, a.IsModelSupported("new-astra-alias"))
+				require.True(t, a.IsModelSupported("gpt-6.2-sol"))
 				require.True(t, a.IsModelSupported("gpt-5"))
 				require.Equal(t, "keep", a.GetCredential("access_token"))
 			}
@@ -66,6 +69,8 @@ func TestAstraSchedulingModesOwnedRestoration(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, a.Schedulable)
 			require.True(t, a.IsModelSupported("gpt-6-astra"))
+			require.True(t, a.IsModelSupported("gpt-6.2-astra"))
+			require.Equal(t, "gpt-6.2-astra", a.GetMappedModel("new-astra-alias"))
 			var priority int
 			var models string
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT priority,allowed_models::text FROM account_groups WHERE account_id=$1 AND group_id=$2`, id, gid).Scan(&priority, &models))

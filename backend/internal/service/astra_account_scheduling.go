@@ -175,6 +175,8 @@ func (s *OpenAIGatewayService) ticketPoolSchedulingReady(account *Account, setti
 	cfg := s.openAICodexTicketConfig()
 	for _, model := range cfg.Models {
 		model = normalizeOpenAICodexTicketModel(model)
+		// This readiness flag owns the legacy ticket pool only. GPT-6.2 tickets
+		// remain independent; recognizing its scheduling name is not qualification.
 		if model == "" || (settings.EffectiveSchedulingMode() == "model" && model != "gpt-6-astra") {
 			continue
 		}

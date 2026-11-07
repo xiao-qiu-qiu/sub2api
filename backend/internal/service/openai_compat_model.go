@@ -8,6 +8,12 @@ import (
 )
 
 func NormalizeOpenAICompatRequestedModel(model string) string {
+	if openai.IsGPT62SolModelSpelling(model) {
+		return openai.GPT62SolModel
+	}
+	if openai.IsGPT62AstraModelSpelling(model) {
+		return openai.GPT62AstraModel
+	}
 	if openai.IsGPT61TerraModelSpelling(model) {
 		return "gpt-6.1-terra"
 	}
@@ -27,6 +33,23 @@ func NormalizeOpenAICompatRequestedModel(model string) string {
 }
 
 func applyOpenAICompatModelNormalization(req *apicompat.AnthropicRequest) {
+	if req != nil && openai.IsGPT62ModelSpelling(req.Model) {
+		canonical := openai.CanonicalizeOpenAIModelAliasSpelling(req.Model)
+		baseModel := NormalizeOpenAICompatRequestedModel(req.Model)
+		req.Model = baseModel
+		if suffix, ok := strings.CutPrefix(canonical, baseModel+"-"); ok {
+			switch suffix {
+			case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+				if req.OutputConfig == nil {
+					req.OutputConfig = &apicompat.AnthropicOutputConfig{}
+				}
+				if req.OutputConfig.Effort == "" {
+					req.OutputConfig.Effort = suffix
+				}
+			}
+		}
+		return
+	}
 	if req != nil && (openai.IsGPT61SolModelSpelling(req.Model) || openai.IsGPT61TerraModelSpelling(req.Model)) {
 		canonical := openai.CanonicalizeOpenAIModelAliasSpelling(req.Model)
 		baseModel := NormalizeOpenAICompatRequestedModel(req.Model)

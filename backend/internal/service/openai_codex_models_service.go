@@ -568,6 +568,11 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		// the bundled official snapshot. Explicit upstream metadata still wins.
 		descriptor.ContextWindow = 500_000
 	}
+	if openai.IsGPT62ModelSpelling(modelID) {
+		// Pre-release compatibility uses the generic client window, not a
+		// claimed model limit or an older model's official metadata snapshot.
+		descriptor.InputModalities = []string{"text", "image"}
+	}
 	return descriptor
 }
 
@@ -598,7 +603,7 @@ func configuredCodexSupportsPriorityServiceTier(modelID string) bool {
 		}
 	}
 	// GPT-6 models advertise Fast via service_tier=priority in public model metadata.
-	return isOpenAIGPT6Model(modelID)
+	return isOpenAIGPT6Model(modelID) && !openai.IsGPT62ModelSpelling(modelID)
 }
 
 func configuredCodexSupportsUltrafastServiceTier(modelID string) bool {
@@ -2159,11 +2164,28 @@ func CodexModelsManifestETag(body []byte) string {
 }
 
 var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
-	"gpt-6.1-sol":   {},
-	"gpt-6-astra":   {},
-	"gpt-5.6-sol":   {},
-	"gpt-5.6-terra": {},
-	"gpt-5.6-luna":  {},
+	openai.GPT62SolModel:   {},
+	openai.GPT62AstraModel: {},
+	"gpt-6.1-sol":          {},
+	"gpt-6-astra":          {},
+	"gpt-5.6-sol":          {},
+	"gpt-5.6-terra":        {},
+	"gpt-5.6-luna":         {},
+}
+
+func apiKeyCodexModelDisablesResponsesLite(modelID string) bool {
+	switch {
+	case openai.IsGPT62SolModelSpelling(modelID):
+		modelID = openai.GPT62SolModel
+	case openai.IsGPT62AstraModelSpelling(modelID):
+		modelID = openai.GPT62AstraModel
+	case isOpenAIGPT6AstraModel(modelID):
+		modelID = "gpt-6-astra"
+	case openai.IsGPT61SolModelSpelling(modelID):
+		modelID = "gpt-6.1-sol"
+	}
+	_, disabled := apiKeyCodexModelsWithoutResponsesLite[modelID]
+	return disabled
 }
 
 // adjustAPIKeyCodexModelsManifest prevents Codex from selecting Responses
@@ -2194,12 +2216,7 @@ func adjustAPIKeyCodexModelsManifest(body []byte, account *Account) ([]byte, err
 		if account != nil {
 			target = account.GetMappedModel(slug)
 		}
-		if isOpenAIGPT6AstraModel(target) {
-			target = "gpt-6-astra"
-		} else if openai.IsGPT61SolModelSpelling(target) {
-			target = "gpt-6.1-sol"
-		}
-		if _, targeted := apiKeyCodexModelsWithoutResponsesLite[target]; !targeted {
+		if !apiKeyCodexModelDisablesResponsesLite(target) {
 			continue
 		}
 		var useResponsesLite bool
@@ -2276,9 +2293,27 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 		metadataModels[id] = capabilityModel
 		capabilities := accountCodexToolCapabilities(account, capabilityModel)
 		applyCodexToolCapabilities(capabilities, entry, true)
-		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: UpstreamModelMetadata{
-			CodexToolCapabilities: capabilities,
-		}}
+		metadata := UpstreamModelMetadata{CodexToolCapabilities: capabilities}
+		if openai.IsGPT62ModelSpelling(capabilityModel) {
+			// Resolve this slug's live metadata before its own account snapshot.
+			// Never borrow the previous Astra/Sol generation's metadata.
+			entryBody, err := json.Marshal(entry)
+			if err != nil {
+				return body
+			}
+			var capabilityEntry upstreamModelCapabilityEntry
+			if err := json.Unmarshal(entryBody, &capabilityEntry); err != nil {
+				return body
+			}
+			metadata = upstreamMetadataFromCapabilityEntry(id, capabilityEntry)
+			if account != nil {
+				if synced, ok := account.GetUpstreamModelMetadata(capabilityModel); ok {
+					metadata, _ = mergeUpstreamModelMetadata(metadata, synced)
+				}
+			}
+			metadata.CodexToolCapabilities = capabilities
+		}
+		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: metadata}
 	}
 	if len(modelIDs) == 0 {
 		return body
@@ -2287,6 +2322,9 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 	for _, modelID := range modelIDs {
 		if accountCodexModelSupportsImageInput(account, modelID) {
 			imageInputModels[modelID] = true
+		}
+		if openai.IsGPT62ModelSpelling(metadataModels[modelID]) && len(modelMetadata[modelID].InputModalities) > 0 {
+			imageInputModels[modelID] = stringSliceContains(modelMetadata[modelID].InputModalities, "image")
 		}
 	}
 	searchToolModels := make(map[string]bool, len(modelIDs))
@@ -2368,6 +2406,11 @@ func applySyncedAPIKeyCodexModelMetadata(body []byte, account *Account, overwrit
 		}
 		slug = strings.TrimSpace(slug)
 		lookupModel := account.GetMappedModel(slug)
+		if overwriteLocalDefaults && openai.IsGPT62ModelSpelling(lookupModel) {
+			// Conversion already merged this slug's live fields and snapshot in
+			// that order; applying the snapshot again would overwrite live data.
+			continue
+		}
 		metadata, ok := snapshot.Models[lookupModel]
 		if !ok {
 			continue
@@ -2497,7 +2540,7 @@ func completeAPIKeyCodexModelsManifestMetadata(body []byte, completeAll bool, ac
 		}
 
 		completeDescriptor := completeAll || isDeepSeekCodexModel(slug)
-		forceOfficialImage := officialOpenAI && isOpenAICodexImageInputModel(slug)
+		forceOfficialImage := officialOpenAI && isOpenAICodexImageInputModel(slug) && !openai.IsGPT62ModelSpelling(slug)
 		if !completeDescriptor && !forceOfficialImage {
 			continue
 		}

@@ -1,4 +1,4 @@
-/** Initial model selection when configuring Excel / BPS in account editors. */
+/** Initial BPS protocol selection. Keep unverified models opt-in via the selector. */
 export const DEFAULT_EXCEL_BPS_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra'] as const
 
 /** WebSearch emulation mode values (must match backend WebSearchMode* constants in account.go) */

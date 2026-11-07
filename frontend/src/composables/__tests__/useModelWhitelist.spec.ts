@@ -8,6 +8,20 @@ import { buildModelMappingObject, getModelsByPlatform, getPresetMappingsByPlatfo
 import { BUILTIN_PLATFORM_CATALOG, resetPlatformCatalog, setPlatformCatalog } from '@/constants/platformCatalog'
 
 describe('useModelWhitelist', () => {
+  it('GPT-6.2 预兼容选项保存为两个独立精确模型，不扩展未知型号或后缀', () => {
+    const models = getModelsByPlatform('openai')
+    const mapping = buildModelMappingObject('whitelist', models, [])
+    for (const model of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+      expect(models.filter(id => id === model)).toHaveLength(1)
+      expect(mapping?.[model]).toBe(model)
+      expect(getPresetMappingsByPlatform('openai')).toContainEqual(expect.objectContaining({ from: model, to: model }))
+    }
+    for (const model of ['gpt-6.2', 'gpt-6.2-terra', 'gpt-6.2-luna', 'gpt-6.2-sol-preview', 'gpt-6.3-sol']) {
+      expect(models).not.toContain(model)
+      expect(mapping?.[model]).toBeUndefined()
+    }
+  })
+
   it('平台清单中没有内置模型列表的多协议供应商不预填白名单', () => {
     setPlatformCatalog({
       ...BUILTIN_PLATFORM_CATALOG,

@@ -89,18 +89,16 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 		}
 		applyCodexToolCapabilities(capabilities, defaults, false)
 	}
-	if account.IsOpenAIApiKey() {
-		target := modelID
-		if isOpenAIGPT6AstraModel(target) {
-			target = "gpt-6-astra"
-		} else if openai.IsGPT61SolModelSpelling(target) {
-			target = "gpt-6.1-sol"
-		}
-		_, disabled := apiKeyCodexModelsWithoutResponsesLite[target]
-		if disabled {
-			// Override bundled defaults even when this account has no snapshot.
-			capabilities["use_responses_lite"] = json.RawMessage("false")
-		}
+	if account.IsOpenAI() && official && openai.IsGPT62ModelSpelling(modelID) {
+		// Share only the native Responses web-tool fallback. Tool mode, comp
+		// hash, multi-agent and processing tiers require this model's metadata.
+		applyCodexToolCapabilities(capabilities, map[string]json.RawMessage{
+			"supports_search_tool": json.RawMessage("true"),
+		}, false)
+	}
+	if account.IsOpenAIApiKey() && apiKeyCodexModelDisablesResponsesLite(modelID) {
+		// Override bundled defaults even when this account has no snapshot.
+		capabilities["use_responses_lite"] = json.RawMessage("false")
 	}
 	// API Astra publicly supports Ultrafast. OAuth must advertise it in its
 	// account manifest; a subscription label alone does not grant the capability.

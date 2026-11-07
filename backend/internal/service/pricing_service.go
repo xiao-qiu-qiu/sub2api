@@ -1254,6 +1254,11 @@ func (s *PricingService) GetModelPricing(modelName string) *LiteLLMModelPricing 
 	if pricing := s.lookupIdentifiedModelPricingLocked(lookupCandidates); pricing != nil {
 		return pricing
 	}
+	// Until published prices exist, the reserved GPT-6.2 IDs may only use
+	// their own configured catalog entries. Never borrow another model's rate.
+	if openai.IsGPT62ModelSpelling(modelLower) {
+		return nil
+	}
 
 	// 4. 基于模型系列匹配（Claude）
 	if pricing := s.matchByModelFamily(lookupCandidates[0]); pricing != nil {
@@ -1285,6 +1290,9 @@ func (s *PricingService) lookupIdentifiedModelPricingLocked(lookupCandidates []s
 		if pricing, ok := s.pricingData[candidate]; ok {
 			return pricing
 		}
+	}
+	if openai.IsGPT62ModelSpelling(lookupCandidates[0]) {
+		return s.pricingData[normalizeKnownOpenAICodexModel(lookupCandidates[0])]
 	}
 
 	// 2. 处理常见的模型名称变体

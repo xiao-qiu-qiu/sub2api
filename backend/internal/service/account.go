@@ -1066,7 +1066,7 @@ func (a *Account) isModelMappingSupported(requestedModel string) bool {
 		if empty, _ := a.Extra["astra_model_empty_mapping"].(bool); empty {
 			return false
 		}
-		if strings.EqualFold(strings.TrimSpace(requestedModel), "gpt-6-astra") || strings.EqualFold(a.GetMappedModel(requestedModel), "gpt-6-astra") {
+		if IsAstraSchedulingModel(requestedModel) || IsAstraSchedulingModel(a.GetMappedModel(requestedModel)) {
 			return false
 		}
 		if keys, ok := a.Extra["astra_model_blocked_keys"].([]any); ok {

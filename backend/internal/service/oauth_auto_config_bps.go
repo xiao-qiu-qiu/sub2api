@@ -25,6 +25,8 @@ type ExcelBPSDefaults struct {
 }
 
 func DefaultExcelBPSDefaults() ExcelBPSDefaults {
+	// These names select a protocol when the template is applied. New model IDs
+	// can be configured explicitly; do not opt unverified models into BPS here.
 	return ExcelBPSDefaults{
 		TargetGroupID:          -1,
 		Models:                 []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"},

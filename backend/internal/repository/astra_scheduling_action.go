@@ -163,7 +163,7 @@ func (r *accountRepository) ApplyAstraScheduling(ctx context.Context, id int64, 
 				originalCount := len(models)
 				blocked := []string{}
 				for k, v := range models {
-					if strings.EqualFold(k, "gpt-6-astra") || (strings.EqualFold(v, "gpt-6-astra") && !strings.HasSuffix(k, "*")) {
+					if service.IsAstraSchedulingModel(k) || (service.IsAstraSchedulingModel(v) && !strings.HasSuffix(k, "*")) {
 						blocked = append(blocked, k)
 						delete(models, k)
 					}

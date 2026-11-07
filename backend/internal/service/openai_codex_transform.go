@@ -11,6 +11,8 @@ import (
 )
 
 var codexModelMap = map[string]string{
+	openai.GPT62SolModel:   openai.GPT62SolModel,
+	openai.GPT62AstraModel: openai.GPT62AstraModel,
 	"gpt-6.1-terra":        "gpt-6.1-terra",
 	"gpt-6.1-sol":          "gpt-6.1-sol",
 	"gpt-6-sol":            "gpt-6-sol",

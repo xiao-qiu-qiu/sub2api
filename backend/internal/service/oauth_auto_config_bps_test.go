@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,4 +68,33 @@ func TestExcelBPSDefaultsNeverEnableNewAccounts(t *testing.T) {
 		require.NotContains(t, in.Extra, "openai_excel_bps_models")
 		require.Equal(t, "original", in.Extra["keep"])
 	}
+}
+
+func TestExcelBPSDefaultsGPT62IsExplicitAndPreservesModelIDs(t *testing.T) {
+	b := DefaultExcelBPSDefaults()
+	for _, model := range []string{openai.GPT62AstraModel, openai.GPT62SolModel} {
+		require.NotContains(t, b.Models, model, "the initial selection must not change the new model's protocol")
+	}
+	c := DefaultOAuthAutoConfig()
+	c.ExcelBPS.Models = []string{"gpt-6-astra", openai.GPT62AstraModel, openai.GPT62SolModel}
+	repo := &accountOpsSettingsStub{raw: `{"enabled":false,"platform":"openai"}`}
+	s := NewAccountOpsService(repo, nil, nil)
+	s.autoGroups = autoConfigGroups{}
+	_, err := s.SaveOAuthAutoConfig(t.Context(), c)
+	require.NoError(t, err)
+	loaded, err := GetOAuthAutoConfig(t.Context(), repo)
+	require.NoError(t, err)
+	require.Equal(t, c.ExcelBPS.Models, loaded.ExcelBPS.Models)
+
+	a := excelAccount()
+	a.Extra = b.extra()
+	for _, model := range []string{openai.GPT62AstraModel, openai.GPT62SolModel} {
+		require.False(t, a.IsExcelBPSEnabledForModel(model))
+	}
+	b.Models = []string{openai.GPT62AstraModel}
+	a.Extra = b.extra()
+	require.True(t, a.IsExcelBPSEnabledForModel(openai.GPT62AstraModel))
+	require.False(t, a.IsExcelBPSEnabledForModel("gpt-6-astra"))
+	require.False(t, a.IsExcelBPSEnabledForModel(openai.GPT62SolModel))
+	require.Equal(t, openai.GPT62AstraModel, a.GetMappedModel(openai.GPT62AstraModel))
 }

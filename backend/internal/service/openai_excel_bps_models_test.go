@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestExcelBPSModelSelection(t *testing.T) {
@@ -61,6 +63,41 @@ func TestExcelBPSSelectedModelForwarding(t *testing.T) {
 				require.Equal(t, "/backend-api/codex/responses", upstream.lastReq.URL.Path)
 			}
 		})
+	}
+}
+
+func TestExcelBPSGPT62SelectedProtocolPreservesModel(t *testing.T) {
+	for _, model := range []string{openai.GPT62AstraModel, openai.GPT62SolModel} {
+		for _, selected := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/selected=%t", model, selected), func(t *testing.T) {
+				wire := fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_gpt62\",\"status\":\"completed\",\"model\":%q,\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", model)
+				upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}}
+				svc := openAIClientToolsTestService(upstream)
+				a := excelAccount()
+				a.Extra["openai_excel_bps_models"] = []string{"gpt-6-astra"}
+				if selected {
+					a.Extra["openai_excel_bps_models"] = []string{model}
+				}
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				result, err := svc.Forward(t.Context(), c, a, []byte(fmt.Sprintf(`{"model":%q,"stream":true,"input":"test"}`, model)))
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.NotNil(t, upstream.lastReq)
+				wantHost, wantPath := "chatgpt.com", "/backend-api/codex/responses"
+				if selected {
+					wantHost, wantPath = "bps.openai.com", "/basispoints/api/responses"
+				}
+				require.Equal(t, wantHost, upstream.lastReq.URL.Host)
+				require.Equal(t, wantPath, upstream.lastReq.URL.Path)
+				body, err := upstream.lastReq.GetBody()
+				require.NoError(t, err)
+				defer body.Close()
+				raw, err := io.ReadAll(body)
+				require.NoError(t, err)
+				require.Equal(t, model, gjson.GetBytes(raw, "model").String())
+			})
+		}
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"slices"
-	"strings"
 )
 
 type AstraSchedulingActionResult struct {
@@ -36,7 +35,7 @@ func astraSchedulingAppliesToRequest(s config.AstraRoutingSettings, a *Account, 
 	}
 	switch s.EffectiveSchedulingMode() {
 	case "model":
-		return strings.EqualFold(model, "gpt-6-astra") || (a != nil && strings.EqualFold(a.GetMappedModel(model), "gpt-6-astra"))
+		return IsAstraSchedulingModel(model) || (a != nil && IsAstraSchedulingModel(a.GetMappedModel(model)))
 	case "groups":
 		return slices.Contains(s.SchedulingGroupIDs, group)
 	default:

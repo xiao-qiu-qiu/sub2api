@@ -3,19 +3,28 @@ package service
 import (
 	"context"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 	"testing"
 )
 
 func TestAstraSchedulingModeRequestScope(t *testing.T) {
 	s := config.AstraRoutingSettings{SchedulingMode: "model"}
-	a := &Account{Credentials: map[string]any{"model_mapping": map[string]any{"alias": "gpt-6-astra"}}}
+	a := &Account{Credentials: map[string]any{"model_mapping": map[string]any{"alias": "gpt-6-astra", "new-alias": openai.GPT62AstraModel, "sol-alias": openai.GPT62SolModel}}}
 	require.True(t, astraSchedulingAppliesToRequest(s, a, "alias", 1))
+	for _, model := range []string{openai.GPT62AstraModel, "new-alias", "openai/gpt-6.2-astra-high", "gpt-6.2-astra-2026-11-08"} {
+		require.True(t, astraSchedulingAppliesToRequest(s, a, model, 1), model)
+	}
+	for _, model := range []string{openai.GPT62SolModel, "sol-alias", "gpt-6.2-astra-other"} {
+		require.False(t, astraSchedulingAppliesToRequest(s, a, model, 1), model)
+	}
+	require.Equal(t, openai.GPT62AstraModel, a.GetMappedModel("new-alias"))
 	require.False(t, astraSchedulingAppliesToRequest(s, a, "gpt-5", 1))
 	s.SchedulingMode = "groups"
 	s.SchedulingGroupIDs = []int64{2}
 	require.True(t, astraSchedulingAppliesToRequest(s, a, "gpt-5", 2))
 	require.False(t, astraSchedulingAppliesToRequest(s, a, "gpt-6-astra", 1))
+	require.False(t, astraSchedulingAppliesToRequest(s, a, openai.GPT62AstraModel, 1))
 }
 func TestAstraModelDisabledDoesNotFallThrough(t *testing.T) {
 	for _, mapping := range []map[string]any{nil, {"*": "*"}, {"gpt-6-*": "gpt-6-astra"}} {

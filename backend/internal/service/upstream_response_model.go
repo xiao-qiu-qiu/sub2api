@@ -77,6 +77,7 @@ func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType 
 		o.astraHasText = o.astraHasText || strings.TrimSpace(gjson.GetBytes(payload, "delta").String()) != ""
 	case "response.completed", "response.done":
 		r := gjson.ParseBytes(payload).Get("response")
+		// This flag qualifies the legacy anchor, not every Astra generation.
 		o.astraCompleted = codexAstraCompleted(r) || (o.astraHasText && r.Get("model").String() == "gpt-6-astra" && r.Get("status").String() == "completed" && !r.Get("error").IsObject())
 	case "response.failed", "response.incomplete", "error":
 		o.astraCompleted = false

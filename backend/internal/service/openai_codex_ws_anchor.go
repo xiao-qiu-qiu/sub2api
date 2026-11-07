@@ -44,6 +44,8 @@ func codexWSAnchorFromContext(ctx context.Context) *codexWSAnchorTurn {
 	return v
 }
 
+// Anchor qualification stays specific to GPT-6 Astra until each generation has
+// its own model-scoped anchor keys and verified continuation behavior.
 func codexAstraCompleted(response gjson.Result) bool {
 	if response.Get("model").String() != "gpt-6-astra" || response.Get("status").String() != "completed" || response.Get("error").IsObject() {
 		return false
