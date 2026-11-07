@@ -11,7 +11,7 @@ import (
 
 // AccountQualityOverview GET /admin/account-quality-overview.
 func (h *ScheduledTestHandler) AccountQualityOverview(c *gin.Context) {
-	filter := service.QualityOverviewFilter{Search: c.Query("search"), TestChannel: c.Query("test_channel")}
+	filter := service.QualityOverviewFilter{Search: c.Query("search"), TestChannel: c.Query("test_channel"), ProbeScope: c.Query("probe_scope")}
 	for _, field := range []struct {
 		name string
 		dest *int

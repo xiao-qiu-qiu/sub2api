@@ -2767,11 +2767,12 @@ export interface QualityBPSPolicy {
   hold_on_usage: boolean
 }
 export interface QualityPolicy {
+  action_on?: 'failed' | 'passed'
   trigger_on_upstream_5xx?: boolean
   admission?: import('@/utils/openaiTwoFAAdmission').OpenAITwoFAAdmissionConfig
   judge?: QualityJudgeConfig
   expected_answer: string
-  action: 'openai_two_fa_admission' | 'isolate_models' | 'remove_groups' | 'move_groups' | 'remove_models' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
+  action: 'openai_two_fa_admission' | 'isolate_models' | 'remove_groups' | 'move_groups' | 'remove_models' | 'disable_scheduling' | 'enable_scheduling' | 'enable_bps' | 'observe_only'
   remove_group_ids: number[]
   move_group_ids?: number[]
   remove_models?: string[]
@@ -2833,6 +2834,8 @@ export interface PelicanTestConfig {
 }
 
 export interface ScheduledTestPlan {
+  scope_suspended?: boolean
+  quality_template_id?: number
   account_name?: string
   pelican_config?: PelicanTestConfig
   running_until?: string | null

@@ -63,6 +63,7 @@ func TestQualityOverviewPageRatesAndLatest(t *testing.T) {
 	require.Equal(t, 2, page.Page)
 	require.Equal(t, 3, page.PageSize)
 	require.Equal(t, "account", repo.filter.TestChannel)
+	require.Equal(t, "all", repo.filter.ProbeScope)
 	require.Equal(t, "unknown", page.Items[0].Status, "latest unknown must not reuse an older pass")
 	require.Equal(t, 50.0, *page.Items[0].HealthyRate)
 	require.Equal(t, now.Add(3*time.Minute), *page.Items[0].LastCheckedAt)
@@ -84,8 +85,30 @@ func TestQualityOverviewFilterBounds(t *testing.T) {
 	require.NoError(t, valid.Normalize())
 	require.Equal(t, 20, valid.PageSize)
 	require.Equal(t, 1, valid.Page)
+	require.Equal(t, "all", valid.ProbeScope)
+	for _, scope := range []string{"all", "main", "recovery"} {
+		f := QualityOverviewFilter{ProbeScope: scope}
+		require.NoError(t, f.Normalize())
+		require.Equal(t, scope, f.ProbeScope)
+	}
 	negative := int64(-1)
-	for _, f := range []QualityOverviewFilter{{Page: -1}, {Page: 1000001}, {PageSize: 101}, {PageSize: -2}, {TestChannel: "all"}, {GroupID: &negative}, {Search: string(make([]byte, 101))}} {
+	for _, f := range []QualityOverviewFilter{{Page: -1}, {Page: 1000001}, {PageSize: 101}, {PageSize: -2}, {TestChannel: "all"}, {ProbeScope: "quarantine"}, {ProbeScope: "MAIN"}, {GroupID: &negative}, {Search: string(make([]byte, 101))}} {
 		require.Error(t, f.Normalize())
 	}
+}
+
+func TestQualityOverviewPassesScopeAndMarksPlanActionOn(t *testing.T) {
+	repo := &overviewResultsStub{total: 1, records: []QualityOverviewAccountEvidence{{
+		AccountID: 9, Plans: []QualityOverviewPlan{{ID: 1}, {ID: 2, ActionOn: "passed"}},
+	}}}
+	page, err := NewScheduledTestService(nil, repo).AccountQualityOverview(t.Context(), QualityOverviewFilter{ProbeScope: "recovery", TestChannel: "bps"})
+	require.NoError(t, err)
+	require.Equal(t, "recovery", repo.filter.ProbeScope)
+	require.Equal(t, "bps", repo.filter.TestChannel)
+	require.Equal(t, "failed", page.Items[0].Plans[0].ActionOn)
+	require.Equal(t, "passed", page.Items[0].Plans[1].ActionOn)
+	raw, err := json.Marshal(page.Items[0].Plans)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"action_on":"failed"`)
+	require.Contains(t, string(raw), `"action_on":"passed"`)
 }

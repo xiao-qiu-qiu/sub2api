@@ -878,13 +878,13 @@ const adminNavItems = computed((): NavItem[] => {
     // 「仅充值」站点连管理端的「订阅管理」入口也一并收起（路由本身不拦截）。
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, featureFlag: flagSubscription },
     { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
+    { path: '/admin/account-quality/status', label: t('qualityOps.accountQuality'), icon: QualityOpsIcon },
     { path: '/admin/smart-ops', label: t('accountOps.smartTitle'), icon: SmartOpsIcon, expandOnly: true, children: [
       { path: '/admin/lottery', label: t('lottery.adminTitle'), icon: GiftIcon, hideInSimpleMode: true },
       { path: '/admin/auto-config', label: t('autoConfig.title'), icon: AccountOpsIcon },
       { path: '/admin/priority-scheduling', label: t('priorityScheduling.title'), icon: AccountOpsIcon },
       { path: '/admin/channel-operations', label: t('channelOps.title'), icon: ChannelIcon },
       { path: '/admin/profit-operations', label: t('profitOps.title'), icon: PriceTagIcon },
-      { path: '/admin/account-quality/status', label: t('qualityOps.accountQuality'), icon: QualityOpsIcon },
       { path: '/admin/controlled-experiments', label: t('controlledExperiments.title'), icon: QualityOpsIcon },
       { path: '/admin/account-ops', label: t('accountOps.title'), icon: AccountOpsIcon },
       { path: '/admin/token-guard', label: t('tokenGuard.title'), icon: TokenGuardIcon },

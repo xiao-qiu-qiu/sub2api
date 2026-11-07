@@ -6,8 +6,11 @@ import (
 )
 
 func (q *QualityPolicy) RecoveryProbeActive() bool {
-	return q != nil && q.AutoRestore && q.RecoveryProbeEnabled && supportsQualityRecoveryProbe(q.Action)
+	return q != nil && (q.RunsOnPassed() || q.AutoRestore && q.RecoveryProbeEnabled && supportsQualityRecoveryProbe(q.Action))
 }
+
+// Empty action_on preserves the original failed-answer policy contract.
+func (q *QualityPolicy) RunsOnPassed() bool { return q != nil && q.ActionOn == "passed" }
 
 func supportsQualityRecoveryProbe(action string) bool {
 	return action == QualityActionMoveGroups || action == "remove_groups" || action == "disable_scheduling"
@@ -30,6 +33,17 @@ func (q *QualityPolicy) RecoveryConfirmationInterval() time.Duration {
 }
 
 func (q *QualityPolicy) validateRecoveryProbe() error {
+	if q.ActionOn != "" && q.ActionOn != "failed" && q.ActionOn != "passed" {
+		return fmt.Errorf("quality action_on must be failed or passed")
+	}
+	if q.RunsOnPassed() {
+		if q.Action != QualityActionMoveGroups && q.Action != QualityActionEnableScheduling && q.Action != QualityActionObserveOnly {
+			return fmt.Errorf("passed quality actions require move_groups, enable_scheduling or observe_only")
+		}
+		q.AutoRestore = false
+		q.RecoveryProbeEnabled = true
+		q.TriggerOnUpstream5xx = false
+	}
 	if q.RecoveryProbeEnabled && q.AutoRestore && !supportsQualityRecoveryProbe(q.Action) {
 		return fmt.Errorf("recovery probes require move_groups, remove_groups or disable_scheduling with auto_restore")
 	}

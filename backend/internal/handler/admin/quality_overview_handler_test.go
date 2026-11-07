@@ -27,11 +27,14 @@ func TestQualityOverviewHandlerFilters(t *testing.T) {
 	for _, tc := range []struct {
 		query  string
 		status int
+		scope  string
 	}{
-		{"", 200}, {"?page=2&page_size=10&search=test&group_id=0&test_channel=bps", 200},
-		{"?page=0", 400}, {"?page=-1", 400}, {"?page=", 400}, {"?page=1000001", 400},
-		{"?page_size=101", 400}, {"?page_size=", 400}, {"?group_id=-1", 400}, {"?group_id=abc", 400},
-		{"?group_id=", 400}, {"?test_channel=all", 400}, {"?page=9999999999999999999999999", 400},
+		{"", 200, "all"}, {"?page=2&page_size=10&search=test&group_id=0&test_channel=bps", 200, "all"},
+		{"?probe_scope=main", 200, "main"}, {"?probe_scope=recovery&test_channel=bps", 200, "recovery"}, {"?probe_scope=all", 200, "all"},
+		{"?probe_scope=", 200, "all"}, {"?probe_scope=quarantine", 400, ""}, {"?probe_scope=MAIN", 400, ""},
+		{"?page=0", 400, ""}, {"?page=-1", 400, ""}, {"?page=", 400, ""}, {"?page=1000001", 400, ""},
+		{"?page_size=101", 400, ""}, {"?page_size=", 400, ""}, {"?group_id=-1", 400, ""}, {"?group_id=abc", 400, ""},
+		{"?group_id=", 400, ""}, {"?test_channel=all", 400, ""}, {"?page=9999999999999999999999999", 400, ""},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			repo := &overviewHandlerResults{}
@@ -46,6 +49,7 @@ func TestQualityOverviewHandlerFilters(t *testing.T) {
 				return
 			}
 			require.Len(t, repo.calls, 1)
+			require.Equal(t, tc.scope, repo.calls[0].ProbeScope)
 			var page service.QualityOverviewPage
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 			require.EqualValues(t, 7, page.Total)
@@ -53,11 +57,14 @@ func TestQualityOverviewHandlerFilters(t *testing.T) {
 			if tc.query == "" {
 				require.Equal(t, 20, page.PageSize)
 				require.Equal(t, "account", repo.calls[0].TestChannel)
-			} else {
+			} else if tc.query == "?page=2&page_size=10&search=test&group_id=0&test_channel=bps" {
 				require.Equal(t, 2, page.Page)
 				require.Equal(t, "bps", repo.calls[0].TestChannel)
 				require.Equal(t, "test", repo.calls[0].Search)
 				require.EqualValues(t, 0, *repo.calls[0].GroupID)
+			} else {
+				require.Equal(t, 1, page.Page)
+				require.Equal(t, 20, page.PageSize)
 			}
 		})
 	}

@@ -189,6 +189,9 @@ func (r *qualityRuleTemplateRepository) Delete(ctx context.Context, id int64) (p
 	if _, err = tx.ExecContext(ctx, `DELETE FROM quality_rule_templates WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
+	if _, err = tx.ExecContext(ctx, `UPDATE scheduled_test_plans SET scope_suspended=false WHERE id=ANY($1)`, pq.Array(planIDs)); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -285,6 +288,18 @@ func (r *qualityRuleTemplateRepository) CreateLinkedPlan(ctx context.Context, t 
 	`, t.ID, plan.AccountID, created.ID); err != nil {
 		return nil, err
 	}
+	var accountID int64
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR NO KEY UPDATE`, plan.AccountID).Scan(&accountID); err != nil {
+		return nil, err
+	}
+	matching, err := qualityTemplatePlanMatchesTx(ctx, tx, created.ID, plan.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if !matching {
+		return nil, service.ErrQualityTemplateSkipped
+	}
+	created.QualityTemplateID = t.ID
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -433,9 +448,9 @@ func (r *qualityRuleTemplateRepository) ReincludeAccount(ctx context.Context, t 
 	var scopeTaken bool
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS (
 		SELECT 1 FROM scheduled_test_plans WHERE account_id=$1 AND pelican_config->'quality' IS NOT NULL
-		AND (CASE pelican_config->'quality'->>'action' WHEN 'enable_bps' THEN 'bps' WHEN 'observe_only' THEN 'observation' ELSE 'quarantine' END)
-		  = (CASE $2::text WHEN 'enable_bps' THEN 'bps' WHEN 'observe_only' THEN 'observation' ELSE 'quarantine' END)
-	)`, accountID, plan.PelicanConfig.Quality.Action).Scan(&scopeTaken)
+		AND (CASE WHEN pelican_config->'quality'->>'action_on'='passed' THEN 'recovery' WHEN pelican_config->'quality'->>'action'='enable_bps' THEN 'bps' WHEN pelican_config->'quality'->>'action'='observe_only' THEN 'observation' ELSE 'quarantine' END)
+		  = (CASE WHEN $3::text='passed' THEN 'recovery' WHEN $2::text='enable_bps' THEN 'bps' WHEN $2::text='observe_only' THEN 'observation' ELSE 'quarantine' END)
+	)`, accountID, plan.PelicanConfig.Quality.Action, plan.PelicanConfig.Quality.ActionOn).Scan(&scopeTaken)
 	if err != nil {
 		return result, err
 	}

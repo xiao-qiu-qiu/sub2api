@@ -42,7 +42,7 @@ func reusableQualityConfig(source *PelicanTestConfig) (*PelicanTestConfig, error
 	}
 	policy := &QualityPolicy{
 		TriggerOnUpstream5xx: q.TriggerOnUpstream5xx, ExpectedAnswer: q.ExpectedAnswer,
-		Action: action, RemoveGroupIDs: append([]int64(nil), q.RemoveGroupIDs...),
+		Action: action, ActionOn: q.ActionOn, RemoveGroupIDs: append([]int64(nil), q.RemoveGroupIDs...),
 		MoveGroupIDs: append([]int64(nil), q.MoveGroupIDs...),
 		RemoveModels: append([]string(nil), q.RemoveModels...), RecoveryConcurrency: q.RecoveryConcurrency,
 		AutoRestore:                  q.AutoRestore,

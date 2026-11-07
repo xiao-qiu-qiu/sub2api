@@ -53,6 +53,8 @@ type ScheduledTestPlan struct {
 	ModelID                  string                    `json:"model_id"`
 	CronExpression           string                    `json:"cron_expression"`
 	Enabled                  bool                      `json:"enabled"`
+	ScopeSuspended           bool                      `json:"scope_suspended"`
+	QualityTemplateID        int64                     `json:"quality_template_id,omitempty"`
 	MaxResults               int                       `json:"max_results"`
 	AutoRecover              bool                      `json:"auto_recover"`
 	LastRunAt                *time.Time                `json:"last_run_at"`

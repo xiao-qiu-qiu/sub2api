@@ -308,5 +308,9 @@ func (r *scheduledTestPlanRepository) finalizeQualityBatchRun(ctx context.Contex
  (SELECT id FROM scheduled_test_results WHERE plan_id=$1 ORDER BY id DESC LIMIT $2)`, planID, keep); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	syncQualityMembershipAfterAction(ctx, r.db, run.Plan, action)
+	return nil
 }

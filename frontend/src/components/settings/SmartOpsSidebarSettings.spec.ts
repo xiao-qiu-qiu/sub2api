@@ -25,7 +25,7 @@ describe('smart operations sidebar settings', () => {
       template: '<form><Panel v-model="hidden"/></form>',
     })
     const wrapper = mount(Harness, { global: setup().global })
-    expect(wrapper.findAll('[role="switch"]')).toHaveLength(14)
+    expect(wrapper.findAll('[role="switch"]')).toHaveLength(13)
     expect(wrapper.findAll('button').every(button => button.attributes('type') === 'button')).toBe(true)
     await wrapper.get('#smart-ops-sidebar-token-guard').trigger('click')
     expect(wrapper.vm.hidden).toEqual(['/admin/future-entry', '/admin/token-guard'])
@@ -39,7 +39,7 @@ describe('smart operations sidebar settings', () => {
   it.each(['zh', 'en'])('renders translated labels and scope explanation in %s', locale => {
     const wrapper = mount(Panel, { props: { modelValue: [] }, global: setup(locale).global })
     expect(wrapper.text()).not.toMatch(/admin\.settings\.|\.title\b/)
-    expect(wrapper.text()).toContain('14')
+    expect(wrapper.text()).toContain('13')
   })
   it('shares its new notice ID and keeps dismissals across refresh without hiding future notices', async () => {
     const { pinia, global } = setup()

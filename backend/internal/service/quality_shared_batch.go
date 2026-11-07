@@ -96,6 +96,11 @@ func (s *ScheduledTestRunnerService) finalizeQualityBatches(ctx context.Context)
 			// Do not include stored answers, rule text or database errors in logs.
 			logQualityBatchFailure()
 		}
+		if s.scheduledSvc != nil {
+			if _, err := s.scheduledSvc.SyncQualityTemplates(ctx); err != nil {
+				logQualityBatchFailure()
+			}
+		}
 	}
 }
 

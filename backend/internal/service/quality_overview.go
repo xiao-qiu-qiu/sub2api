@@ -16,6 +16,7 @@ type QualityOverviewFilter struct {
 	Search      string
 	GroupID     *int64
 	TestChannel string
+	ProbeScope  string
 }
 
 func (f *QualityOverviewFilter) Normalize() error {
@@ -41,6 +42,12 @@ func (f *QualityOverviewFilter) Normalize() error {
 	if f.TestChannel != "account" && f.TestChannel != "bps" {
 		return fmt.Errorf("test_channel must be account or bps")
 	}
+	if f.ProbeScope == "" {
+		f.ProbeScope = "all"
+	}
+	if f.ProbeScope != "all" && f.ProbeScope != "main" && f.ProbeScope != "recovery" {
+		return fmt.Errorf("probe_scope must be main, recovery or all")
+	}
 	return nil
 }
 
@@ -55,6 +62,7 @@ type QualityOverviewPlan struct {
 	RunningUntil                 *time.Time `json:"running_until"`
 	NextRunAt                    *time.Time `json:"next_run_at"`
 	Action                       string     `json:"action"`
+	ActionOn                     string     `json:"action_on"`
 	ModelID                      string     `json:"model_id"`
 	ModelIDs                     []string   `json:"model_ids"`
 	TestChannel                  string     `json:"test_channel"`
@@ -163,6 +171,9 @@ func (s *ScheduledTestService) AccountQualityOverview(ctx context.Context, filte
 			item.Plans = []QualityOverviewPlan{}
 		}
 		for i := range item.Plans {
+			if item.Plans[i].ActionOn == "" {
+				item.Plans[i].ActionOn = "failed"
+			}
 			if item.Plans[i].ModelIDs == nil {
 				item.Plans[i].ModelIDs = []string{}
 			}

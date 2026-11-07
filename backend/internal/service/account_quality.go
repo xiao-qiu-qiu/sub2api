@@ -9,6 +9,7 @@ import (
 
 const QualityActionObserveOnly = "observe_only"
 const QualityActionMoveGroups = "move_groups"
+const QualityActionEnableScheduling = "enable_scheduling"
 const QualityActionRemoveModel = "remove_models"
 const QualityActionIsolateModels = "isolate_models"
 const QualityModelIsolationKey = "quality_model_isolation"
@@ -52,6 +53,7 @@ type QualityPolicy struct {
 	Judge                *QualityJudgeConfig         `json:"judge,omitempty"`
 	ExpectedAnswer       string                      `json:"expected_answer"`
 	Action               string                      `json:"action"`
+	ActionOn             string                      `json:"action_on,omitempty"`
 	RemoveGroupIDs       []int64                     `json:"remove_group_ids"`
 	MoveGroupIDs         []int64                     `json:"move_group_ids,omitempty"`
 	RemoveModels         []string                    `json:"remove_models,omitempty"`
@@ -114,7 +116,7 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	} else if len(q.ExpectedAnswer) > 4000 {
 		return fmt.Errorf("expected answer must be 1–4000 bytes")
 	}
-	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionMoveGroups && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels {
+	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionMoveGroups && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels && !(q.RunsOnPassed() && q.Action == QualityActionEnableScheduling) {
 		return fmt.Errorf("invalid quality action")
 	}
 	if q.Action == QualityActionMoveGroups {

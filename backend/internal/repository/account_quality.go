@@ -12,7 +12,7 @@ import (
 )
 
 func (r *scheduledTestPlanRepository) ListQualityPlans(ctx context.Context) ([]*service.ScheduledTestPlan, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT p.id, p.account_id, p.model_id, p.cron_expression, p.enabled, p.max_results, p.auto_recover, p.last_run_at, p.next_run_at, p.created_at, p.updated_at, p.pelican_config, p.running_until, a.name
+	rows, err := r.db.QueryContext(ctx, `SELECT p.id, p.account_id, p.model_id, p.cron_expression, p.enabled, p.max_results, p.auto_recover, p.last_run_at, p.next_run_at, p.created_at, p.updated_at, p.pelican_config, p.running_until, p.scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=p.id LIMIT 1),0), a.name
  FROM scheduled_test_plans p JOIN accounts a ON a.id=p.account_id
  WHERE p.pelican_config->'quality' IS NOT NULL AND a.deleted_at IS NULL ORDER BY p.id DESC`)
 	if err != nil {
@@ -23,7 +23,7 @@ func (r *scheduledTestPlanRepository) ListQualityPlans(ctx context.Context) ([]*
 }
 func (r *scheduledTestPlanRepository) TriggerQuality(ctx context.Context, id int64) error {
 	result, err := r.db.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=NOW()
- WHERE id=$1 AND enabled AND pelican_config->'quality' IS NOT NULL AND (running_until IS NULL OR running_until<NOW())`, id)
+ WHERE id=$1 AND enabled AND NOT scope_suspended AND pelican_config->'quality' IS NOT NULL AND (running_until IS NULL OR running_until<NOW())`, id)
 	if err != nil {
 		return err
 	}
@@ -97,6 +97,7 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
+	syncQualityMembershipAfterAction(ctx, r.db, plan, action)
 	return action, nil
 }
 
@@ -133,7 +134,7 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 	plan.QualityRestoreDiagnostic = nil
 	var valid bool
 	var err error
-	err = tx.QueryRowContext(ctx, `SELECT enabled AND updated_at=$2 AND running_until=$3 AND running_until>NOW()
+	err = tx.QueryRowContext(ctx, `SELECT enabled AND updated_at=$2 AND running_until=$3 AND running_until>NOW() AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`)
  FROM scheduled_test_plans WHERE id=$1 FOR UPDATE`, plan.ID, plan.UpdatedAt, until).Scan(&valid)
 	if err == sql.ErrNoRows || (err == nil && !valid) {
 		return "stale_run", nil
@@ -176,7 +177,7 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 		return "action_conflict", nil
 	}
 
-	if plan.PelicanConfig.Quality.Action == service.QualityActionObserveOnly && state.Action != service.QualityActionIsolateModels {
+	if plan.PelicanConfig.Quality.Action == service.QualityActionObserveOnly && !plan.PelicanConfig.Quality.RunsOnPassed() && state.Action != service.QualityActionIsolateModels {
 		// Relinquish any former action without restoring or changing account
 		// settings; observation leaves BPS lifecycle to independent policies.
 		if _, err = tx.ExecContext(ctx, `DELETE FROM account_quality_states WHERE plan_id=$1`, plan.ID); err != nil {
@@ -194,6 +195,21 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 	}
 	if err != nil {
 		return "", err
+	}
+	if plan.QualityTemplateID != 0 {
+		matching, matchErr := qualityTemplatePlanMatchesTx(ctx, tx, plan.ID, plan.AccountID)
+		if matchErr != nil {
+			return "", matchErr
+		}
+		if !matching {
+			legacy, legacyErr := legacyQualityRecoveryTx(ctx, tx, plan, &state)
+			if legacyErr != nil {
+				return "", legacyErr
+			}
+			if !legacy {
+				return "stale_run", nil
+			}
+		}
 	}
 	// Check again under the account/plan locks: a 5xx can arrive after the
 	// runner reads Redis. New episodes invalidate recovery, not degradation.
@@ -242,6 +258,9 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 		plan.QualityRestoreDiagnostic = diagnostic
 	}()
 	q := plan.PelicanConfig.Quality
+	if q.RunsOnPassed() {
+		return applyPassedQualityOutcome(ctx, tx, plan, until, outcome, status, schedulable, &state, commit)
+	}
 	if q.RecoveryProbeActive() {
 		if _, err = tx.ExecContext(ctx, `SAVEPOINT quality_recovery_action`); err != nil {
 			return "", err

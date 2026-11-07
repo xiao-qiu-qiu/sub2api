@@ -77,7 +77,7 @@ func claimQualityRecoveryProbe(state *qualityState, plan *service.ScheduledTestP
 
 func retryConflictedQualityRecovery(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, now time.Time, commit *bool) error {
 	state, err := readQualityState(ctx, tx, plan.ID)
-	if err != nil || !qualityRecoveryProbeOwns(&state) {
+	if err != nil || !(plan.PelicanConfig.Quality.RunsOnPassed() || qualityRecoveryProbeOwns(&state)) {
 		return err
 	}
 	if state.RecoveryProbe == nil || !state.RecoveryProbe.PolicyVersion.Equal(plan.UpdatedAt) {
@@ -99,7 +99,7 @@ func scheduleQualityRecoveryProbe(ctx context.Context, tx *sql.Tx, plan *service
 	}
 	q := plan.PelicanConfig.Quality
 	var next time.Time
-	if qualityRecoveryProbeOwns(&state) {
+	if q.RunsOnPassed() || qualityRecoveryProbeOwns(&state) {
 		if state.RecoveryProbe == nil || !state.RecoveryProbe.PolicyVersion.Equal(plan.UpdatedAt) {
 			state.RecoveryProbe = &qualityRecoveryProbeState{PolicyVersion: plan.UpdatedAt, NextProbeAt: now.Add(q.RecoveryProbeInterval())}
 		}
@@ -122,7 +122,7 @@ func scheduleQualityRecoveryProbe(ctx context.Context, tx *sql.Tx, plan *service
 // Saving or pausing a rule invalidates its earlier confirmation, while retaining
 // the original ownership snapshot. Old in-flight runs fail the version guard.
 func resetQualityRecoveryProbe(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, state *qualityState, now time.Time) error {
-	if plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RecoveryProbeActive() && qualityRecoveryProbeOwns(state) {
+	if plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RecoveryProbeActive() && (plan.PelicanConfig.Quality.RunsOnPassed() || qualityRecoveryProbeOwns(state)) {
 		state.RecoveryProbe = &qualityRecoveryProbeState{PolicyVersion: plan.UpdatedAt, NextProbeAt: now.Add(plan.PelicanConfig.Quality.RecoveryProbeInterval())}
 		plan.NextRunAt = &state.RecoveryProbe.NextProbeAt
 		if err := qualityUpsertState(ctx, tx, plan.ID, *state); err != nil {

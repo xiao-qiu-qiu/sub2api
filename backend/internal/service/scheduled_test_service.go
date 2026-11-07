@@ -201,7 +201,11 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		}
 		cfg.ModelID = plan.ModelID
 	}
-	return computeNextRun(plan.CronExpression, now)
+	next, err := computeNextRun(plan.CronExpression, now)
+	if err == nil && plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RunsOnPassed() {
+		next = now.Add(plan.PelicanConfig.Quality.RecoveryProbeInterval())
+	}
+	return next, err
 }
 
 func (s *ScheduledTestService) GetResult(ctx context.Context, planID, resultID int64) (*ScheduledTestResult, error) {

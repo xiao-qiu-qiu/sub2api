@@ -4,7 +4,6 @@ export const SMART_OPS_MENU_ITEMS = [
   { path: '/admin/priority-scheduling', label: 'priorityScheduling.title' },
   { path: '/admin/channel-operations', label: 'channelOps.title' },
   { path: '/admin/profit-operations', label: 'profitOps.title' },
-  { path: '/admin/account-quality', label: 'qualityOps.title' },
   { path: '/admin/controlled-experiments', label: 'controlledExperiments.title' },
   { path: '/admin/account-ops', label: 'accountOps.title' },
   { path: '/admin/token-guard', label: 'tokenGuard.title' },

@@ -83,6 +83,10 @@ type QualityRuleTemplateReincludeRepository interface {
 		prepare func(context.Context, QualityTemplateAccount) (*ScheduledTestPlan, string)) (QualityTemplateReincludeResult, error)
 }
 
+type QualityRuleTemplateMembershipRepository interface {
+	SyncMembership(context.Context, *QualityRuleTemplate) error
+}
+
 const MaxQualityTemplateReincludeAccounts = 1000
 
 func validateQualityTemplateReincludeIDs(ids []int64) error {
@@ -166,6 +170,9 @@ func QualityTemplateGroupID(filter QualityRuleAccountFilter) int64 {
 func qualityRuleScope(cfg *PelicanTestConfig) string {
 	if cfg == nil || cfg.Quality == nil {
 		return ""
+	}
+	if cfg.Quality.RunsOnPassed() {
+		return "recovery"
 	}
 	switch cfg.Quality.Action {
 	case QualityActionEnableBPS:
@@ -276,8 +283,8 @@ func (s *ScheduledTestService) CreateQualityTemplate(ctx context.Context, t *Qua
 }
 
 // UpdateQualityTemplate saves the template and applies the same settings to every rule it
-// created (pausing the template pauses them). A changed filter only affects accounts that
-// start matching from now on.
+// created (pausing the template pauses them). Membership follows the current filter
+// in both directions, while temporarily unmatched plans keep their history.
 func (s *ScheduledTestService) UpdateQualityTemplate(ctx context.Context, t *QualityRuleTemplate, reincludeAccountIDs ...int64) (*QualityTemplateUpdate, error) {
 	// Reject the whole request before even saving the template or updating its plans.
 	if err := validateQualityTemplateReincludeIDs(reincludeAccountIDs); err != nil {
@@ -419,6 +426,13 @@ func (s *ScheduledTestService) SyncQualityTemplates(ctx context.Context) (int, e
 	if err != nil {
 		return 0, err
 	}
+	if repo, ok := s.templateRepo.(QualityRuleTemplateMembershipRepository); ok {
+		for _, t := range templates {
+			if err := repo.SyncMembership(ctx, t); err != nil {
+				return 0, err
+			}
+		}
+	}
 	var taken map[qualityScopeKey]struct{}
 	total := 0
 	for _, t := range templates {
@@ -459,6 +473,13 @@ func (s *ScheduledTestService) qualityScopesTaken(ctx context.Context) (map[qual
 // Accounts already linked, holding a rule of the same kind, or unsupported by the probe are
 // skipped. Only linked accounts are remembered, so a skipped account is looked at again.
 func (s *ScheduledTestService) syncQualityTemplate(ctx context.Context, t *QualityRuleTemplate, taken map[qualityScopeKey]struct{}) (int, error) {
+	if taken == nil {
+		if repo, ok := s.templateRepo.(QualityRuleTemplateMembershipRepository); ok {
+			if err := repo.SyncMembership(ctx, t); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if taken == nil {
 		var err error
 		if taken, err = s.qualityScopesTaken(ctx); err != nil {

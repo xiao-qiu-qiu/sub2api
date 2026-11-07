@@ -359,7 +359,20 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 		logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d finish failed: %v", plan.ID, err)
 		return false
 	}
+	if qualityActionChangesMembership(qualityAction) {
+		if _, syncErr := s.scheduledSvc.SyncQualityTemplates(saveCtx); syncErr != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "quality template sync after action failed")
+		}
+	}
 	return true
+}
+
+func qualityActionChangesMembership(action string) bool {
+	switch action {
+	case "groups_moved", "groups_removed", "groups_restored_models_isolated", "restored", "scheduling_enabled", "scheduling_disabled":
+		return true
+	}
+	return false
 }
 
 // Each sample runs in its own goroutine, outside Gin recovery. Always return a

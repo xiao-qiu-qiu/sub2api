@@ -1,10 +1,9 @@
 <template>
   <AppLayout>
     <div class="quality-status-page">
-      <SmartOpsNav class="status-ops-nav" />
       <QualityTabs status />
       <header class="status-heading">
-        <div><h1>{{ t('qualityOps.statusTitle') }}<span class="live-mark" aria-hidden="true" /></h1><p>{{ t('qualityOps.statusSubtitle') }}</p></div>
+        <div><h1>{{ t('qualityOps.statusTitle') }}<span class="live-mark" aria-hidden="true" /></h1></div>
         <div class="heading-actions"><span v-if="updatedAt" class="updated-at">{{ t('qualityOps.statusUpdated', { time: time(updatedAt) }) }}</span><button class="btn btn-secondary" :disabled="loading" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': loading }" />{{ t('qualityOps.statusRefresh') }}</button></div>
       </header>
 
@@ -13,18 +12,21 @@
         <span class="summary-scope">{{ t('qualityOps.statusPageScope') }}</span>
       </section>
 
-      <section class="status-panel">
+      <section class="status-panel filter-panel">
         <div class="status-toolbar">
           <form class="search-field" role="search" @submit.prevent="applyFilters"><Icon name="search" size="sm" /><input v-model="search" :placeholder="t('qualityOps.statusSearch')" :aria-label="t('qualityOps.statusSearch')" /><button v-if="search" type="button" :aria-label="t('qualityOps.clearSearch')" @click="search = ''; applyFilters()"><Icon name="x" size="sm" /></button></form>
           <select v-model="group" class="input group-filter" :aria-label="t('qualityOps.statusAllGroups')" @change="applyFilters"><option value="">{{ t('qualityOps.statusAllGroups') }}</option><option v-for="item in groups" :key="item.id" :value="String(item.id)">{{ item.name }}</option></select>
           <div class="channel-switch" :aria-label="t('qualityOps.statusChannel')"><button v-for="value in (['account', 'bps'] as const)" :key="value" :class="{ selected: channel === value }" :aria-pressed="channel === value" @click="channel = value; applyFilters()">{{ t(value === 'account' ? 'qualityOps.statusAccountChannel' : 'qualityOps.statusBpsChannel') }}</button></div>
         </div>
-        <div v-if="error" class="status-message error" role="alert">{{ error }}<button @click="load">{{ t('qualityOps.retry') }}</button></div>
-        <div v-if="notice" class="status-message notice" role="status">{{ notice }}<button :aria-label="t('qualityOps.dismiss')" @click="notice = ''"><Icon name="x" size="sm" /></button></div>
+      </section>
+      <div v-if="notice" class="status-message notice" role="status">{{ notice }}<button :aria-label="t('qualityOps.dismiss')" @click="notice = ''"><Icon name="x" size="sm" /></button></div>
+      <section v-for="section in sections" :key="section.scope" class="status-panel" :data-probe-scope="section.scope" :aria-label="t(section.scope === 'main' ? 'qualityOps.mainProbeScope' : 'qualityOps.recoveryProbeScope')">
+        <header class="scope-heading"><div><span class="scope-icon" :class="section.scope"><Icon :name="section.scope === 'main' ? 'shield' : 'sync'" size="sm" /></span><h2>{{ t(section.scope === 'main' ? 'qualityOps.mainProbeScope' : 'qualityOps.recoveryProbeScope') }}</h2><span class="scope-count">{{ section.loaded ? section.total : '—' }}</span></div><RouterLink class="scope-configure" :to="{ path: '/admin/account-quality', query: section.scope === 'recovery' ? { recovery: '1' } : { create: '1' } }"><Icon name="plus" size="xs" />{{ t(section.scope === 'recovery' ? 'qualityOps.recoveryQuickSetup' : 'qualityOps.create') }}</RouterLink></header>
+        <div v-if="section.error" class="status-message error" role="alert">{{ section.error }}<button @click="load(section.scope)">{{ t('qualityOps.retry') }}</button></div>
         <div class="list-caption"><span>{{ t('qualityOps.statusHistory') }}</span><div class="legend"><span v-for="status in statuses.slice(0, 3)" :key="status"><i :class="`bar-${status}`" />{{ label(status) }}</span></div></div>
-        <div :aria-busy="loading" class="account-list">
-          <div v-if="loading && !loaded" class="loading-rows" role="status" :aria-label="t('qualityOps.loading')"><div v-for="i in 5" :key="i" class="skeleton-row"><span /><span /></div></div>
-          <article v-for="account in accounts" :key="account.account_id" class="account-row" :data-account-id="account.account_id">
+        <div :aria-busy="section.loading" class="account-list">
+          <div v-if="section.loading && !section.loaded" class="loading-rows" role="status" :aria-label="t('qualityOps.loading')"><div v-for="i in 5" :key="i" class="skeleton-row"><span /><span /></div></div>
+          <article v-for="account in section.accounts" :key="account.account_id" class="account-row" :data-account-id="account.account_id">
             <div class="account-identity"><div class="avatar" :class="`avatar-${account.status}`">{{ account.account_name.slice(0, 1).toUpperCase() || '#' }}</div><div class="identity-copy"><button class="account-name" :title="account.account_name" @click="openRules(account)">{{ account.account_name || `#${account.account_id}` }}</button><div class="account-meta"><span>#{{ account.account_id }}</span><span>{{ account.platform }}</span><span class="state-label" :class="`text-${account.status}`">{{ label(account.status) }}</span></div><p class="account-groups" :title="account.groups.map(item => item.name).join(' / ')">{{ account.groups.map(item => item.name).join(' / ') || t('qualityOps.ungroupedAccounts') }}</p></div></div>
             <div class="history-cell">
               <div v-if="account.history.length" class="history-bars" :aria-label="t('qualityOps.statusOpenHistory', { account: account.account_name })">
@@ -35,13 +37,12 @@
               <div class="history-meta"><span>{{ account.history.length ? date(account.history[0].started_at) : '—' }}</span><span v-if="recoveryPlan(account)" class="recovery-label" :title="t('qualityOps.statusRecoveryFlow', { interval: recoveryPlan(account)?.recovery_probe_interval_minutes || 60, confirmation: recoveryPlan(account)?.recovery_confirmation_minutes || 5 })"><Icon name="sync" size="xs" />{{ t('qualityOps.statusRecovery') }} · {{ recoveryPlan(account)?.recovery_probe_interval_minutes || 60 }} / {{ recoveryPlan(account)?.recovery_confirmation_minutes || 5 }} {{ t('qualityOps.minutesUnit') }}</span><span>{{ account.history.length ? date(account.history[account.history.length - 1].started_at) : '—' }}</span></div>
             </div>
             <div class="rate-cell" :title="t('qualityOps.statusRateHelp')"><strong :class="{ 'rate-healthy': account.healthy_rate === 100 }">{{ account.healthy_rate === null ? '—' : `${Math.round(account.healthy_rate)}%` }}</strong><span>{{ t('qualityOps.statusHealthyRate') }}</span></div>
-            <div class="row-actions"><button class="probe-button" :disabled="!runnablePlan(account) || !!pending[account.account_id]" :title="account.plans.length ? undefined : t('qualityOps.statusNoRule')" @click="probe(account)"><Icon name="play" size="xs" />{{ pending[account.account_id] ? t('qualityOps.statusQueued') : t('qualityOps.statusProbe') }}</button><button class="rule-button" :aria-label="`${t('qualityOps.statusConfigure')} · ${account.account_name}`" @click="openRules(account, true)"><Icon name="cog" size="sm" /></button></div>
+            <div class="row-actions"><button class="probe-button" :disabled="!runnablePlan(account) || !!pending[runnablePlan(account)?.id || 0]" :title="account.plans.length ? undefined : t('qualityOps.statusNoRule')" @click="probe(account)"><Icon name="play" size="xs" />{{ pending[runnablePlan(account)?.id || 0] ? t('qualityOps.statusQueued') : t('qualityOps.statusProbe') }}</button><button class="rule-button" :aria-label="`${t('qualityOps.statusConfigure')} · ${account.account_name}`" @click="openRules(account, true)"><Icon name="cog" size="sm" /></button></div>
           </article>
-          <div v-if="loaded && !accounts.length" class="empty-state"><Icon name="search" size="lg" /><p>{{ t('qualityOps.statusNoAccounts') }}</p></div>
+          <div v-if="section.loaded && !section.accounts.length" class="empty-state"><Icon name="search" size="lg" /><p>{{ t(section.scope === 'recovery' ? 'qualityOps.noRecoveryScope' : 'qualityOps.noMainScope') }}</p></div>
         </div>
-        <footer class="list-footer"><span>{{ t('qualityOps.statusTotal', { count: total }) }}</span><div><button :disabled="page <= 1 || loading" :aria-label="t('qualityOps.statusPrev')" @click="page--; load()"><Icon name="chevronLeft" size="sm" /></button><span>{{ t('qualityOps.statusPage', { page, pages }) }}</span><button :disabled="page >= pages || loading" :aria-label="t('qualityOps.statusNextPage')" @click="page++; load()"><Icon name="chevronRight" size="sm" /></button></div></footer>
+        <footer class="list-footer"><span>{{ t('qualityOps.statusTotal', { count: section.total }) }}</span><div><button :disabled="section.page <= 1 || section.loading" :aria-label="t('qualityOps.statusPrev')" @click="section.page--; load(section.scope)"><Icon name="chevronLeft" size="sm" /></button><span>{{ t('qualityOps.statusPage', { page: section.page, pages: pages(section) }) }}</span><button :disabled="section.page >= pages(section) || section.loading" :aria-label="t('qualityOps.statusNextPage')" @click="section.page++; load(section.scope)"><Icon name="chevronRight" size="sm" /></button></div></footer>
       </section>
-      <RouterLink class="recovery-link" to="/admin/account-quality?recovery=1"><span class="recovery-link-icon"><Icon name="sync" size="md" /></span><div><strong>{{ t('qualityOps.statusRecovery') }}</strong><span>{{ t('qualityOps.statusRecoveryFlow', { interval: 60, confirmation: 5 }) }}</span></div><span class="recovery-cta">{{ t('qualityOps.statusRecoverySetup') }}<Icon name="arrowRight" size="sm" /></span></RouterLink>
     </div>
 
     <BaseDialog :show="!!selected" :title="t('qualityOps.statusEvidence')" @close="selected = null">
@@ -55,24 +56,28 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import SmartOpsNav from '@/components/admin/operations/SmartOpsNav.vue'
 import QualityTabs from '@/components/admin/operations/QualityTabs.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { getQualityOverview, type QualityOverviewAccount, type QualityHistoryPoint, type QualityStatus } from '@/api/admin/qualityOverview'
+import { getQualityOverview, type QualityOverviewAccount, type QualityHistoryPoint, type QualityStatus, type QualityProbeScope } from '@/api/admin/qualityOverview'
 import { runQualityPlan } from '@/api/admin/accountQuality'
 import { getAllIncludingInactive } from '@/api/admin/groups'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminGroup } from '@/types'
 
 const { t, te } = useI18n(), router = useRouter(), auth = useAuthStore()
-const accounts = ref<QualityOverviewAccount[]>([]), groups = ref<AdminGroup[]>([])
-const search = ref(''), group = ref(''), channel = ref<'account' | 'bps'>('account'), page = ref(1), total = ref(0)
-const loading = ref(false), loaded = ref(false), error = ref(''), notice = ref(''), updatedAt = ref('')
+interface ScopeSection { scope: QualityProbeScope; accounts: QualityOverviewAccount[]; page: number; total: number; loading: boolean; loaded: boolean; error: string }
+const sections = ref<ScopeSection[]>(['main', 'recovery'].map(scope => ({ scope: scope as QualityProbeScope, accounts: [], page: 1, total: 0, loading: false, loaded: false, error: '' })))
+const accounts = computed(() => [...new Map(sections.value.flatMap(section => section.accounts).map(account => [account.account_id, account])).values()])
+const groups = ref<AdminGroup[]>([])
+const search = ref(''), group = ref(''), channel = ref<'account' | 'bps'>('account')
+const loading = computed(() => sections.value.some(section => section.loading)), loaded = computed(() => sections.value.every(section => section.loaded))
+const notice = ref(''), updatedAt = ref('')
 const pending = ref<Record<number, boolean>>({}), selected = ref<{ account: QualityOverviewAccount; point: QualityHistoryPoint } | null>(null)
 const statuses: QualityStatus[] = ['healthy', 'degraded', 'unknown', 'untested']
-const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)))
-let request = 0, alive = true, controller: AbortController | undefined
+const pages = (section: ScopeSection) => Math.max(1, Math.ceil(section.total / 20))
+let alive = true
+const requests = { main: 0, recovery: 0 }, controllers: Partial<Record<QualityProbeScope, AbortController>> = {}
 let poll: ReturnType<typeof setInterval> | undefined, debounce: ReturnType<typeof setTimeout> | undefined
 const statusKeys = { healthy: 'statusHealthy', degraded: 'statusDegraded', unknown: 'statusUnknown', untested: 'statusUntested' }
 const label = (status: QualityStatus) => t(`qualityOps.${statusKeys[status]}`)
@@ -80,25 +85,31 @@ const date = (value: string) => new Date(value).toLocaleString(undefined, { mont
 const time = (value: string) => new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 const message = (cause: unknown) => { const err = cause as { response?: { data?: { message?: string } }; message?: string }; return err.response?.data?.message || err.message || t('qualityOps.error') }
 const pointTitle = (point: QualityHistoryPoint) => `${date(point.started_at)} · ${label(point.status)} · ${point.model_id}`
-const recoveryPlan = (account: QualityOverviewAccount) => account.plans.find(plan => (plan.test_channel || 'account') === channel.value && plan.enabled && plan.auto_restore && plan.recovery_probe_enabled)
+const recoveryPlan = (account: QualityOverviewAccount) => account.plans.find(plan => (plan.test_channel || 'account') === channel.value && plan.enabled && (plan.action_on === 'passed' || (plan.auto_restore && plan.recovery_probe_enabled)))
 function runnablePlan(account: QualityOverviewAccount) {
   const candidates = account.plans.filter(plan => (plan.test_channel || 'account') === channel.value && plan.enabled && (!plan.running_until || Date.parse(plan.running_until) <= Date.now()))
   return candidates.find(plan => ['move_groups', 'remove_groups', 'disable_scheduling', 'isolate_models', 'remove_models'].includes(plan.action)) || candidates[0]
 }
 function actionLabel(action: string) { return action === 'recovery_confirmation_pending' ? t('qualityOps.recoveryAwaitingConfirmation') : te(`qualityOps.outcomes.${action}`) ? t(`qualityOps.outcomes.${action}`) : '—' }
-async function load() {
-  const version = ++request
-  controller?.abort(); controller = new AbortController()
-  loading.value = true; error.value = ''
-  try {
-    const data = await getQualityOverview({ page: page.value, page_size: 20, search: search.value.trim() || undefined, group_id: group.value ? Number(group.value) : undefined, test_channel: channel.value }, controller.signal)
-    if (!alive || version !== request) return
-    accounts.value = data.items; total.value = data.total; loaded.value = true; updatedAt.value = new Date().toISOString()
-    if (page.value > pages.value) { page.value = pages.value; void load() }
-  } catch (cause) { if (alive && version === request) error.value = message(cause) }
-  finally { if (version === request) loading.value = false }
+async function load(scope?: QualityProbeScope | Event) {
+  await Promise.all(sections.value.filter(section => typeof scope !== 'string' || section.scope === scope).map(async section => {
+    const key = section.scope, version = ++requests[key]
+    controllers[key]?.abort(); controllers[key] = new AbortController()
+    section.loading = true; section.error = ''
+    try {
+      const data = await getQualityOverview({ page: section.page, page_size: 20, search: search.value.trim() || undefined, group_id: group.value ? Number(group.value) : undefined, test_channel: channel.value, probe_scope: key }, controllers[key]?.signal)
+      if (!alive || version !== requests[key]) return
+      section.accounts = data.items; section.total = data.total; section.loaded = true; updatedAt.value = new Date().toISOString()
+      if (section.page > pages(section)) { section.page = pages(section); void load(key) }
+    } catch (cause) { if (alive && version === requests[key]) section.error = message(cause) }
+    finally { if (version === requests[key]) section.loading = false }
+  }))
 }
-function applyFilters() { if (debounce) clearTimeout(debounce); debounce = undefined; page.value = 1; accounts.value = []; loaded.value = false; selected.value = null; void load() }
+function clearResults() {
+  for (const section of sections.value) { section.page = 1; section.accounts = []; section.total = 0; section.loaded = false; section.error = '' }
+  selected.value = null
+}
+function applyFilters() { if (debounce) clearTimeout(debounce); debounce = undefined; clearResults(); void load() }
 watch(search, () => { if (debounce) clearTimeout(debounce); debounce = setTimeout(applyFilters, 300) })
 function openRules(account: QualityOverviewAccount, edit = false) {
   const candidates = account.plans.filter(plan => (plan.test_channel || 'account') === channel.value)
@@ -107,19 +118,19 @@ function openRules(account: QualityOverviewAccount, edit = false) {
 }
 async function probe(account: QualityOverviewAccount) {
   const plan = runnablePlan(account)
-  if (!plan || pending.value[account.account_id]) return
-  pending.value[account.account_id] = true; error.value = ''; notice.value = ''
+  if (!plan || pending.value[runnablePlan(account)?.id || 0]) return
+  pending.value[plan.id] = true; notice.value = ''
   try { await runQualityPlan(plan.id); if (alive) { notice.value = t('qualityOps.statusProbeQueued'); await load() } }
-  catch (cause) { if (alive) error.value = message(cause) }
-  finally { if (alive) delete pending.value[account.account_id] }
+  catch (cause) { if (alive) { const section = sections.value.find(item => item.accounts.includes(account)); if (section) section.error = message(cause) } }
+  finally { if (alive) delete pending.value[plan.id] }
 }
-watch(() => auth.user?.id, () => { ++request; controller?.abort(); accounts.value = []; selected.value = null; groups.value = []; loaded.value = false; notice.value = ''; error.value = '' })
+watch(() => auth.user?.id, () => { for (const section of sections.value) { ++requests[section.scope]; controllers[section.scope]?.abort(); section.loading = false } clearResults(); groups.value = []; notice.value = '' })
 onMounted(() => {
   void load()
   void getAllIncludingInactive().then(data => { if (alive) groups.value = data }).catch(() => {})
   poll = setInterval(() => { if (document.visibilityState === 'visible' && !loading.value && !debounce) void load() }, 30_000)
 })
-onBeforeUnmount(() => { alive = false; ++request; controller?.abort(); if (poll) clearInterval(poll); if (debounce) clearTimeout(debounce) })
+onBeforeUnmount(() => { alive = false; for (const section of sections.value) { ++requests[section.scope]; controllers[section.scope]?.abort() } if (poll) clearInterval(poll); if (debounce) clearTimeout(debounce) })
 </script>
 
 <style scoped>
@@ -141,6 +152,13 @@ onBeforeUnmount(() => { alive = false; ++request; controller?.abort(); if (poll)
 .summary-stat div > span { @apply text-xs text-gray-500 dark:text-gray-400; }
 .summary-stat strong { @apply mt-1 block text-3xl font-semibold tabular-nums tracking-tight; }
 .summary-scope { @apply absolute right-4 top-3 text-[10px] text-gray-400; }
+.scope-heading { @apply flex flex-wrap items-center justify-between gap-3 px-5 py-4; }
+.scope-heading > div { @apply flex items-center gap-2.5; }
+.scope-heading h2 { @apply text-sm font-semibold; }
+.scope-icon { @apply flex h-8 w-8 items-center justify-center rounded-lg bg-primary-50 text-primary-600 dark:bg-primary-950/40 dark:text-primary-400; }
+.scope-icon.recovery { @apply bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400; }
+.scope-count { @apply rounded-md bg-gray-100 px-2 py-0.5 text-xs tabular-nums text-gray-500 dark:bg-dark-700 dark:text-gray-400; }
+.scope-configure { @apply inline-flex min-h-9 items-center gap-1.5 text-xs font-medium text-primary-600 dark:text-primary-400; }
 .status-panel { @apply overflow-hidden rounded-2xl border border-gray-200/80 bg-white shadow-sm dark:border-dark-700 dark:bg-dark-900; }
 .status-toolbar { @apply flex flex-wrap items-center gap-3 px-5 py-4; }
 .search-field { @apply flex h-11 min-w-0 flex-1 items-center gap-2 rounded-lg border border-gray-200 px-3 text-gray-400 dark:border-dark-600; min-width: 190px; }
@@ -154,7 +172,7 @@ onBeforeUnmount(() => { alive = false; ++request; controller?.abort(); if (poll)
 .legend { @apply flex gap-4; }
 .legend > span { @apply inline-flex items-center gap-1.5; }
 .legend i { @apply h-2 w-2 rounded-sm; }
-.account-row { display: grid; grid-template-columns: minmax(170px, 220px) minmax(160px, 1fr) 66px 116px; @apply items-center gap-5 border-b border-gray-100 px-5 py-5 transition-colors last:border-b-0 hover:bg-gray-50/70 dark:border-dark-700/70 dark:hover:bg-dark-800/35; }
+.account-row { display: grid; grid-template-columns: minmax(170px, 220px) minmax(160px, 1fr) 66px 116px; @apply items-center gap-5 border-b border-gray-100 px-5 py-3 transition-colors last:border-b-0 hover:bg-gray-50/70 dark:border-dark-700/70 dark:hover:bg-dark-800/35; }
 .account-identity { @apply flex min-w-0 items-center gap-3; }
 .avatar { @apply flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-sm font-semibold text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
 .avatar-healthy { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400; }

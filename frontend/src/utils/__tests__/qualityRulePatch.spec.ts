@@ -462,3 +462,26 @@ describe('complete template selected fields', () => {
     expect(copied.quality.remove_models).toBeUndefined(); expect(copied.quality.bps).toBeUndefined()
   })
 })
+
+
+describe('independent recovery rule payloads', () => {
+  const healthy = (): QualityPolicy => ({ action_on: 'passed', action: 'move_groups', move_group_ids: [7], remove_group_ids: [], auto_restore: false, expected_answer: '' })
+  it('uses the 60+5 defaults without requiring old quarantine ownership or auto restore', () => {
+    expect(qualityActionPayload(healthy())).toMatchObject({ action_on: 'passed', auto_restore: false, recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 })
+    expect(qualityActionPayload({ ...healthy(), action: 'observe_only' }).recovery_probe_enabled).toBe(true)
+    expect(qualityActionPayload({ ...healthy(), action: 'enable_scheduling' }).action).toBe('enable_scheduling')
+  })
+  it('rejects failure-only actions and invalid recovery intervals', () => {
+    expect(() => qualityActionPayload({ ...healthy(), action: 'disable_scheduling' })).toThrow('qualityOps.invalidHealthyAction')
+    expect(() => qualityActionPayload({ ...healthy(), recovery_confirmation_minutes: 0 })).toThrow('qualityOps.recoveryIntervalInvalid')
+    expect(() => qualityActionPayload({ ...healthy(), action_on: 'failed', action: 'enable_scheduling' })).toThrow('qualityOps.invalidHealthyAction')
+  })
+  it('copies the recovery scope and changes only its interval for a schedule-only bulk edit', () => {
+    const target = plan(), source = draft()
+    target.pelican_config!.quality = { ...healthy(), recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 }
+    source.pelican_config.quality = { ...healthy(), recovery_probe_interval_minutes: 120, recovery_confirmation_minutes: 10 }
+    expect(copyQualityRuleConfig(source.pelican_config).quality.action_on).toBe('passed')
+    const result = buildQualityRulePatch(target, source, ['schedule'])
+    expect(result.pelican_config?.quality).toMatchObject({ action_on: 'passed', recovery_probe_interval_minutes: 120, recovery_confirmation_minutes: 5 })
+  })
+})

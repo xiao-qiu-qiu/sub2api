@@ -35,14 +35,14 @@ func insertScheduledTestPlan(ctx context.Context, q planRowQuerier, plan *servic
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO scheduled_test_plans (account_id, model_id, cron_expression, enabled, max_results, auto_recover, next_run_at, created_at, updated_at, pelican_config)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8)
-		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
+		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
 	`, plan.AccountID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt, marshalPelicanConfig(plan.PelicanConfig))
 	return scanPlan(row)
 }
 
 func (r *scheduledTestPlanRepository) GetByID(ctx context.Context, id int64) (*service.ScheduledTestPlan, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
 		FROM scheduled_test_plans WHERE id = $1
 	`, id)
 	return scanPlan(row)
@@ -50,7 +50,7 @@ func (r *scheduledTestPlanRepository) GetByID(ctx context.Context, id int64) (*s
 
 func (r *scheduledTestPlanRepository) ListByAccountID(ctx context.Context, accountID int64) ([]*service.ScheduledTestPlan, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
 		FROM scheduled_test_plans WHERE account_id = $1
 		ORDER BY created_at DESC, id DESC
 	`, accountID)
@@ -63,9 +63,9 @@ func (r *scheduledTestPlanRepository) ListByAccountID(ctx context.Context, accou
 
 func (r *scheduledTestPlanRepository) ListDue(ctx context.Context, now time.Time) ([]*service.ScheduledTestPlan, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
 		FROM scheduled_test_plans
-		WHERE enabled = true AND next_run_at <= $1
+		WHERE enabled = true AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`) AND next_run_at <= $1
 		ORDER BY next_run_at ASC
 	`, now)
 	if err != nil {
@@ -80,7 +80,7 @@ func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.
 		UPDATE scheduled_test_plans
 		SET model_id = $2, cron_expression = $3, enabled = $4, max_results = $5, auto_recover = $6, next_run_at = $7, updated_at = NOW(), pelican_config = $8
 		WHERE id = $1 AND COALESCE(pelican_config->'quality'->>'action','') <> 'openai_two_fa_admission'
-		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
+		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
 	`
 	args := []any{plan.ID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt, marshalPelicanConfig(plan.PelicanConfig)}
 
@@ -96,6 +96,9 @@ func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.
 	state, err := readQualityState(ctx, tx, plan.ID)
 	if err != nil {
 		return nil, err
+	}
+	if updated.PelicanConfig != nil && updated.PelicanConfig.Quality.RunsOnPassed() && state.Action != "" {
+		return nil, service.QualityScopeConflict("create a separate recovery rule while this plan owns account restrictions")
 	}
 	// Importing configuration cannot implicitly undo account restrictions or
 	// discard their ownership. Incompatible live isolation still rejects below.
@@ -317,7 +320,7 @@ func scanPlan(row scannable, withAccountName ...bool) (*service.ScheduledTestPla
 	var config []byte
 	dest := []any{
 		&p.ID, &p.AccountID, &p.ModelID, &p.CronExpression, &p.Enabled, &p.MaxResults, &p.AutoRecover,
-		&p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt, &config, &p.RunningUntil,
+		&p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt, &config, &p.RunningUntil, &p.ScopeSuspended, &p.QualityTemplateID,
 	}
 	if len(withAccountName) > 0 && withAccountName[0] {
 		dest = append(dest, &p.AccountName)
@@ -369,7 +372,7 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE scheduled_test_plans
  SET running_until = $3, next_run_at = $4
- WHERE id = $1 AND enabled = true
+ WHERE id = $1 AND enabled = true AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`)
  AND (next_run_at <= $2 OR ($7 AND pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'))
  AND (NOT $7 OR (pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'
    AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id=account_id AND type='oauth')))
@@ -383,6 +386,36 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 	n, err := result.RowsAffected()
 	if err != nil {
 		return false, err
+	}
+	if n == 1 && plan.QualityTemplateID != 0 {
+		var accountID int64
+		if err = tx.QueryRowContext(ctx, `SELECT id FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR NO KEY UPDATE`, plan.AccountID).Scan(&accountID); err != nil {
+			return false, err
+		}
+		matching, matchErr := qualityTemplatePlanMatchesTx(ctx, tx, plan.ID, plan.AccountID)
+		if matchErr != nil {
+			return false, matchErr
+		}
+		if !matching {
+			state, readErr := readQualityState(ctx, tx, plan.ID)
+			if readErr != nil {
+				return false, readErr
+			}
+			legacy, legacyErr := legacyQualityRecoveryTx(ctx, tx, plan, &state)
+			if legacyErr != nil {
+				return false, legacyErr
+			}
+			if !legacy {
+				state.RecoveryProbe = nil
+				if err = qualityUpsertState(ctx, tx, plan.ID, state); err != nil {
+					return false, err
+				}
+				if _, err = tx.ExecContext(ctx, `UPDATE scheduled_test_plans SET scope_suspended=true,running_until=NULL,updated_at=clock_timestamp() WHERE id=$1`, plan.ID); err != nil {
+					return false, err
+				}
+				return false, tx.Commit()
+			}
+		}
 	}
 	var bpsRecoveryPending bool
 	if n == 1 && plan.PelicanConfig != nil && plan.PelicanConfig.Quality != nil {
@@ -402,7 +435,7 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 		if readErr != nil {
 			return false, readErr
 		}
-		if qualityRecoveryProbeOwns(&state) {
+		if plan.PelicanConfig.Quality.RunsOnPassed() || qualityRecoveryProbeOwns(&state) {
 			// A process dying during the probe still leaves a durable retry time.
 			plan.Quality5xxEpisode = state.Quality5xxEpisode
 			next = claimQualityRecoveryProbe(&state, plan, now, until)

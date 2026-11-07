@@ -43,6 +43,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
     parallel_count: source.parallel_count,
     model_ids: source.model_ids ? [...source.model_ids] : undefined,
     quality: {
+      ...(policy.action_on ? { action_on: policy.action_on } : {}),
       trigger_on_upstream_5xx: policy.trigger_on_upstream_5xx ?? false,
       expected_answer: source.question_kind === 'random_reasoning' ? '' : policy.expected_answer,
       action,
@@ -50,9 +51,9 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
       ...(action === 'move_groups' ? { move_group_ids: [...(policy.move_group_ids || [])] } : {}),
       remove_models: action === 'remove_models' ? [...(policy.remove_models || [])] : undefined,
       recovery_concurrency: action === 'remove_models' ? policy.recovery_concurrency : undefined,
-      auto_restore: action === 'observe_only' ? false : policy.auto_restore ?? false,
-      ...(policy.recovery_probe_enabled !== undefined ? {
-        recovery_probe_enabled: policy.recovery_probe_enabled,
+      auto_restore: action === 'observe_only' || policy.action_on === 'passed' ? false : policy.auto_restore ?? false,
+      ...(policy.recovery_probe_enabled !== undefined || policy.action_on === 'passed' ? {
+        recovery_probe_enabled: policy.action_on === 'passed' || policy.recovery_probe_enabled,
         recovery_probe_interval_minutes: policy.recovery_probe_interval_minutes ?? 60,
         recovery_confirmation_minutes: policy.recovery_confirmation_minutes ?? 5,
       } : {}),
@@ -113,6 +114,15 @@ export function qualityUsesModelResults(action?: QualityPolicy['action']) {
 // and validation belong here so all entry points preserve the same semantics.
 export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
   const next: QualityPolicy = { ...policy, remove_group_ids: qualityUsesGroups(policy.action) ? [...policy.remove_group_ids] : [] }
+  if (next.action_on === 'passed') {
+    if (!['move_groups', 'enable_scheduling', 'observe_only'].includes(next.action)) throw new Error('qualityOps.invalidHealthyAction')
+    next.auto_restore = false
+    next.trigger_on_upstream_5xx = false
+    next.recovery_probe_enabled = true
+  } else {
+    if (next.action === 'enable_scheduling') throw new Error('qualityOps.invalidHealthyAction')
+    delete next.action_on
+  }
   if (qualityUsesGroups(next.action) && !next.remove_group_ids.length) throw new Error('qualityOps.selectGroups')
   if (next.action === 'move_groups') {
     const targets = policy.move_group_ids
@@ -135,7 +145,7 @@ export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
     next.bps = qualityBPSPayload(next.bps)
   } else delete next.bps
   if (next.action === 'observe_only') next.auto_restore = false
-  if (next.recovery_probe_enabled && (!next.auto_restore || !['move_groups', 'remove_groups', 'disable_scheduling'].includes(next.action))) next.recovery_probe_enabled = false
+  if (next.action_on !== 'passed' && next.recovery_probe_enabled && (!next.auto_restore || !['move_groups', 'remove_groups', 'disable_scheduling'].includes(next.action))) next.recovery_probe_enabled = false
   if (next.recovery_probe_enabled) {
     next.recovery_probe_interval_minutes ??= 60
     next.recovery_confirmation_minutes ??= 5
@@ -164,14 +174,14 @@ export function qualityRuleFieldValue(rule: Pick<ScheduledTestPlan, 'model_id' |
   const cfg = rule.pelican_config, q = cfg?.quality, b = q?.bps
   switch (field) {
     case 'model': return [...new Set([rule.model_id, ...(cfg?.model_ids || [])])]
-    case 'schedule': return rule.cron_expression
+    case 'schedule': return q?.action_on === 'passed' ? [rule.cron_expression, q.recovery_probe_interval_minutes ?? 60] : rule.cron_expression
     case 'enabled': return rule.enabled
     case 'retention': return rule.max_results
     case 'trigger': return q?.trigger_on_upstream_5xx ?? false
     case 'test': return [cfg?.question_kind, cfg?.test_channel || 'account', cfg?.prompt, cfg?.reasoning_effort, cfg?.parallel_count,
       q?.expected_answer, q?.judge?.kind || 'llm', q?.judge?.group_id, q?.judge?.model_id, q?.judge?.prompt]
     case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage, q?.recovery_probe_enabled ?? false, q?.recovery_probe_interval_minutes ?? 60, q?.recovery_confirmation_minutes ?? 5]
-    case 'action': return [q?.action, q?.remove_group_ids || [], q?.action === 'move_groups' ? q.move_group_ids || [] : [], q?.remove_models || [], q?.recovery_concurrency,
+    case 'action': return [q?.action_on || 'failed', q?.action_on === 'passed' ? q.recovery_confirmation_minutes ?? 5 : null, q?.action, q?.remove_group_ids || [], q?.action === 'move_groups' ? q.move_group_ids || [] : [], q?.remove_models || [], q?.recovery_concurrency,
       b ? [b.failure_threshold, b.usage_percent, b.require_all, b.all_models, b.models || [], b.omit_unsupported_tools,
         b.ignore_encrypted_content, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
         b.auto_move_on_403, b.target_group_id, b.session_proxy, b.proxy_source, b.cache_creation_as_input] : null]
@@ -202,6 +212,7 @@ export function buildQualityRulePatch(
   if (fields.includes('enabled')) patch.enabled = draft.enabled
   if (fields.includes('retention') && !fields.includes('test') && !fields.includes('model') && (plan.pelican_config?.model_ids?.length || 1) * (plan.pelican_config?.parallel_count || 1) > patch.max_results!) throw new Error('qualityOps.retentionTooSmall')
   if (!fields.some(field => ['test', 'action', 'restore', 'trigger'].includes(field)) &&
+    !(fields.includes('schedule') && plan.pelican_config?.quality?.action_on === 'passed') &&
     !(fields.includes('model') && (draft.pelican_config.model_ids?.length || plan.pelican_config?.model_ids?.length))) return patch
 
   if (!plan.pelican_config?.quality) throw new Error('qualityOps.ruleConfigMissing')
@@ -233,9 +244,17 @@ export function buildQualityRulePatch(
   if (fields.includes('trigger')) config.quality.trigger_on_upstream_5xx = source.quality.trigger_on_upstream_5xx ?? false
   if (fields.includes('action')) {
     config.quality = qualityActionPayload({ ...config.quality,
+      action_on: source.quality.action_on || 'failed',
+      ...(source.quality.action_on === 'passed' ? {
+        recovery_probe_interval_minutes: source.quality.recovery_probe_interval_minutes ?? 60,
+        recovery_confirmation_minutes: source.quality.recovery_confirmation_minutes ?? 5,
+      } : {}),
       action: source.quality.action, remove_group_ids: source.quality.remove_group_ids, move_group_ids: source.quality.move_group_ids,
       remove_models: source.quality.remove_models, recovery_concurrency: source.quality.recovery_concurrency,
       bps: source.quality.bps })
+  }
+  if (fields.includes('schedule') && config.quality.action_on === 'passed') {
+    config.quality.recovery_probe_interval_minutes = source.quality.recovery_probe_interval_minutes ?? 60
   }
 
   // Explicit BPS observation includes giving up this rule's account actions.
@@ -248,7 +267,7 @@ export function buildQualityRulePatch(
   }
   // Automatic BPS switching remains a separate native-probe policy.
   if (config.quality.action === 'enable_bps' && config.question_kind !== STATE_PROBE_QUESTION) throw new Error('qualityOps.bpsRequiresProbe')
-  if (fields.includes('restore') && config.quality.action !== 'observe_only') {
+  if (fields.includes('restore') && config.quality.action_on !== 'passed' && config.quality.action !== 'observe_only') {
     config.quality.auto_restore = source.quality.auto_restore
     if (source.quality.recovery_probe_enabled !== undefined || config.quality.recovery_probe_enabled !== undefined) {
       config.quality.recovery_probe_enabled = source.quality.recovery_probe_enabled ?? false
@@ -256,7 +275,7 @@ export function buildQualityRulePatch(
       config.quality.recovery_confirmation_minutes = source.quality.recovery_confirmation_minutes ?? 5
     }
   }
-  if (config.quality.recovery_probe_enabled) config.quality = qualityActionPayload(config.quality)
+  if (config.quality.recovery_probe_enabled || config.quality.action_on === 'passed') config.quality = qualityActionPayload(config.quality)
   // 满血关闭次数和「用量仍高时先不关」跟着「自动恢复」走：勾选修改自动恢复且开着时才用表单里的值，
   // 否则各规则保留自己的；原本不是开 BPS 的规则用默认值。
   if (config.quality.action === 'enable_bps' && config.quality.bps) {

@@ -24,7 +24,7 @@ func (r *accountRepository) ApplyQuality5xx(ctx context.Context, accountID int64
 	}
 	changed := false
 	for _, p := range candidates {
-		if p.PelicanConfig == nil || p.PelicanConfig.Quality == nil || !p.Enabled || !p.PelicanConfig.Quality.TriggerOnUpstream5xx || (p.PelicanConfig.Quality.Action != service.QualityActionRemoveModel && !p.PelicanConfig.Quality.RecoveryProbeActive()) {
+		if p.PelicanConfig == nil || p.PelicanConfig.Quality == nil || !p.Enabled || p.ScopeSuspended || !p.PelicanConfig.Quality.TriggerOnUpstream5xx || (p.PelicanConfig.Quality.Action != service.QualityActionRemoveModel && !p.PelicanConfig.Quality.RecoveryProbeActive()) {
 			continue
 		}
 		applied, e := plans.applyImmediateQuality5xx(ctx, p.ID, accountID)
@@ -46,14 +46,14 @@ func (r *scheduledTestPlanRepository) applyImmediateQuality5xx(ctx context.Conte
 	}
 	defer func() { _ = tx.Rollback() }()
 	// All quality transitions lock plan then account; never acquire a probe lease.
-	plan, err := scanPlan(tx.QueryRowContext(ctx, `SELECT id,account_id,model_id,cron_expression,enabled,max_results,auto_recover,last_run_at,next_run_at,created_at,updated_at,pelican_config,running_until FROM scheduled_test_plans WHERE id=$1 AND account_id=$2 FOR UPDATE`, planID, accountID))
+	plan, err := scanPlan(tx.QueryRowContext(ctx, `SELECT id,account_id,model_id,cron_expression,enabled,max_results,auto_recover,last_run_at,next_run_at,created_at,updated_at,pelican_config,running_until,scope_suspended,COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0) FROM scheduled_test_plans WHERE id=$1 AND account_id=$2 FOR UPDATE`, planID, accountID))
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if !plan.Enabled || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil {
+	if !plan.Enabled || plan.ScopeSuspended || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil {
 		return false, nil
 	}
 	policy := plan.PelicanConfig.Quality

@@ -52,6 +52,54 @@ describe('quality operations', () => {
     pelican_config: { question_kind: 'state_probe', test_channel: 'account', prompt: '', reasoning_effort: 'high', parallel_count: 1,
       quality: { action: 'observe_only', expected_answer: '', remove_group_ids: [], auto_restore: false } }, created_at: '', updated_at: '' })
 
+  it('removes departed template members from the active list without losing history access', async () => {
+    const plan = { ...rules()[0], scope_suspended: true }
+    vi.mocked(listQualityPlans).mockResolvedValue([plan])
+    const wrapper = mountView(); await flushPromises()
+    expect(wrapper.find('[data-plan-id="1"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="quality-show-suspended"]').setValue(true)
+    expect(wrapper.get('[data-plan-id="1"]').text()).toContain('qualityOps.scopeSuspended')
+    expect(wrapper.get('[data-plan-id="1"] .rule-actions button:nth-child(3)').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-plan-id="1"] .rule-actions button:first-child').exists()).toBe(true)
+    wrapper.unmount()
+  })
+  it('creates a separate healthy-action group probe from the 60+5 preset', async () => {
+    vi.mocked(listQualityPlans).mockResolvedValue([rules()[0]])
+    const wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="quality-create-recovery"]').trigger('click'); await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('[data-testid="quality-action-on"]').element.value).toBe('passed')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-interval"]').element.value).toBe('60')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-confirmation"]').element.value).toBe('5')
+    expect(wrapper.find('[data-testid="quality-auto-restore"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-action-disable-scheduling"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-trigger-5xx"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="quality-move-group-21"]').setValue(true)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(createQualityTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      pelican_config: expect.objectContaining({ question_kind: 'state_probe', quality: expect.objectContaining({
+        action_on: 'passed', action: 'move_groups', move_group_ids: [21], auto_restore: false,
+        recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5,
+      }) }),
+    }))
+    expect(scheduledTests.update).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+  it('switches healthy actions back to a main probe without retaining recovery timing', async () => {
+    const wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="quality-create-recovery"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="quality-action-enable-scheduling"]').setValue(true)
+    await wrapper.get('[data-testid="quality-action-on"]').setValue('failed')
+    expect(wrapper.find('[data-testid="quality-recovery-interval"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-action-enable-scheduling"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="quality-move-group-21"]').setValue(true)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    const policy = vi.mocked(createQualityTemplate).mock.calls[0][0].pelican_config.quality!
+    expect(policy.action).toBe('move_groups')
+    expect(policy.action_on).toBeUndefined()
+    expect(policy.recovery_probe_enabled).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('requires a move destination and saves it separately from groups to remove', async () => {
     const plan = rules()[0]
     vi.mocked(listQualityPlans).mockResolvedValue([plan])
@@ -64,14 +112,11 @@ describe('quality operations', () => {
     expect(wrapper.get('.editor-error').text()).toContain('qualityOps.selectMoveGroups')
     await wrapper.get('[data-testid="quality-move-group-21"]').setValue(true)
     await wrapper.get('[data-testid="quality-auto-restore"]').setValue(true)
-    await wrapper.get('[data-testid="quality-recovery-enabled"]').setValue(true)
-    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-interval"]').element.value).toBe('60')
-    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-recovery-confirmation"]').element.value).toBe('5')
+    expect(wrapper.find('[data-testid="quality-recovery-enabled"]').exists()).toBe(false)
     await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
     expect(scheduledTests.update).toHaveBeenCalledWith(1, expect.objectContaining({
       pelican_config: expect.objectContaining({ quality: expect.objectContaining({
         action: 'move_groups', move_group_ids: [21], remove_group_ids: [], auto_restore: true,
-        recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5,
       }) }),
     }))
     wrapper.unmount()

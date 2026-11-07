@@ -1,12 +1,12 @@
 <template>
-  <section v-if="supported && policy.auto_restore" class="recovery-settings" data-testid="quality-recovery-settings">
-    <label class="flex items-center gap-2 font-medium"><input type="checkbox" :checked="policy.recovery_probe_enabled" data-testid="quality-recovery-enabled" @change="set('recovery_probe_enabled', ($event.target as HTMLInputElement).checked)" />{{ t('qualityOps.recoveryProbe') }}</label>
-    <div v-if="policy.recovery_probe_enabled" class="mt-4 space-y-3">
+  <section v-if="standalone || (supported && policy.auto_restore)" class="recovery-settings" data-testid="quality-recovery-settings">
+    <div v-if="standalone" class="flex items-center justify-between gap-3"><strong>{{ t('qualityOps.recoveryProbe') }}</strong><button type="button" class="text-xs text-primary-600 dark:text-primary-400" data-testid="quality-recovery-preset" @click="applyPreset">{{ t('qualityOps.recoveryQuickSetup') }}</button></div>
+    <label v-else class="flex items-center gap-2 font-medium"><input type="checkbox" :checked="policy.recovery_probe_enabled" data-testid="quality-recovery-enabled" @change="set('recovery_probe_enabled', ($event.target as HTMLInputElement).checked)" />{{ t('qualityOps.legacyRecoveryProbe') }}</label>
+    <div v-if="standalone || policy.recovery_probe_enabled" class="mt-4 space-y-3">
       <div class="grid gap-4 sm:grid-cols-2">
-        <label class="space-y-1"><span>{{ t('qualityOps.recoveryInterval') }}</span><div class="flex items-center gap-2"><input class="input" type="number" min="1" max="10080" required :value="policy.recovery_probe_interval_minutes ?? 60" data-testid="quality-recovery-interval" @input="set('recovery_probe_interval_minutes', Number(($event.target as HTMLInputElement).value))" /><span>{{ t('qualityOps.minutesUnit') }}</span></div></label>
-        <label class="space-y-1"><span>{{ t('qualityOps.recoveryConfirmation') }}</span><div class="flex items-center gap-2"><input class="input" type="number" min="1" max="10080" required :value="policy.recovery_confirmation_minutes ?? 5" data-testid="quality-recovery-confirmation" @input="set('recovery_confirmation_minutes', Number(($event.target as HTMLInputElement).value))" /><span>{{ t('qualityOps.minutesUnit') }}</span></div></label>
+        <label v-if="editInterval" class="space-y-1"><span>{{ t('qualityOps.recoveryInterval') }}</span><div class="flex items-center gap-2"><input class="input" type="number" min="1" max="10080" required :value="policy.recovery_probe_interval_minutes ?? 60" data-testid="quality-recovery-interval" @input="set('recovery_probe_interval_minutes', Number(($event.target as HTMLInputElement).value))" /><span>{{ t('qualityOps.minutesUnit') }}</span></div></label>
+        <label v-if="editConfirmation" class="space-y-1"><span>{{ t('qualityOps.recoveryConfirmation') }}</span><div class="flex items-center gap-2"><input class="input" type="number" min="1" max="10080" required :value="policy.recovery_confirmation_minutes ?? 5" data-testid="quality-recovery-confirmation" @input="set('recovery_confirmation_minutes', Number(($event.target as HTMLInputElement).value))" /><span>{{ t('qualityOps.minutesUnit') }}</span></div></label>
       </div>
-      <p class="text-xs leading-relaxed text-gray-500 dark:text-gray-400">{{ t('qualityOps.recoveryProbeHelp') }}</p>
     </div>
   </section>
 </template>
@@ -14,10 +14,14 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { QualityPolicy } from '@/types'
-const props = defineProps<{ policy: QualityPolicy }>()
+const props = withDefaults(defineProps<{ policy: QualityPolicy; editInterval?: boolean; editConfirmation?: boolean }>(), { editInterval: true, editConfirmation: true })
 const emit = defineEmits<{ 'update:policy': [policy: QualityPolicy] }>()
 const { t } = useI18n()
 const supported = computed(() => ['move_groups', 'remove_groups', 'disable_scheduling'].includes(props.policy.action))
+const standalone = computed(() => props.policy.action_on === 'passed')
+function applyPreset() {
+  emit('update:policy', { ...props.policy, ...(props.editInterval ? { recovery_probe_interval_minutes: 60 } : {}), ...(props.editConfirmation ? { recovery_confirmation_minutes: 5 } : {}) })
+}
 function set(key: keyof QualityPolicy, value: boolean | number) {
   emit('update:policy', { recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5, ...props.policy, [key]: value })
 }

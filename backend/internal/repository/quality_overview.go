@@ -14,13 +14,57 @@ import (
 // round has at most 100 samples. A cutoff partial round can only be unknown.
 // LATERAL joins are internal to PostgreSQL, not per-account network queries.
 const qualityOverviewSQL = `
-WITH filtered AS MATERIALIZED (
+WITH eligible_plans AS NOT MATERIALIZED (
+ SELECT p.* FROM scheduled_test_plans p
+ JOIN accounts a ON a.id=p.account_id AND a.deleted_at IS NULL
+ WHERE $7::text='all' OR (
+   jsonb_typeof(p.pelican_config->'quality')='object'
+   AND COALESCE(p.pelican_config->'quality'->>'action','')<>'openai_two_fa_admission'
+   AND (COALESCE(p.pelican_config->'quality'->>'action_on','')='passed')=($7='recovery')
+   AND (CASE WHEN p.pelican_config->>'question_kind'='state_probe' THEN 'account'
+     WHEN p.pelican_config->>'test_channel'='bps' THEN 'bps' ELSE 'account' END)=$6
+   -- A retained template binding is not membership evidence. Recheck the same
+   -- current-account predicates as qualityTemplateAccountsQuery, including
+   -- derived statuses, even before the background membership sync runs.
+   AND NOT EXISTS (
+     SELECT 1 FROM quality_rule_template_accounts l
+     JOIN quality_rule_templates t ON t.id=l.template_id
+     WHERE l.plan_id=p.id AND NOT (
+       l.account_id=a.id
+       AND (COALESCE(t.account_filter->>'type','')='' OR a.type=t.account_filter->>'type')
+       AND (COALESCE(t.account_filter->>'search','')=''
+         OR strpos(lower(a.name),lower(t.account_filter->>'search'))>0)
+       AND (COALESCE(t.account_filter->>'group','')=''
+         OR (t.account_filter->>'group'='ungrouped'
+           AND NOT EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id=a.id))
+         OR EXISTS (SELECT 1 FROM account_groups ag WHERE ag.account_id=a.id AND ag.group_id::text=t.account_filter->>'group'))
+       AND (COALESCE(t.account_filter->'statuses','[]'::jsonb)='[]'::jsonb
+         OR EXISTS (
+           SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.account_filter->'statuses')='array'
+             THEN t.account_filter->'statuses' ELSE '[]'::jsonb END) selected(status)
+           WHERE CASE selected.status
+             WHEN 'active' THEN a.status='active' AND a.schedulable
+               AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=NOW())
+               AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=NOW())
+             WHEN 'rate_limited' THEN a.status='active' AND a.rate_limit_reset_at>NOW()
+               AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=NOW())
+             WHEN 'temp_unschedulable' THEN a.status='active' AND a.temp_unschedulable_until>NOW()
+             WHEN 'unschedulable' THEN a.status='active' AND NOT a.schedulable
+               AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=NOW())
+               AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=NOW())
+             ELSE a.status=selected.status END
+         ))
+     )
+   )
+ )
+), filtered AS MATERIALIZED (
  SELECT a.id,a.name,a.platform,a.type FROM accounts a
  WHERE a.deleted_at IS NULL
  AND ($1='' OR a.name ILIKE $2 ESCAPE '\' OR a.id::text=$1)
  AND ($3::bigint IS NULL
    OR ($3=0 AND NOT EXISTS (SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id AND g.deleted_at IS NULL WHERE ag.account_id=a.id))
    OR EXISTS (SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id AND g.deleted_at IS NULL WHERE ag.account_id=a.id AND ag.group_id=$3))
+ AND ($7='all' OR EXISTS (SELECT 1 FROM eligible_plans p WHERE p.account_id=a.id))
 ), page AS (
  SELECT * FROM filtered ORDER BY id DESC LIMIT $4 OFFSET $5
 ), account_items AS (
@@ -35,6 +79,7 @@ WITH filtered AS MATERIALIZED (
  LEFT JOIN LATERAL (
    SELECT jsonb_agg(jsonb_build_object('id',p.id,'enabled',p.enabled,'running_until',p.running_until,
    'next_run_at',p.next_run_at,'action',COALESCE(p.pelican_config->'quality'->>'action',''),
+   'action_on',CASE WHEN p.pelican_config->'quality'->>'action_on'='passed' THEN 'passed' ELSE 'failed' END,
    'model_id',p.model_id,'model_ids',CASE WHEN jsonb_typeof(p.pelican_config->'model_ids')='array' AND p.pelican_config->'model_ids'<>'[]'::jsonb
      THEN p.pelican_config->'model_ids' ELSE jsonb_build_array(p.model_id) END,
    'test_channel',CASE WHEN p.pelican_config->>'question_kind'='state_probe' THEN 'account'
@@ -45,12 +90,12 @@ WITH filtered AS MATERIALIZED (
      THEN COALESCE(NULLIF((p.pelican_config->'quality'->>'recovery_probe_interval_minutes')::int,0),60) ELSE 60 END,
    'recovery_confirmation_minutes',CASE WHEN COALESCE(p.pelican_config->'quality'->>'recovery_confirmation_minutes','') ~ '^[0-9]{1,5}$'
      THEN COALESCE(NULLIF((p.pelican_config->'quality'->>'recovery_confirmation_minutes')::int,0),5) ELSE 5 END) ORDER BY p.id) AS items
-   FROM scheduled_test_plans p WHERE p.account_id=a.id AND jsonb_typeof(p.pelican_config->'quality')='object'
+   FROM eligible_plans p WHERE p.account_id=a.id AND jsonb_typeof(p.pelican_config->'quality')='object'
  ) plans ON true
  LEFT JOIN LATERAL (
    WITH source AS (
      SELECT r.*,COALESCE(NULLIF(r.quality_round_id,''),'legacy:'||r.id::text) AS round_key
-     FROM scheduled_test_plans p
+     FROM eligible_plans p
      CROSS JOIN LATERAL (
        SELECT r.id,r.plan_id,r.status,r.error_message,r.started_at,r.finished_at,r.created_at,
          r.quality_round_id,r.quality_judgment,r.quality_action,r.pelican_config
@@ -58,6 +103,8 @@ WITH filtered AS MATERIALIZED (
        ORDER BY r.created_at DESC,r.id DESC LIMIT 6000
      ) r
      WHERE p.account_id=a.id
+       AND ($7='all' OR (COALESCE(r.pelican_config->'quality'->>'action_on','')='passed')=($7='recovery'))
+       AND ($7='all' OR COALESCE(r.pelican_config->'quality'->>'action','')<>'openai_two_fa_admission')
    ), parsed AS (
      SELECT source.*,COALESCE(pelican_config->>'question_kind','') AS kind,
        COALESCE(pelican_config->>'model_id','') AS model,
@@ -83,7 +130,7 @@ WITH filtered AS MATERIALIZED (
        status='failed' AND quality_judgment->>'verdict'='incorrect' AND error_message IN ('answer_mismatch','state_degraded')
          AND (kind<>'random_reasoning' OR (pelican_config->'quality_batch'->>'decision'='peer_passed'
            AND COALESCE(pelican_config->'quality_batch'->>'peer_passed','0') ~ '^[1-9][0-9]*$')) AS failed
-     FROM parsed
+     FROM parsed WHERE $7='all' OR channel=$6
    ), rounds AS (
      SELECT max(id) AS id,plan_id,min(started_at) AS started_at,
        (array_agg(model ORDER BY id))[1] AS model_id,
@@ -119,7 +166,7 @@ func (r *scheduledTestResultRepository) ReadQualityOverview(ctx context.Context,
 	var raw []byte
 	var total int64
 	err := r.db.QueryRowContext(ctx, qualityOverviewSQL, filter.Search, "%"+escaped+"%", groupID,
-		filter.PageSize, int64(filter.Page-1)*int64(filter.PageSize), filter.TestChannel).Scan(&total, &raw)
+		filter.PageSize, int64(filter.Page-1)*int64(filter.PageSize), filter.TestChannel, filter.ProbeScope).Scan(&total, &raw)
 	if err != nil {
 		return nil, 0, err
 	}

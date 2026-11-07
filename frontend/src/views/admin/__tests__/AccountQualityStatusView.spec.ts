@@ -22,10 +22,30 @@ const fixture = (): QualityOverviewAccount => ({
 })
 const response = (items = [fixture()]) => ({ items, total: items.length, page: 1, page_size: 20 })
 let wrapper: ReturnType<typeof mount>
-beforeEach(() => { vi.clearAllMocks(); vi.mocked(getQualityOverview).mockReset().mockResolvedValue(response()); vi.mocked(runQualityPlan).mockReset().mockResolvedValue() })
+beforeEach(() => { vi.clearAllMocks(); vi.mocked(getQualityOverview).mockReset().mockImplementation(async params => response(params.probe_scope === 'recovery' ? [] : [fixture()])); vi.mocked(runQualityPlan).mockReset().mockResolvedValue() })
 afterEach(() => { wrapper?.unmount(); vi.useRealTimers() })
 
 describe('account quality status', () => {
+  it('loads both scopes with independent pagination and runs the recovery rule in its own section', async () => {
+    vi.mocked(getQualityOverview).mockImplementation(async params => {
+      const account = fixture()
+      if (params.probe_scope === 'recovery') {
+        account.account_name = 'Recovery account'
+        account.plans = [{ ...account.plans[0], id: 19, action_on: 'passed' }]
+      }
+      return { ...response([account]), total: params.probe_scope === 'main' ? 21 : 1, page: params.page }
+    })
+    wrapper = mount(AccountQualityStatusView); await flushPromises()
+    const main = wrapper.get('[data-probe-scope="main"]'), recovery = wrapper.get('[data-probe-scope="recovery"]')
+    expect(main.text()).not.toContain('Recovery account')
+    expect(recovery.text()).toContain('Recovery account')
+    await recovery.get('.probe-button').trigger('click'); await flushPromises()
+    expect(runQualityPlan).toHaveBeenLastCalledWith(19)
+    vi.mocked(getQualityOverview).mockClear()
+    await main.get('.list-footer button:last-child').trigger('click'); await flushPromises()
+    expect(getQualityOverview).toHaveBeenCalledTimes(1)
+    expect(getQualityOverview).toHaveBeenCalledWith(expect.objectContaining({ probe_scope: 'main', page: 2 }), expect.any(AbortSignal))
+  })
   it('renders separate healthy, degraded and inconclusive bars and opens evidence', async () => {
     wrapper = mount(AccountQualityStatusView); await flushPromises()
     expect(wrapper.findAll('button.bar-healthy')).toHaveLength(1)

@@ -1,6 +1,7 @@
 import { apiClient } from '../client'
 
 export type QualityStatus = 'healthy' | 'degraded' | 'unknown' | 'untested'
+export type QualityProbeScope = 'main' | 'recovery'
 export interface QualityHistoryPoint {
   id: number
   plan_id: number
@@ -19,6 +20,7 @@ export interface QualityOverviewPlan {
   running_until: string | null
   next_run_at: string | null
   action: string
+  action_on?: 'failed' | 'passed'
   auto_restore: boolean
   test_channel?: 'account' | 'bps'
   recovery_probe_enabled?: boolean
@@ -42,7 +44,7 @@ export interface QualityOverviewPage {
   page: number
   page_size: number
 }
-export async function getQualityOverview(params: { page: number; page_size: number; search?: string; group_id?: number; test_channel: 'account' | 'bps' }, signal?: AbortSignal): Promise<QualityOverviewPage> {
+export async function getQualityOverview(params: { page: number; page_size: number; search?: string; group_id?: number; test_channel: 'account' | 'bps'; probe_scope?: QualityProbeScope }, signal?: AbortSignal): Promise<QualityOverviewPage> {
   const { data } = await apiClient.get<QualityOverviewPage>('/admin/account-quality-overview', { params, signal })
   return { ...data, items: data.items ?? [] }
 }
