@@ -43,6 +43,9 @@ func (s *ScheduledTestRunnerService) runPelicanAnswer(ctx context.Context, plan 
 		if batch := plan.PelicanConfig.QualityBatch; batch != nil && !time.Now().Before(batch.StartDeadline) {
 			return nil, fmt.Errorf("quality batch start window closed")
 		}
+		if reason := s.qualityProbeQuotaSkipReason(ctx, plan); reason != "" {
+			return skippedQualityProbeResult(plan.ModelID, plan.PelicanConfig, reason), nil
+		}
 		// Reuse the prepared question and account: changing either would test a
 		// different sample. Each call releases its own request resources.
 		result, err := s.runPelican(ctx, plan.AccountID, plan.ModelID, plan.PelicanConfig)

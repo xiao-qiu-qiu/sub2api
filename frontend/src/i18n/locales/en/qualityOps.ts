@@ -144,6 +144,10 @@ export default {
 
   "skipped": "Skipped",
   "modelUnsupportedSkipped": "Unsupported model · skipped",
+  "quotaExhaustedSkipped": "Account quota exhausted · skipped",
+  "quotaExhaustedSkipHelp": "The account quota is exhausted. No probe was sent; testing resumes on schedule after the quota resets.",
+  "accountUnavailableSkipped": "Account unavailable · skipped",
+  "accountUnavailableSkipHelp": "Account information could not be read. No probe was sent; the rule will try again on its next run.",
   "skippedCount": "{n} skipped",
   "skipReason": "Reason for skipping",
   "unsupportedSkipHelp": "This account does not currently support this model. It was not tested and skipping did not add a cooldown.",

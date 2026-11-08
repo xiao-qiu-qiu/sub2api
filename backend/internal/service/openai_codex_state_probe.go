@@ -131,6 +131,10 @@ func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, accoun
 		result.fail(OpenAICodexStateFailureUnsupported, reason, "")
 		return result
 	}
+	if qualityProbeQuotaExhausted(account, started) {
+		result.fail(OpenAICodexStateFailureRateLimited, "账号额度已用尽，等待额度重置后再检测", "")
+		return result
+	}
 	if s == nil || s.httpUpstream == nil {
 		result.fail(OpenAICodexStateFailureUnsupported, "OpenAI 网关不可用，无法发起探针", "")
 		return result

@@ -144,6 +144,10 @@ export default {
 
   "skipped": "已跳过",
   "modelUnsupportedSkipped": "账号不支持，已跳过",
+  "quotaExhaustedSkipped": "账号额度已用尽，已跳过",
+  "quotaExhaustedSkipHelp": "账号额度已用尽，本轮未发送探针；额度重置后按原计划继续检测。",
+  "accountUnavailableSkipped": "账号信息不可用，已跳过",
+  "accountUnavailableSkipHelp": "暂时无法读取账号信息，本轮未发送探针，稍后按规则再次检测。",
   "skippedCount": "跳过 {n} 个",
   "skipReason": "跳过原因",
   "unsupportedSkipHelp": "该账号暂不支持此模型，本轮未检测，也未因跳过而新增冷却。",

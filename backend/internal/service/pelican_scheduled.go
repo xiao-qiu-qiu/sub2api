@@ -37,6 +37,9 @@ const (
 
 func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error) {
 	ctx = context.WithValue(ctx, qualityProbeContextKey{}, true)
+	if reason := s.qualityProbeQuotaSkipReason(ctx, accountID, cfg); reason != "" {
+		return skippedQualityProbeResult(model, cfg, reason), nil
+	}
 	// 探针题型不下发题目，直接走门票探针。
 	if isOpenAICodexStateProbePlan(cfg) {
 		return s.runOpenAICodexStateProbeScheduled(ctx, accountID, model, cfg)
@@ -86,6 +89,35 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 	return &ScheduledTestResult{Status: status, ResponseText: output, ErrorMessage: message, LatencyMs: finished.Sub(started).Milliseconds(), StartedAt: started, FinishedAt: finished, PelicanConfig: &snapshot}, nil
 }
 
+func (s *AccountTestService) qualityProbeQuotaSkipReason(ctx context.Context, accountID int64, cfg *PelicanTestConfig) string {
+	if cfg == nil || cfg.Quality == nil && !isOpenAICodexStateProbePlan(cfg) || s == nil || s.accountRepo == nil {
+		return ""
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil || account == nil {
+		return "account_unavailable"
+	}
+	if qualityProbeQuotaExhausted(account, time.Now()) {
+		return "account_quota_exhausted"
+	}
+	return ""
+}
+
+func (s *ScheduledTestRunnerService) qualityProbeQuotaSkipReason(ctx context.Context, plan *ScheduledTestPlan) string {
+	tests := s.accountTestSvc
+	if tests == nil && s.scheduledSvc != nil {
+		tests = s.scheduledSvc.accountTests
+	}
+	return tests.qualityProbeQuotaSkipReason(ctx, plan.AccountID, plan.PelicanConfig)
+}
+
+func skippedQualityProbeResult(model string, cfg *PelicanTestConfig, reason string) *ScheduledTestResult {
+	now := time.Now()
+	snapshot := *cfg
+	snapshot.ModelID = model
+	return &ScheduledTestResult{Status: "skipped", ErrorMessage: reason, StartedAt: now, FinishedAt: now, PelicanConfig: &snapshot}
+}
+
 func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *ScheduledTestPlan) bool {
 	var triggeredAccount *Account
 	if plan.TriggerSource == quality5xxSource && s.accountTestSvc != nil {
@@ -130,6 +162,7 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 		snapshot, applyTriggeredQuality = quality5xxTestConfig(triggeredAccount, plan.ModelID, snapshot)
 	}
 	plan.PelicanConfig = &snapshot
+	quotaSkipReason := s.qualityProbeQuotaSkipReason(ctx, plan)
 	// Legacy rules can target API-key accounts, or an account can change type
 	// after a rule is saved. Advance the claimed schedule without running a
 	// probe or recording a misleading inconclusive quality round.
@@ -153,7 +186,7 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	}
 	// Fallback for queued legacy signals without an immediately applied episode.
 	// A 5xx triggers protection; it is not itself a quality verdict.
-	if plan.TriggerSource == quality5xxSource && plan.PelicanConfig.Quality != nil &&
+	if quotaSkipReason == "" && plan.TriggerSource == quality5xxSource && plan.PelicanConfig.Quality != nil &&
 		plan.PelicanConfig.Quality.Action == QualityActionRemoveModel && plan.Quality5xxEpisode == 0 && applyTriggeredQuality {
 		preCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		preAction, preErr := s.planRepo.ApplyQualityOutcome(preCtx, plan, until, "pending")
@@ -172,7 +205,7 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	var randomSamples []*PelicanTestConfig
 	var randomQuestionErr error
 	var sharedBatch *QualitySharedBatch
-	if plan.PelicanConfig.QuestionKind == QualityRandomQuestionKind {
+	if quotaSkipReason == "" && plan.PelicanConfig.QuestionKind == QualityRandomQuestionKind {
 		candidate, _ := ctx.Value(qualitySharedBatchContextKey{}).(*QualitySharedBatch)
 		if candidate == nil {
 			candidate, randomQuestionErr = newQualitySharedBatch(now)
@@ -197,7 +230,7 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	var unsupported sync.Map
 	var allowed []string
 	var catalogErr error
-	if plan.PelicanConfig.Quality != nil {
+	if quotaSkipReason == "" && plan.PelicanConfig.Quality != nil {
 		allowed, _, catalogErr = s.scheduledSvc.eligibleQualityModels(runCtx, plan)
 	}
 	var wg sync.WaitGroup
@@ -223,6 +256,10 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 					}
 				}
 				samplePlan.PelicanConfig = &cfg
+				if quotaSkipReason != "" {
+					results[index] = skippedQualityProbeResult(samplePlan.ModelID, &cfg, quotaSkipReason)
+					continue
+				}
 				if randomQuestionErr != nil {
 					results[index] = &ScheduledTestResult{Status: "failed", ErrorMessage: "random_question_generation_failed", StartedAt: time.Now(), FinishedAt: time.Now(), PelicanConfig: &cfg,
 						QualityJudgment: &QualityJudgment{Verdict: "unknown", Reason: "random_question_generation_failed"}}
