@@ -133,8 +133,12 @@ export async function probeTokenGuardV2Account(accountId: number): Promise<Token
   return (await apiClient.post(`/admin/account-ops/token-guard-v2/accounts/${accountId}/probe`)).data
 }
 
-export async function reloginTokenGuardV2Account(accountId: number): Promise<TokenGuardV2Task> {
-  return (await apiClient.post(`/admin/account-ops/token-guard-v2/accounts/${accountId}/relogin`)).data
+export async function reloginTokenGuardV2Account(accountId: number, signal?: AbortSignal): Promise<TokenGuardV2Task> {
+  return (await apiClient.post(`/admin/account-ops/token-guard-v2/accounts/${accountId}/relogin`, undefined, { signal })).data
+}
+
+export async function getAccountReloginStatus(accountId: number, signal?: AbortSignal): Promise<{ task?: TokenGuardV2Task }> {
+  return (await apiClient.get(`/admin/accounts/${accountId}/openai-reauth`, { signal })).data
 }
 
 export async function resumeTokenGuardV2Budget(accountId: number): Promise<TokenGuardV2Account> {

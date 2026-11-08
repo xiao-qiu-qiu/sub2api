@@ -38,6 +38,10 @@
             </button>
             <!-- 影子账号不持凭据:重授权/刷新 token 对其无效(后端拒绝),故隐藏(外审 G4)。 -->
             <template v-if="(account.type === 'oauth' || account.type === 'setup-token') && !isShadow">
+              <button v-if="supportsRelogin" data-testid="relogin-action" :disabled="reloginBusy" @click="$emit('relogin', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-blue-600 hover:bg-gray-100 disabled:cursor-wait disabled:opacity-50 dark:text-blue-400 dark:hover:bg-dark-700">
+                <Icon name="refresh" size="sm" :class="{ 'animate-spin': reloginBusy }" />
+                {{ t(reloginBusy ? 'admin.accounts.relogging' : 'admin.accounts.relogin') }}
+              </button>
               <button @click="$emit('reauth', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-blue-600 hover:bg-gray-100 dark:hover:bg-dark-700">
                 <Icon name="link" size="sm" />
                 {{ t('admin.accounts.reAuthorize') }}
@@ -79,8 +83,8 @@ import { Icon } from '@/components/icons'
 import type { Account } from '@/types'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 
-const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null }>()
-const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'manual-rest'])
+const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null; reloginBusy?: boolean }>()
+const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'relogin', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'manual-rest'])
 const { t } = useI18n()
 const menuRef = ref<HTMLElement | null>(null)
 const { width: viewportWidth, height: viewportHeight } = useWindowSize()
@@ -143,6 +147,12 @@ const isOpenAIOAuth = computed(() => props.account?.platform === 'openai' && pro
 const isShadow = computed(() => props.account?.parent_account_id != null)
 // A "parent" OpenAI OAuth account is one that is NOT itself a shadow (parent_account_id == null)
 const isOpenAIOAuthParent = computed(() => isOpenAIOAuth.value && !isShadow.value)
+const supportsRelogin = computed(() => {
+  if (!isOpenAIOAuthParent.value) return false
+  const credential = (key: string) => String(props.account?.credentials?.[key] ?? '').trim().toLowerCase()
+  const isPAT = (mode: string) => mode === 'personalaccesstoken' || mode === 'personal_access_token'
+  return credential('auth_mode') !== 'agentidentity' && !isPAT(credential('auth_mode')) && !isPAT(credential('openai_auth_mode'))
+})
 const supportsPrivacy = computed(() => (isAntigravityOAuth.value || isOpenAIOAuth.value) && !isShadow.value)
 const hasQuotaLimit = computed(() => {
   return supportsAccountQuota(props.account?.type) && (
