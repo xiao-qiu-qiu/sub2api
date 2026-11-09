@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -39,6 +40,11 @@ type subscription struct {
 // must share a synchronized wall clock for cross-process cutoff comparisons.
 func (r *Registry) Start(ctx context.Context, rdb redis.UniversalClient) (func(), error) {
 	if rdb == nil {
+		return func() {}, nil
+	}
+	// Wiring supplies *redis.Client; a nil pointer retains its dynamic type
+	// when converted to UniversalClient. Keep the documented local-only mode.
+	if client := reflect.ValueOf(rdb); client.Kind() == reflect.Pointer && client.IsNil() {
 		return func() {}, nil
 	}
 	if err := ctx.Err(); err != nil {

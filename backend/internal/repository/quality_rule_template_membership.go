@@ -187,7 +187,7 @@ func (r *qualityRuleTemplateRepository) syncMember(ctx context.Context, t *servi
 	}
 	state.RecoveryProbe = nil // Crossing the boundary invalidates confirmation.
 	now := time.Now()
-	next := now
+	var next time.Time
 	if plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RunsOnPassed() {
 		next = now.Add(plan.PelicanConfig.Quality.RecoveryProbeInterval())
 	} else {

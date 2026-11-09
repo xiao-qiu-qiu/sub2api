@@ -187,10 +187,11 @@ func (s *ScheduledTestService) AccountQualityOverview(ctx context.Context, filte
 			}
 			item.History = append(item.History, history)
 			item.Status, item.LastCheckedAt = history.Status, &item.History[len(item.History)-1].StartedAt
-			if history.Status == "healthy" {
+			switch history.Status {
+			case "healthy":
 				healthy++
 				definite++
-			} else if history.Status == "degraded" {
+			case "degraded":
 				definite++
 			}
 		}

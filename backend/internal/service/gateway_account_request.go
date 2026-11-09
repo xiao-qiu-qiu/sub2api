@@ -13,7 +13,7 @@ func beginAccountGatewayRequest(ctx context.Context, account *Account) (context.
 	if account == nil {
 		return ctx, func() {}
 	}
-	return accountrequest.Default.Begin(ctx, account.ID)
+	return accountrequest.Default.Track(ctx, account.ID)
 }
 
 func accountRequestQualityError(ctx context.Context, causes ...error) error {

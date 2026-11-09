@@ -170,6 +170,66 @@ func TestReleaseAndNonpositiveAccounts(t *testing.T) {
 	}
 }
 
+func TestTrackCompletionReleasesBindingsWithoutCancelingUpstream(t *testing.T) {
+	r := NewRegistry()
+	client, cancelClient := context.WithCancel(context.Background())
+	defer cancelClient()
+	ctx, complete := r.Track(client, 1)
+	defer complete()
+	detached, releaseDetached := PreserveCancellation(ctx, context.WithoutCancel(ctx))
+	defer releaseDetached()
+	child, finishChild := r.Begin(context.WithoutCancel(detached), 1)
+	defer finishChild()
+	cancelClient()
+	assertCause(t, ctx, context.Canceled)
+	assertActive(t, detached)
+	complete()
+	complete()
+	assertActive(t, detached)
+	assertActive(t, child)
+	assertEmpty(t, r)
+	assertScopeReleased(t, ctx)
+	assertScopeReleased(t, child)
+	if r.Cancel(1, time.Now()) != 0 || QualityDegraded(detached) {
+		t.Fatal("completed upstream retained a quality subscription")
+	}
+	// Carrying a completed scope through WithoutCancel must not resurrect it.
+	late, finishLate := r.Begin(context.WithoutCancel(ctx), 1)
+	defer finishLate()
+	assertActive(t, late)
+	assertEmpty(t, r)
+	assertScopeReleased(t, late)
+}
+
+func TestTrackCompletionJoinsQualityInterruption(t *testing.T) {
+	r := NewRegistry()
+	ctx, complete := r.Track(context.Background(), 1)
+	defer complete()
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	scopeFrom(ctx).bind(func(error) {
+		close(entered)
+		<-proceed
+	})
+	var group sync.WaitGroup
+	group.Go(func() { r.Cancel(1, time.Now()) })
+	<-entered
+	completed := make(chan struct{})
+	group.Go(func() {
+		complete()
+		close(completed)
+	})
+	select {
+	case <-completed:
+		t.Error("completion returned before quality interruption finished")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(proceed)
+	group.Wait()
+	assertCause(t, ctx, ErrQualityDegraded)
+	assertEmpty(t, r)
+	assertScopeReleased(t, ctx)
+}
+
 func TestNestedBeginCannotEscapeCutoff(t *testing.T) {
 	r := NewRegistry()
 	root, releaseRoot := r.Begin(context.Background(), 1)
@@ -270,8 +330,10 @@ func TestPreserveReleaseAndDetachedSemantics(t *testing.T) {
 		t.Fatal("no-scope Preserve must return original detached context")
 	}
 	assertActive(t, base)
-	if QualityDegraded(nil) || QualityDegraded(base) {
-		t.Fatal("unrelated context counted as quality degraded")
+	for _, unrelated := range []context.Context{nil, base} {
+		if QualityDegraded(unrelated) {
+			t.Fatal("unrelated context counted as quality degraded")
+		}
 	}
 }
 

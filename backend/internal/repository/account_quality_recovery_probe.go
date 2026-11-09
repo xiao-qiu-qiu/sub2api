@@ -77,7 +77,7 @@ func claimQualityRecoveryProbe(state *qualityState, plan *service.ScheduledTestP
 
 func retryConflictedQualityRecovery(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, now time.Time, commit *bool) error {
 	state, err := readQualityState(ctx, tx, plan.ID)
-	if err != nil || !(plan.PelicanConfig.Quality.RunsOnPassed() || qualityRecoveryProbeOwns(&state)) {
+	if err != nil || (!plan.PelicanConfig.Quality.RunsOnPassed() && !qualityRecoveryProbeOwns(&state)) {
 		return err
 	}
 	if state.RecoveryProbe == nil || !state.RecoveryProbe.PolicyVersion.Equal(plan.UpdatedAt) {

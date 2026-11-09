@@ -116,7 +116,7 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	} else if len(q.ExpectedAnswer) > 4000 {
 		return fmt.Errorf("expected answer must be 1–4000 bytes")
 	}
-	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionMoveGroups && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels && !(q.RunsOnPassed() && q.Action == QualityActionEnableScheduling) {
+	if q.Action != "remove_groups" && q.Action != "disable_scheduling" && q.Action != QualityActionMoveGroups && q.Action != QualityActionRemoveModel && q.Action != QualityActionEnableBPS && q.Action != QualityActionObserveOnly && q.Action != QualityActionIsolateModels && (!q.RunsOnPassed() || q.Action != QualityActionEnableScheduling) {
 		return fmt.Errorf("invalid quality action")
 	}
 	if q.Action == QualityActionMoveGroups {

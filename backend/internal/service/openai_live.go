@@ -1147,12 +1147,6 @@ func (s *OpenAIGatewayService) observeLiveCallContext(ctx context.Context, recor
 	}
 }
 
-func (s *OpenAIGatewayService) runLiveObserverConnection(record *LiveCallRecord, upstream liveFrameConn) error {
-	ctx, release := accountrequest.Default.Begin(context.Background(), record.AccountID)
-	defer release()
-	return s.runLiveObserverConnectionContext(ctx, record, upstream)
-}
-
 func (s *OpenAIGatewayService) runLiveObserverConnectionContext(controlCtx context.Context, record *LiveCallRecord, upstream liveFrameConn) (returnErr error) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(controlCtx))
 	defer func() {
@@ -1246,13 +1240,9 @@ func (s *OpenAIGatewayService) waitForLiveObserverRetryContext(ctx context.Conte
 	return getErr == nil && controller == LiveControllerObserver
 }
 
-// finalizeLiveCallAfterExpiry 是 store 持续报错、observer 无法继续观察时的兜底：
+// finalizeLiveCallAfterExpiryContext 是 store 持续报错、observer 无法继续观察时的兜底：
 // 等到会话最长时限 ExpiresAt 再 finalize，保证 usage log 与租约释放最迟在会话到期
 // 时完成。MarkLiveCallClosed 的 first 语义保证与其他恢复路径不会重复落库。
-func (s *OpenAIGatewayService) finalizeLiveCallAfterExpiry(record *LiveCallRecord) {
-	s.finalizeLiveCallAfterExpiryContext(context.Background(), record)
-}
-
 func (s *OpenAIGatewayService) finalizeLiveCallAfterExpiryContext(ctx context.Context, record *LiveCallRecord) {
 	if record == nil {
 		return

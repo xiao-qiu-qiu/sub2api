@@ -54,15 +54,16 @@ func TestQualityOverviewHandlerFilters(t *testing.T) {
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 			require.EqualValues(t, 7, page.Total)
 			require.Equal(t, "untested", page.Items[0].Status)
-			if tc.query == "" {
+			switch tc.query {
+			case "":
 				require.Equal(t, 20, page.PageSize)
 				require.Equal(t, "account", repo.calls[0].TestChannel)
-			} else if tc.query == "?page=2&page_size=10&search=test&group_id=0&test_channel=bps" {
+			case "?page=2&page_size=10&search=test&group_id=0&test_channel=bps":
 				require.Equal(t, 2, page.Page)
 				require.Equal(t, "bps", repo.calls[0].TestChannel)
 				require.Equal(t, "test", repo.calls[0].Search)
 				require.EqualValues(t, 0, *repo.calls[0].GroupID)
-			} else {
+			default:
 				require.Equal(t, 1, page.Page)
 				require.Equal(t, 20, page.PageSize)
 			}

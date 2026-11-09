@@ -51,7 +51,7 @@ func TestGrokVoiceQualityInterruptSurvivesHandshakeAndStopsRelay(t *testing.T) {
 			}
 			cancelProbe()
 			require.NoError(t, err)
-			defer upstream.Close()
+			defer func() { _ = upstream.Close() }()
 			require.NoError(t, upstream.accountCtx.Err(), "the completed dial timeout does not own the voice session")
 			type result struct {
 				chars int64
@@ -64,7 +64,7 @@ func TestGrokVoiceQualityInterruptSurvivesHandshakeAndStopsRelay(t *testing.T) {
 					done <- result{err: acceptErr}
 					return
 				}
-				defer client.CloseNow()
+				defer func() { _ = client.CloseNow() }()
 				if tts {
 					chars, proxyErr := svc.ProxyGrokTTSStreamConn(r.Context(), client, upstream)
 					done <- result{chars: chars, err: proxyErr}
@@ -78,7 +78,7 @@ func TestGrokVoiceQualityInterruptSurvivesHandshakeAndStopsRelay(t *testing.T) {
 			defer cancel()
 			client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 			require.NoError(t, err)
-			defer client.CloseNow()
+			defer func() { _ = client.CloseNow() }()
 			_, _, err = client.Read(ctx)
 			require.NoError(t, err)
 			if tts {

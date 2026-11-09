@@ -405,7 +405,11 @@ func TestGatewayModels_UnmappedOpenAIAccountsSupplementMappedModels(t *testing.T
 				require.ElementsMatch(t, tt.want, modelIDsForTest(got.Data))
 				for _, model := range got.Data {
 					require.Equal(t, "model", model.Object, model.ID)
-					require.Positive(t, model.Created, model.ID)
+					if openai.IsGPT62ModelSpelling(model.ID) {
+						require.Zero(t, model.Created, "precompatibility must not invent a release timestamp")
+					} else {
+						require.Positive(t, model.Created, model.ID)
+					}
 					require.Equal(t, "openai", model.OwnedBy, model.ID)
 					require.Empty(t, model.CreatedAt, model.ID)
 				}

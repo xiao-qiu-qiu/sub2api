@@ -92,7 +92,7 @@ func TestExcelBPSGPT62SelectedProtocolPreservesModel(t *testing.T) {
 				require.Equal(t, wantPath, upstream.lastReq.URL.Path)
 				body, err := upstream.lastReq.GetBody()
 				require.NoError(t, err)
-				defer body.Close()
+				defer func() { _ = body.Close() }()
 				raw, err := io.ReadAll(body)
 				require.NoError(t, err)
 				require.Equal(t, model, gjson.GetBytes(raw, "model").String())

@@ -24,7 +24,7 @@ func TestOpenAIWSIngressQualityInterruptAllModes(t *testing.T) {
 			cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 10
 			cfg.Gateway.OpenAIWS.IngressModeDefault = mode
 			upstream := newStagedPassthroughConn()
-			defer upstream.Close()
+			defer func() { _ = upstream.Close() }()
 			svc := newPassthroughLifecycleService(cfg, upstream)
 			pool := newOpenAIWSConnPool(cfg)
 			defer pool.Close()
@@ -54,7 +54,7 @@ func TestOpenAIWSIngressQualityInterruptAllModes(t *testing.T) {
 					serverDone <- err
 					return
 				}
-				defer conn.CloseNow()
+				defer func() { _ = conn.CloseNow() }()
 				_, first, err := conn.Read(r.Context())
 				if err != nil {
 					serverDone <- err
@@ -75,7 +75,7 @@ func TestOpenAIWSIngressQualityInterruptAllModes(t *testing.T) {
 			defer server.Close()
 			client, _, err := coderws.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 			require.NoError(t, err)
-			defer client.CloseNow()
+			defer func() { _ = client.CloseNow() }()
 			require.NoError(t, client.Write(t.Context(), coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5","stream":true,"input":"test"}`)))
 			readCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			_, frame, err := client.Read(readCtx)

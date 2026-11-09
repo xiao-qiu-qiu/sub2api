@@ -56,7 +56,9 @@ func TestHTTPUpstreamQualityInterruptAllBodiesAndIsolateAccount(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = io.WriteString(w, "data: partial\n\n")
-				w.(http.Flusher).Flush()
+				flusher, ok := w.(http.Flusher)
+				require.True(t, ok)
+				flusher.Flush()
 				if r.URL.Path == "/other" {
 					select {
 					case <-finishOther:
@@ -68,7 +70,8 @@ func TestHTTPUpstreamQualityInterruptAllBodiesAndIsolateAccount(t *testing.T) {
 				<-r.Context().Done()
 			}))
 			defer server.Close()
-			upstream := NewHTTPUpstream(nil).(*httpUpstreamService)
+			upstream, ok := NewHTTPUpstream(nil).(*httpUpstreamService)
+			require.True(t, ok)
 			accountID := int64(9961810)
 			if fingerprint {
 				accountID++

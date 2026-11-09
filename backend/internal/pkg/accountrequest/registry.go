@@ -54,6 +54,18 @@ type requestScope struct {
 // A nested Begin for the same account inherits the original registration time,
 // including through context.WithoutCancel and across Registry instances.
 func (r *Registry) Begin(ctx context.Context, accountID int64) (context.Context, func()) {
+	return r.begin(ctx, accountID, context.Canceled)
+}
+
+// Track registers a forwarding request like Begin, but its completion function
+// only releases tracking and bindings. It does not cancel successfully completed
+// upstream contexts. Call it after closing the transport and consuming its body;
+// use Begin when releasing ownership must also abort outstanding work.
+func (r *Registry) Track(ctx context.Context, accountID int64) (context.Context, func()) {
+	return r.begin(ctx, accountID, nil)
+}
+
+func (r *Registry) begin(ctx context.Context, accountID int64, releaseCause error) (context.Context, func()) {
 	if accountID <= 0 {
 		return ctx, func() {}
 	}
@@ -83,11 +95,15 @@ func (r *Registry) Begin(ctx context.Context, accountID int64) (context.Context,
 
 	scope.onStop(func() { r.remove(scope) })
 	request, cancel := context.WithCancelCause(ctx)
-	scope.bind(cancel)
+	scope.bind(func(cause error) {
+		if cause != nil {
+			cancel(cause)
+		}
+	})
 	if parent != nil {
 		scope.onStop(parent.bind(scope.stop))
 	}
-	return context.WithValue(request, scopeKey{}, scope), sync.OnceFunc(func() { scope.stop(context.Canceled) })
+	return context.WithValue(request, scopeKey{}, scope), sync.OnceFunc(func() { scope.stop(releaseCause) })
 }
 
 func hasAccount(scope *requestScope, accountID int64) bool {
@@ -162,7 +178,11 @@ func PreserveCancellation(parent, detached context.Context) (context.Context, fu
 		return detached, func() {}
 	}
 	request, cancel := context.WithCancelCause(detached)
-	stop := scope.bind(cancel)
+	stop := scope.bind(func(cause error) {
+		if cause != nil {
+			cancel(cause)
+		}
+	})
 	return context.WithValue(request, scopeKey{}, scope), sync.OnceFunc(func() {
 		stop()
 		cancel(context.Canceled)
@@ -188,7 +208,7 @@ func QualityDegraded(ctx context.Context) bool {
 
 func (s *requestScope) bind(cancel func(error)) func() {
 	s.mu.Lock()
-	if s.cause != nil {
+	if s.stopped != nil {
 		cause := s.cause
 		s.mu.Unlock()
 		cancel(cause)
@@ -209,7 +229,7 @@ func (s *requestScope) bind(cancel func(error)) func() {
 
 func (s *requestScope) onStop(cleanup func()) {
 	s.mu.Lock()
-	if s.cause != nil {
+	if s.stopped != nil {
 		s.mu.Unlock()
 		cleanup()
 		return
@@ -220,7 +240,7 @@ func (s *requestScope) onStop(cleanup func()) {
 
 func (s *requestScope) stop(cause error) {
 	s.mu.Lock()
-	if s.cause != nil {
+	if s.stopped != nil {
 		done := s.stopped
 		s.mu.Unlock()
 		<-done

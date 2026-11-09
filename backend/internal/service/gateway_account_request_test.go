@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +58,102 @@ func TestAccountQualityInterruptSurvivesDetachedBuilderReleaseAndClientCancel(t 
 			require.ErrorIs(t, context.Cause(upstream), accountrequest.ErrQualityDegraded)
 			require.ErrorIs(t, accountRequestQualityError(business), accountrequest.ErrQualityDegraded,
 				"quality must remain visible when the client canceled first")
+		})
+	}
+}
+
+func TestBPSImagesClientDisconnectAndQualityInterruptLifecycle(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(interrupt), func(t *testing.T) {
+			clientCtx, cancelClient := context.WithCancel(context.Background())
+			defer cancelClient()
+			started, allowFinish, upstreamStopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(allowFinish) })
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				if err := http.NewResponseController(w).Flush(); err != nil {
+					t.Error(err)
+					return
+				}
+				close(started)
+				select {
+				case <-req.Context().Done():
+					close(upstreamStopped)
+				case <-allowFinish:
+					response := openAIImagesJSONResponse()
+					defer func() { _ = response.Body.Close() }()
+					if _, err := io.Copy(w, response.Body); err != nil {
+						t.Error(err)
+					}
+				}
+			}))
+			defer func() { release(); server.Close() }()
+			upstream := &codexModelsHTTPUpstreamStub{do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+				local := req.Clone(req.Context())
+				local.URL.Scheme = "http"
+				local.URL.Host = strings.TrimPrefix(server.URL, "http://")
+				return server.Client().Do(local)
+			}}
+			svc := newOpenAIImagesTestService(upstream)
+			body := []byte(`{"model":"gpt-image-2","prompt":"draw"}`)
+			c, _ := newOpenAIImagesTestContext(t, body)
+			c.Request = c.Request.WithContext(clientCtx)
+			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+			require.NoError(t, err)
+			account := excelBPSImagesAccount()
+			account.ID = 9961930
+			if interrupt {
+				account.ID++
+			}
+			type outcome struct {
+				result *OpenAIForwardResult
+				err    error
+			}
+			finished := make(chan outcome, 1)
+			go func() {
+				result, err := svc.ForwardImages(clientCtx, c, account, body, parsed, "")
+				finished <- outcome{result: result, err: err}
+			}()
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("BPS image request did not reach upstream")
+			}
+			cancelClient()
+			select {
+			case <-upstreamStopped:
+				t.Fatal("client disconnect canceled image generation")
+			case <-finished:
+				t.Fatal("image forwarding returned before generation completed")
+			case <-time.After(20 * time.Millisecond):
+			}
+			if interrupt {
+				require.Positive(t, accountrequest.Default.Cancel(account.ID, time.Now()))
+				select {
+				case <-upstreamStopped:
+				case <-time.After(3 * time.Second):
+					t.Fatal("quality interruption did not close the real upstream request")
+				}
+			} else {
+				release()
+			}
+			select {
+			case got := <-finished:
+				if interrupt {
+					require.ErrorIs(t, got.err, accountrequest.ErrQualityDegraded)
+				} else {
+					require.NoError(t, got.err)
+					require.Equal(t, 1, got.result.ImageCount)
+					require.Equal(t, 20, got.result.Usage.ImageOutputTokens)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("image forwarding did not finish")
+			}
+			require.EqualValues(t, 1, calls.Load(), "submitted image generation must not replay")
+			require.Zero(t, accountrequest.Default.Cancel(account.ID, time.Now()), "forwarding retained its account registration")
 		})
 	}
 }

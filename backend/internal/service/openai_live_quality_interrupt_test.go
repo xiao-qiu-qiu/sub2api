@@ -113,13 +113,13 @@ func TestLiveQualityInterruptProxyTerminatesSessionAndLease(t *testing.T) {
 			done <- err
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		done <- svc.ProxyLiveSideband(r.Context(), record, conn)
 	}))
 	defer server.Close()
 	client, _, err := coderws.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	require.NoError(t, err)
-	defer client.CloseNow()
+	defer func() { _ = client.CloseNow() }()
 	select {
 	case <-dialer.conn.reading:
 	case <-time.After(2 * time.Second):
@@ -177,7 +177,9 @@ func TestLiveQualityInterruptDuringRetryOnlyReconnectsToClose(t *testing.T) {
 
 func TestLiveQualityMovedAccountCannotResumeExistingCall(t *testing.T) {
 	svc, record, dialer, cache, usage := liveQualityFixture(t, 9961954)
-	svc.accountRepo.(*liveTestAccountRepo).account.GroupIDs = []int64{99}
+	repo, ok := svc.accountRepo.(*liveTestAccountRepo)
+	require.True(t, ok)
+	repo.account.GroupIDs = []int64{99}
 	_, err := svc.dialLiveSideband(t.Context(), record)
 	require.ErrorIs(t, err, accountrequest.ErrQualityDegraded)
 	require.Zero(t, dialer.calls.Load(), "must reject stale call admission before dialing")
@@ -222,13 +224,13 @@ func TestLiveQualityObserverToProxyHandoffKeepsNewController(t *testing.T) {
 			proxyDone <- err
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		proxyDone <- svc.ProxyLiveSideband(r.Context(), record, conn)
 	}))
 	defer server.Close()
 	client, _, err := coderws.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	require.NoError(t, err)
-	defer client.CloseNow()
+	defer func() { _ = client.CloseNow() }()
 	select {
 	case <-newConn.reading:
 	case <-time.After(2 * time.Second):

@@ -54,6 +54,32 @@ func publishEvent(t *testing.T, client *redis.Client, event interruptEvent) {
 	}
 }
 
+func TestRedisNilClientsKeepLocalInterruption(t *testing.T) {
+	for name, client := range map[string]redis.UniversalClient{
+		"interface": nil,
+		"client":    (*redis.Client)(nil),
+		"cluster":   (*redis.ClusterClient)(nil),
+		"ring":      (*redis.Ring)(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRegistry()
+			stop, err := r.Start(context.Background(), client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stop()
+			ctx, finish := r.Begin(context.Background(), 1)
+			defer finish()
+			if count, err := r.Interrupt(context.Background(), 1); count != 1 || err != nil {
+				t.Fatalf("local interruption: count=%d error=%v", count, err)
+			}
+			assertCause(t, ctx, ErrQualityDegraded)
+			stop()
+			stop()
+		})
+	}
+}
+
 func processed(r *Registry, accountID int64, cutoff time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

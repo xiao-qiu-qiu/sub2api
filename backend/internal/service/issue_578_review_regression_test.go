@@ -190,6 +190,10 @@ func TestIssue578ReviewActualAutoResetAndPostResetWorkflow(t *testing.T) {
 					t.Fatal("workflow did not reach local query seam")
 				}
 				if stage != "missing usage" {
+					// The header must be strictly newer than the blocked query. Some
+					// hosts return the same wall-clock tick for both observations.
+					queryBlockedAt := time.Now()
+					require.Eventually(t, func() bool { return time.Now().After(queryBlockedAt) }, time.Second, time.Millisecond)
 					s := &OpenAIGatewayService{accountRepo: r, codexSnapshotThrottle: newAccountWriteThrottle(30 * time.Millisecond)}
 					t.Cleanup(s.CloseOpenAIWSPool)
 					s.UpdateCodexUsageSnapshotFromHeaders(context.Background(), a.ID, excelBPSQuotaHeaders("100", "20"))
