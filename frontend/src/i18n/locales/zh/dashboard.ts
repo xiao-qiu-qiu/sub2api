@@ -453,7 +453,7 @@ export default {
     time: '时间',
     ws: 'WS',
     stream: '流式',
-    sync: '同步',
+    sync: '非流式',
     nativeCompactionV2: '压缩',
     compactionFilter: '请求类别',
     allCompactionTypes: '全部请求',

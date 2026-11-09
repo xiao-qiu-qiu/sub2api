@@ -292,7 +292,7 @@ export default {
         typeInternal: '内部',
         endpoint: '端点',
         requestType: '类型',
-        requestTypeSync: '同步',
+        requestTypeSync: '非流式',
         requestTypeStream: '流式',
         requestTypeWs: 'WS'
       },
@@ -385,7 +385,7 @@ export default {
         upstreamModel: '上游模型',
         requestType: '请求类型',
         requestTypeUnknown: '未知',
-        requestTypeSync: '同步',
+        requestTypeSync: '非流式',
         requestTypeStream: '流式',
         requestTypeWs: 'WebSocket',
         modelMapping: '模型映射',
