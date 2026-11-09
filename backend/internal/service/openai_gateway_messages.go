@@ -32,7 +32,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	body []byte,
 	promptCacheKey string,
 	defaultMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, resultErr error) {
+	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
+	defer finishAccountRequest()
+	defer func() { finishAccountOpenAIRequest(ctx, result, &resultErr) }()
 	admittedCtx, admissionErr := s.beginPriorityLatencyTurn(ctx, c, account, gjson.GetBytes(body, "model").String())
 	if admissionErr != nil {
 		return nil, admissionErr

@@ -99,10 +99,13 @@ func TestQualityMoveGroupsMultiTargetLifecycleAndOwnership(t *testing.T) {
 	f := newQualityMoveGroupsFixture(t, true)
 	original := f.memberships()
 	before := f.snapshot()
+	request := beginQualityRequest(t, f.account)
 	require.Equal(t, "inconclusive", f.apply("inconclusive"))
 	require.JSONEq(t, before, f.snapshot())
+	requireQualityRequestActive(t, request)
 
 	require.Equal(t, "groups_moved", f.apply("failed"))
+	requireQualityRequestInterrupted(t, request)
 	moved := f.memberships()
 	require.Len(t, moved, 2)
 	require.Contains(t, moved, f.newTarget)
@@ -150,10 +153,13 @@ func TestQualityMoveGroupsEmptySourceAndNoChange(t *testing.T) {
 		f.exec(`DELETE FROM account_groups WHERE account_id=$1 AND group_id IN ($2,$3)`, f.source, f.sourcePeer)
 		f.exec(`INSERT INTO account_groups(account_id,group_id,priority,allowed_models) VALUES($1,$2,3,'[]')`, f.newTarget)
 		before := f.snapshot()
+		request := beginQualityRequest(t, f.account)
 		require.Equal(t, "no_change", f.apply("failed"))
 		require.JSONEq(t, before, f.snapshot(), "no mutation means no ownership, account version change or outbox event")
+		requireQualityRequestActive(t, request)
 		require.Equal(t, "no_change", f.apply("failed"))
 		require.JSONEq(t, before, f.snapshot())
+		requireQualityRequestActive(t, request)
 	})
 }
 
@@ -206,8 +212,10 @@ func TestQualityMoveGroupsUnavailableTargetRejectsWholeMove(t *testing.T) {
 			_, err := integrationDB.ExecContext(context.Background(), mutation.query, f.newTarget)
 			require.NoError(t, err)
 			before := f.snapshot()
+			request := beginQualityRequest(t, f.account)
 			require.Equal(t, "action_conflict", f.apply("failed"))
 			require.JSONEq(t, before, f.snapshot())
+			requireQualityRequestActive(t, request)
 		})
 	}
 }
@@ -217,6 +225,7 @@ func TestQualityMoveGroupsStaleRuleAndLeaseCannotMutate(t *testing.T) {
 		{"edited rule", `UPDATE scheduled_test_plans SET updated_at=updated_at+interval '1 second' WHERE id=$1`},
 		{"paused rule", `UPDATE scheduled_test_plans SET enabled=false WHERE id=$1`},
 		{"deleted rule", `DELETE FROM scheduled_test_plans WHERE id=$1`},
+		{"missing lease", `UPDATE scheduled_test_plans SET running_until=NULL WHERE id=$1`},
 		{"expired lease", `UPDATE scheduled_test_plans SET running_until=NOW()-interval '1 second' WHERE id=$1`},
 		{"replaced lease", `UPDATE scheduled_test_plans SET running_until=running_until+interval '1 second' WHERE id=$1`},
 	} {
@@ -229,8 +238,10 @@ func TestQualityMoveGroupsStaleRuleAndLeaseCannotMutate(t *testing.T) {
 				_, err := integrationDB.ExecContext(context.Background(), mutation.query, f.plan.ID)
 				require.NoError(t, err)
 				before := f.snapshot()
+				request := beginQualityRequest(t, f.account)
 				require.Equal(t, "stale_run", f.apply(outcome))
 				require.JSONEq(t, before, f.snapshot())
+				requireQualityRequestActive(t, request)
 			})
 		}
 	}
@@ -266,8 +277,10 @@ func TestQualityMoveGroupsRestoreConflictIsAtomic(t *testing.T) {
 			}
 			f.exec(mutation.query, groupID)
 			before := f.snapshot()
+			request := beginQualityRequest(t, f.account)
 			require.Equal(t, "restore_conflict", f.apply("passed"))
 			require.JSONEq(t, before, f.snapshot(), "a conflicting membership must roll back all source inserts, target deletes, ownership and outbox writes")
+			requireQualityRequestActive(t, request)
 			if mutation.target {
 				require.NotNil(t, f.plan.QualityRestoreDiagnostic)
 				require.Equal(t, "target_membership_changed", f.plan.QualityRestoreDiagnostic.Reason)

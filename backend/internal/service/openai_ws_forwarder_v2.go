@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -590,7 +591,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	upstreamReadCtx := ctx
 	upstreamReadDetached := false
 	clientRequestCanceled := func() bool {
-		return ctx != nil && errors.Is(ctx.Err(), context.Canceled)
+		return ctx != nil && accountRequestQualityError(ctx) == nil && errors.Is(ctx.Err(), context.Canceled)
 	}
 	markClientDisconnected := func(cause string) {
 		if clientDisconnected {
@@ -599,7 +600,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		clientDisconnected = true
 		clientDisconnectDrainStartedAt = time.Now()
 		if !upstreamReadDetached {
-			upstreamReadCtx = context.WithoutCancel(ctx)
+			upstreamReadCtx, _ = accountrequest.PreserveCancellation(ctx, context.WithoutCancel(ctx))
 			upstreamReadDetached = true
 		}
 		logOpenAIWSModeInfo(
@@ -720,6 +721,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 readLoop:
 	for {
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			lease.MarkBroken()
+			return resultWithUsage(), qualityErr
+		}
 		markClientRequestCanceled()
 		var message []byte
 		var readErr error
@@ -755,6 +760,10 @@ readLoop:
 			}
 		}
 		markClientRequestCanceled()
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			lease.MarkBroken()
+			return resultWithUsage(), qualityErr
+		}
 		if readErr == nil && !json.Valid(message) {
 			eventType, _, _ := parseOpenAIWSEventEnvelope(message)
 			if eventType == "" {

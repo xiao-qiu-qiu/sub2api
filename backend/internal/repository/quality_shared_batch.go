@@ -311,6 +311,9 @@ func (r *scheduledTestPlanRepository) finalizeQualityBatchRun(ctx context.Contex
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	if commitAction {
+		interruptQualityRequests(ctx, run.Plan, outcome, action, time.Now())
+	}
 	syncQualityMembershipAfterAction(ctx, r.db, run.Plan, action)
 	return nil
 }

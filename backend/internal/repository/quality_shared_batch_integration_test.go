@@ -30,6 +30,7 @@ func TestQualitySharedBatchPostgresFinalizationAndRestart(t *testing.T) {
 			plans := NewScheduledTestPlanRepository(integrationDB)
 			repo := plans.(*scheduledTestPlanRepository)
 			var runs []*service.QualityBatchRun
+			var requests []context.Context
 			for i := 0; i < 2; i++ {
 				var account int64
 				require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable)
@@ -74,9 +75,13 @@ func TestQualitySharedBatchPostgresFinalizationAndRestart(t *testing.T) {
 				}
 				run := &service.QualityBatchRun{Apply: true, Plan: plan, Until: until, Results: []*service.ScheduledTestResult{result}}
 				runs = append(runs, run)
+				requests = append(requests, beginQualityRequest(t, account))
 				require.NoError(t, repo.CollectQualityBatch(ctx, run))
 				require.NoError(t, repo.CollectQualityBatch(ctx, run), "collection is idempotent")
 				require.NoError(t, repo.FinalizeQualityBatches(ctx), "start window still open")
+				for _, request := range requests {
+					requireQualityRequestActive(t, request)
+				}
 				var enabled bool
 				require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT schedulable FROM accounts WHERE id=$1`, runs[0].Plan.AccountID).Scan(&enabled))
 				require.True(t, enabled, "a fast wrong answer must not be isolated before controls finish")
@@ -98,7 +103,16 @@ func TestQualitySharedBatchPostgresFinalizationAndRestart(t *testing.T) {
 			require.NoError(t, err)
 			restarted := NewScheduledTestPlanRepository(integrationDB).(*scheduledTestPlanRepository)
 			require.NoError(t, restarted.FinalizeQualityBatches(ctx))
+			if scenario == "passing-peer-finishes-last" {
+				requireQualityRequestInterrupted(t, requests[0])
+			} else {
+				requireQualityRequestActive(t, requests[0])
+			}
+			requireQualityRequestActive(t, requests[1])
+			fresh := beginQualityRequest(t, runs[0].Plan.AccountID)
 			require.NoError(t, restarted.FinalizeQualityBatches(ctx), "finalization is idempotent")
+			requireQualityRequestActive(t, fresh)
+			requireQualityRequestActive(t, requests[1])
 			var enabled bool
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT schedulable FROM accounts WHERE id=$1`, runs[0].Plan.AccountID).Scan(&enabled))
 			require.Equal(t, scenario != "passing-peer-finishes-last", enabled)

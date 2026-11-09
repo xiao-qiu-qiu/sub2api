@@ -452,6 +452,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		return resultWithUsage(), nil
 	}
 	handleScanErr := func(scanErr error) (*openaiStreamingResult, error, bool) {
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			return resultWithUsage(), qualityErr, true
+		}
 		if scanErr == nil {
 			return nil, nil, false
 		}

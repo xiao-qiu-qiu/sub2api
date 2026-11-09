@@ -91,6 +91,9 @@ func prismBrowserResponsesURL(baseURL string) string {
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, resultErr error) {
+	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
+	defer finishAccountRequest()
+	defer func() { finishAccountOpenAIRequest(ctx, result, &resultErr) }()
 	defer func() {
 		if result != nil && c != nil {
 			result.AuthConnectionID = c.GetString("openai_auth_connection_id")
@@ -1137,6 +1140,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			)
 			if wsErr == nil {
 				break
+			}
+			if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+				return wsResult, qualityErr
 			}
 			var capacityFailover *UpstreamFailoverError
 			if errors.As(wsErr, &capacityFailover) && !c.Writer.Written() {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -178,6 +179,11 @@ func (h *OpenAIGatewayHandler) serveGrokVoiceWebSocket(c *gin.Context, ws grokVo
 		candidateUpstream, openErr := ws.open(probeCtx, account, token)
 		cancelProbe()
 		if openErr != nil {
+			if errors.Is(openErr, accountrequest.ErrQualityDegraded) {
+				release()
+				h.errorResponse(c, http.StatusServiceUnavailable, "account_quality_degraded", "Account quality degraded; please retry")
+				return
+			}
 			reqLog.Warn("grok_"+ws.name+".pre_accept_failed", zap.Int64("account_id", account.ID), zap.Error(openErr))
 			statusCode := http.StatusBadGateway
 			var responseBody []byte
@@ -222,7 +228,9 @@ func (h *OpenAIGatewayHandler) serveGrokVoiceWebSocket(c *gin.Context, ws grokVo
 	result, proxyErr := ws.proxy(c.Request.Context(), conn, upstream)
 	if proxyErr != nil {
 		reqLog.Info("grok_"+ws.name+".proxy_failed", zap.Error(proxyErr))
-		if !isExpectedGrokRealtimeClose(proxyErr) {
+		if errors.Is(proxyErr, accountrequest.ErrQualityDegraded) {
+			_ = conn.Close(coderws.StatusTryAgainLater, "account quality degraded; please reconnect")
+		} else if !isExpectedGrokRealtimeClose(proxyErr) {
 			_ = conn.Close(coderws.StatusInternalError, "upstream voice websocket failed")
 			return
 		}

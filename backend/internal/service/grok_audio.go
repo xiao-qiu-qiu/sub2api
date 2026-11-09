@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -145,9 +146,12 @@ func (s *OpenAIGatewayService) ProxyGrokRealtime(ctx context.Context, c *gin.Con
 }
 
 type GrokRealtimeUpstream struct {
-	conn      openAIWSClientConn
-	closeOnce sync.Once
-	closeErr  error
+	conn           openAIWSClientConn
+	closeOnce      sync.Once
+	closeErr       error
+	accountCtx     context.Context
+	releaseAccount func()
+	stopInterrupt  func() bool
 }
 
 // GrokRealtimeDialError preserves an HTTP status returned before WebSocket
@@ -174,7 +178,15 @@ func (u *GrokRealtimeUpstream) Close() error {
 	if u == nil || u.conn == nil {
 		return nil
 	}
-	u.closeOnce.Do(func() { u.closeErr = u.conn.Close() })
+	u.closeOnce.Do(func() {
+		if u.stopInterrupt != nil {
+			u.stopInterrupt()
+		}
+		u.closeErr = u.conn.Close()
+		if u.releaseAccount != nil {
+			u.releaseAccount()
+		}
+	})
 	return u.closeErr
 }
 
@@ -209,7 +221,17 @@ func (s *OpenAIGatewayService) OpenGrokTTSStream(ctx context.Context, account *A
 	return s.openGrokVoiceWebSocket(ctx, account, token, "tts", query)
 }
 
-func (s *OpenAIGatewayService) openGrokVoiceWebSocket(ctx context.Context, account *Account, token, endpoint string, query url.Values) (*GrokRealtimeUpstream, error) {
+func (s *OpenAIGatewayService) openGrokVoiceWebSocket(ctx context.Context, account *Account, token, endpoint string, query url.Values) (result *GrokRealtimeUpstream, resultErr error) {
+	// The handler cancels its handshake timeout after dialing. Keep account
+	// control alive until the established voice connection itself is closed.
+	accountCtx, releaseAccount := beginAccountGatewayRequest(context.WithoutCancel(ctx), account)
+	defer func() {
+		if result == nil {
+			releaseAccount()
+		}
+	}()
+	dialCtx, releaseDial := accountrequest.PreserveCancellation(accountCtx, ctx)
+	defer releaseDial()
 	base, err := buildGrokVoiceURL(account, s.cfg, endpoint)
 	if err != nil {
 		return nil, err
@@ -231,12 +253,16 @@ func (s *OpenAIGatewayService) openGrokVoiceWebSocket(ctx context.Context, accou
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	conn, status, respHeaders, err := s.getOpenAIWSPassthroughDialer().Dial(ctx, u.String(), headers, proxyURL)
+	conn, status, respHeaders, err := s.getOpenAIWSPassthroughDialer().Dial(dialCtx, u.String(), headers, proxyURL)
 	if err != nil {
+		if qualityErr := accountRequestQualityError(accountCtx); qualityErr != nil {
+			return nil, qualityErr
+		}
 		body, handshakeHeaders := grokRealtimeHandshakeEvidence(err, respHeaders)
 		return nil, &GrokRealtimeDialError{StatusCode: status, ResponseBody: body, ResponseHeaders: handshakeHeaders, Err: err}
 	}
-	return &GrokRealtimeUpstream{conn: conn}, nil
+	stopInterrupt := context.AfterFunc(accountCtx, func() { _ = conn.Close() })
+	return &GrokRealtimeUpstream{conn: conn, accountCtx: accountCtx, releaseAccount: releaseAccount, stopInterrupt: stopInterrupt}, nil
 }
 
 // HandleGrokRealtimeUpstreamError applies the shared Grok account policy to a
@@ -255,6 +281,8 @@ func (s *OpenAIGatewayService) ProxyGrokRealtimeConn(ctx context.Context, c *gin
 	if s == nil || client == nil || upstream == nil || upstream.conn == nil {
 		return false, fmt.Errorf("realtime connection is required")
 	}
+	ctx, releaseQuality := accountrequest.PreserveCancellation(upstream.accountCtx, ctx)
+	defer releaseQuality()
 	conn := upstream.conn
 	frames, ok := conn.(openaiwsv2.FrameConn)
 	if !ok {
@@ -327,6 +355,9 @@ func (s *OpenAIGatewayService) ProxyGrokRealtimeConn(ctx context.Context, c *gin
 	_ = upstream.Close()
 	// Join both directions before the handler releases its API key reservation.
 	readers.Wait()
+	if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+		return observed, qualityErr
+	}
 	return observed, err
 }
 
@@ -337,6 +368,8 @@ func (s *OpenAIGatewayService) ProxyGrokTTSStreamConn(ctx context.Context, clien
 	if s == nil || client == nil || upstream == nil || upstream.conn == nil {
 		return 0, fmt.Errorf("tts stream connection is required")
 	}
+	ctx, releaseQuality := accountrequest.PreserveCancellation(upstream.accountCtx, ctx)
+	defer releaseQuality()
 	conn := upstream.conn
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -394,6 +427,9 @@ func (s *OpenAIGatewayService) ProxyGrokTTSStreamConn(ctx context.Context, clien
 	_ = upstream.Close()
 	// Join both directions before the handler bills and releases its slots.
 	readers.Wait()
+	if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+		return chars.Load(), qualityErr
+	}
 	return chars.Load(), err
 }
 

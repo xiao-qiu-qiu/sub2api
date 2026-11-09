@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	coderws "github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -126,7 +128,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 	request *LiveCallRequest,
 	identity LiveCallIdentity,
 	userMaxConcurrency int,
-) (*LiveCallCreated, error) {
+) (result *LiveCallCreated, returnErr error) {
 	if err := ValidateLiveCallRequest(request); err != nil {
 		return nil, err
 	}
@@ -218,9 +220,18 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		}
 
 		account := selection.Account
+		accountCtx, finishAccount := accountrequest.Default.Begin(ctx, account.ID)
+		defer func() {
+			if accountrequest.QualityDegraded(accountCtx) {
+				result, returnErr = nil, accountrequest.ErrQualityDegraded
+			}
+			if finishAccount != nil {
+				finishAccount()
+			}
+		}()
 		if joint.leaseID == "" {
 			leaseID := generateRequestID()
-			acquireCtx, cancelAcquire := context.WithTimeout(ctx, liveRedisOperationTimeout)
+			acquireCtx, cancelAcquire := context.WithTimeout(accountCtx, liveRedisOperationTimeout)
 			acquired, acquireErr := acquireLiveLeaseForIdentity(
 				acquireCtx,
 				liveCache,
@@ -256,7 +267,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			// Retried SDP: keep the joint Key/user members and migrate only the
 			// account member to the newly selected account. The new ordinary
 			// account reservation is consumed atomically, never double counted.
-			migrateCtx, cancelMigrate := context.WithTimeout(ctx, liveRedisOperationTimeout)
+			migrateCtx, cancelMigrate := context.WithTimeout(accountCtx, liveRedisOperationTimeout)
 			migrated, migrateErr := migrateLiveLeaseAccount(
 				migrateCtx,
 				liveCache,
@@ -287,7 +298,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 
 		// SDP establishment already owns the Live member. Renew it before the
 		// observer/sideband controller exists, and stop the POST on lease loss.
-		pendingCtx, cancelPending := context.WithCancelCause(ctx)
+		pendingCtx, cancelPending := context.WithCancelCause(accountCtx)
 		pendingDone := make(chan struct{})
 		go func() {
 			defer close(pendingDone)
@@ -309,6 +320,9 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		if errors.Is(context.Cause(pendingCtx), ErrAPIKeySlotLeaseLost) {
 			createErr = ErrAPIKeySlotLeaseLost
 		}
+		if accountrequest.QualityDegraded(accountCtx) && created == nil {
+			createErr = accountrequest.ErrQualityDegraded
+		}
 		cancelPending(context.Canceled)
 		<-pendingDone
 		selection.ReleaseFunc()
@@ -323,6 +337,8 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			}
 			excluded[account.ID] = struct{}{}
 			lastErr = createErr
+			finishAccount()
+			finishAccount = nil
 			continue
 		}
 
@@ -350,12 +366,21 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			AttestationCiphertext: attestationCiphertext,
 		}
 		mappingTTL := s.liveMaxSessionDuration() + 5*time.Minute
-		if saveErr := store.SaveLiveCall(ctx, record, mappingTTL); saveErr != nil {
+		if accountrequest.QualityDegraded(accountCtx) {
+			s.closeLiveSessionForQuality(record, nil)
+			releaseJoint()
+			return nil, accountrequest.ErrQualityDegraded
+		}
+		if saveErr := store.SaveLiveCall(accountCtx, record, mappingTTL); saveErr != nil {
+			if accountrequest.QualityDegraded(accountCtx) {
+				s.closeLiveSessionForQuality(record, nil)
+			}
 			releaseJoint()
 			return nil, fmt.Errorf("save live call mapping: %w", saveErr)
 		}
 		created.Account = account
-		go s.observeLiveCall(record)
+		s.startLiveObserver(accountCtx, record, finishAccount)
+		finishAccount = nil
 		return created, nil
 	}
 	// Retryable failures released only each attempt's account member; the joint
@@ -593,6 +618,9 @@ func (s *OpenAIGatewayService) releaseLiveLeaseAccount(accountID int64, leaseID 
 }
 
 func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, err error) bool {
+	if errors.Is(err, accountrequest.ErrQualityDegraded) {
+		return false
+	}
 	var upstreamErr *UpstreamFailoverError
 	if !errors.As(err, &upstreamErr) {
 		// 凭证读取和网络传输错误都可能只影响当前账号或代理。
@@ -786,12 +814,25 @@ func (s *OpenAIGatewayService) liveSidebandHeaders(
 }
 
 func (s *OpenAIGatewayService) dialLiveSideband(ctx context.Context, record *LiveCallRecord) (liveFrameConn, error) {
+	return s.dialLiveSidebandForControl(ctx, record, false)
+}
+
+func (s *OpenAIGatewayService) dialLiveSidebandForControl(ctx context.Context, record *LiveCallRecord, closeOnly bool) (liveFrameConn, error) {
+	if !closeOnly && accountrequest.QualityDegraded(ctx) {
+		return nil, accountrequest.ErrQualityDegraded
+	}
 	account, err := s.accountRepo.GetByID(ctx, record.AccountID)
 	if err != nil {
 		return nil, err
 	}
 	if account == nil || !account.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive) {
 		return nil, ErrLiveUnavailable
+	}
+	// A disconnected observer or a stale client must not rejoin a call after
+	// its account has left the call's group. Cleanup alone may reconnect to
+	// send session.close; it never forwards user frames.
+	if !closeOnly && record.GroupID > 0 && !slices.Contains(account.GroupIDs, record.GroupID) {
+		return nil, accountrequest.ErrQualityDegraded
 	}
 	headers, err := s.liveSidebandHeaders(ctx, account, record)
 	if err != nil {
@@ -840,10 +881,26 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 	ctx context.Context,
 	record *LiveCallRecord,
 	downstream *coderws.Conn,
-) error {
+) (returnErr error) {
 	if record == nil || downstream == nil {
 		return ErrLiveCallNotFound
 	}
+	ctx, finishAccount := accountrequest.Default.Begin(ctx, record.AccountID)
+	var upstream liveFrameConn
+	qualityClosed := false
+	defer func() {
+		if accountrequest.QualityDegraded(ctx) || errors.Is(returnErr, accountrequest.ErrQualityDegraded) {
+			if !qualityClosed {
+				s.closeLiveSessionForQuality(record, upstream)
+				s.finalizeLiveCall(record)
+			}
+			_ = downstream.CloseNow()
+			returnErr = accountrequest.ErrQualityDegraded
+		}
+		if finishAccount != nil {
+			finishAccount()
+		}
+	}()
 	store, err := s.liveStore()
 	if err != nil {
 		return err
@@ -858,17 +915,25 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 	}
 
 	// observer 轮询到接管状态后会关闭旧控制连接；同一个 call 可重新加入。
-	time.Sleep(liveObserverPollInterval)
-	upstream, err := s.dialLiveSideband(ctx, record)
+	if !waitLiveContext(ctx, liveObserverPollInterval) {
+		return context.Cause(ctx)
+	}
+	upstream, err = s.dialLiveSideband(ctx, record)
 	if err != nil {
+		if accountrequest.QualityDegraded(ctx) || errors.Is(err, accountrequest.ErrQualityDegraded) {
+			return accountrequest.ErrQualityDegraded
+		}
 		_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
-		go s.observeLiveCall(record)
+		s.startLiveObserver(ctx, record, finishAccount)
+		finishAccount = nil
 		return err
 	}
 	defer func() { _ = upstream.Close() }()
 	downstream.SetReadLimit(openAIWSMessageReadLimitBytes)
 
-	proxyCtx, cancel := context.WithCancel(ctx)
+	// Keep the sideband writable until the controller has sent session.close.
+	// Cancelling coder/websocket's active read first would close that socket.
+	proxyCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
 	errCh := make(chan error, 2)
 	go func() {
@@ -876,6 +941,10 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 			messageType, payload, readErr := downstream.Read(proxyCtx)
 			if readErr != nil {
 				errCh <- readErr
+				return
+			}
+			if accountrequest.QualityDegraded(ctx) {
+				errCh <- accountrequest.ErrQualityDegraded
 				return
 			}
 			if writeErr := upstream.WriteFrame(proxyCtx, messageType, payload); writeErr != nil {
@@ -905,14 +974,16 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 		}
 	}()
 
-	runErr := s.runLiveController(proxyCtx, record, upstream, errCh)
+	runErr := s.runLiveController(ctx, record, upstream, errCh)
 	cancel()
-	_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
 	if liveSessionEnded(runErr) || !time.Now().Before(record.ExpiresAt) {
+		qualityClosed = errors.Is(runErr, accountrequest.ErrQualityDegraded)
 		s.finalizeLiveCall(record)
 		return runErr
 	}
-	go s.observeLiveCall(record)
+	_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
+	s.startLiveObserver(ctx, record, finishAccount)
+	finishAccount = nil
 	return runErr
 }
 
@@ -923,7 +994,8 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 // leaseID 被 GC 后不会重新写入，重连也拿不回并发槽 —— 若按临时错误重试，会话会以
 // 约 1 秒一轮的节奏空转到 ExpiresAt，期间持着上游连接却不计入任何并发限制。
 func liveSessionEnded(err error) bool {
-	return errors.Is(err, ErrLiveCallNotFound) ||
+	return errors.Is(err, accountrequest.ErrQualityDegraded) ||
+		errors.Is(err, ErrLiveCallNotFound) ||
 		errors.Is(err, ErrLiveUnavailable) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
@@ -933,7 +1005,13 @@ func (s *OpenAIGatewayService) runLiveController(
 	record *LiveCallRecord,
 	upstream liveFrameConn,
 	errCh <-chan error,
-) error {
+) (returnErr error) {
+	defer func() {
+		if accountrequest.QualityDegraded(ctx) || errors.Is(returnErr, accountrequest.ErrQualityDegraded) {
+			s.closeLiveSessionForQuality(record, upstream)
+			returnErr = accountrequest.ErrQualityDegraded
+		}
+	}()
 	refreshTicker := time.NewTicker(liveLeaseRefreshInterval)
 	defer refreshTicker.Stop()
 	maxTimer := time.NewTimer(time.Until(record.ExpiresAt))
@@ -957,8 +1035,35 @@ func (s *OpenAIGatewayService) runLiveController(
 	}
 }
 
+// Transfer the existing registration, including its original cutoff, before
+// returning from creation or proxy control. No handoff can escape an interrupt.
+func (s *OpenAIGatewayService) startLiveObserver(parent context.Context, record *LiveCallRecord, release func()) {
+	ctx, finishDetached := accountrequest.PreserveCancellation(parent, context.WithoutCancel(parent))
+	go func() {
+		defer release()
+		defer finishDetached()
+		s.observeLiveCallContext(ctx, record)
+	}()
+}
+
 func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 	if record == nil {
+		return
+	}
+	ctx, release := accountrequest.Default.Begin(context.Background(), record.AccountID)
+	defer release()
+	s.observeLiveCallContext(ctx, record)
+}
+
+func (s *OpenAIGatewayService) observeLiveCallContext(ctx context.Context, record *LiveCallRecord) {
+	qualityClosed := false
+	defer func() {
+		if accountrequest.QualityDegraded(ctx) && !qualityClosed {
+			s.closeLiveSessionForQuality(record, nil)
+			s.finalizeLiveCall(record)
+		}
+	}()
+	if ctx.Err() != nil {
 		return
 	}
 	store, err := s.liveStore()
@@ -966,12 +1071,12 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 		return
 	}
 	owner := uuid.NewString()
-	claimed, claimErr := store.ClaimLiveController(context.Background(), record.CallHash, LiveControllerObserver, owner)
+	claimed, claimErr := store.ClaimLiveController(ctx, record.CallHash, LiveControllerObserver, owner)
 	if claimErr != nil {
 		// store 报错时无法确认控制权归属，不能静默退出：若 claim 实际已生效而
 		// observer 消失，租约与 usage log 都会丢。兜底 finalize 是幂等的，即使
 		// 控制权在他人手上也只会在到期后落一次库。
-		s.finalizeLiveCallAfterExpiry(record)
+		s.finalizeLiveCallAfterExpiryContext(ctx, record)
 		return
 	}
 	if !claimed {
@@ -979,7 +1084,10 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 	}
 	storeErrStreak := 0
 	for {
-		latest, getErr := store.GetLiveCall(context.Background(), record.CallHash)
+		if ctx.Err() != nil {
+			return
+		}
+		latest, getErr := store.GetLiveCall(ctx, record.CallHash)
 		if getErr != nil {
 			// 记录已被清理（closed TTL 到期）不是故障，直接退出。
 			if errors.Is(getErr, ErrLiveCallNotFound) {
@@ -989,10 +1097,12 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 			// record.ExpiresAt 兜底 finalize，保证 usage log 与租约释放不丢。
 			storeErrStreak++
 			if storeErrStreak >= liveObserverStoreRetryLimit {
-				s.finalizeLiveCallAfterExpiry(record)
+				s.finalizeLiveCallAfterExpiryContext(ctx, record)
 				return
 			}
-			time.Sleep(liveObserverStoreRetryInterval)
+			if !waitLiveContext(ctx, liveObserverStoreRetryInterval) {
+				return
+			}
 			continue
 		}
 		storeErrStreak = 0
@@ -1004,15 +1114,26 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 			s.finalizeLiveCall(record)
 			return
 		}
-		upstream, dialErr := s.dialLiveSideband(context.Background(), record)
+		upstream, dialErr := s.dialLiveSideband(ctx, record)
 		if dialErr != nil {
-			if !s.waitForLiveObserverRetry(record) {
+			if errors.Is(dialErr, accountrequest.ErrQualityDegraded) {
+				s.closeLiveSessionForQuality(record, nil)
+				s.finalizeLiveCall(record)
+				qualityClosed = true
+				return
+			}
+			if !s.waitForLiveObserverRetryContext(ctx, record) {
 				return
 			}
 			continue
 		}
-		runErr := s.runLiveObserverConnection(record, upstream)
+		runErr := s.runLiveObserverConnectionContext(ctx, record, upstream)
 		_ = upstream.Close()
+		if errors.Is(runErr, accountrequest.ErrQualityDegraded) {
+			qualityClosed = true
+			s.finalizeLiveCall(record)
+			return
+		}
 		if errors.Is(runErr, ErrLiveControllerChanged) {
 			return
 		}
@@ -1020,15 +1141,27 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 			s.finalizeLiveCall(record)
 			return
 		}
-		if !s.waitForLiveObserverRetry(record) {
+		if !s.waitForLiveObserverRetryContext(ctx, record) {
 			return
 		}
 	}
 }
 
 func (s *OpenAIGatewayService) runLiveObserverConnection(record *LiveCallRecord, upstream liveFrameConn) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, release := accountrequest.Default.Begin(context.Background(), record.AccountID)
+	defer release()
+	return s.runLiveObserverConnectionContext(ctx, record, upstream)
+}
+
+func (s *OpenAIGatewayService) runLiveObserverConnectionContext(controlCtx context.Context, record *LiveCallRecord, upstream liveFrameConn) (returnErr error) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(controlCtx))
+	defer func() {
+		if accountrequest.QualityDegraded(controlCtx) {
+			s.closeLiveSessionForQuality(record, upstream)
+			returnErr = accountrequest.ErrQualityDegraded
+		}
+		cancel()
+	}()
 	frameCh := make(chan []byte, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -1059,6 +1192,8 @@ func (s *OpenAIGatewayService) runLiveObserverConnection(record *LiveCallRecord,
 	store, _ := s.liveStore()
 	for {
 		select {
+		case <-controlCtx.Done():
+			return context.Cause(controlCtx)
 		case payload := <-frameCh:
 			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 			if eventType == "session.closed" || eventType == "session.ended" {
@@ -1067,7 +1202,7 @@ func (s *OpenAIGatewayService) runLiveObserverConnection(record *LiveCallRecord,
 		case err := <-errCh:
 			return err
 		case <-controllerTicker.C:
-			controller, err := store.GetLiveController(context.Background(), record.CallHash)
+			controller, err := store.GetLiveController(controlCtx, record.CallHash)
 			if err != nil {
 				return err
 			}
@@ -1088,14 +1223,18 @@ func (s *OpenAIGatewayService) runLiveObserverConnection(record *LiveCallRecord,
 }
 
 func (s *OpenAIGatewayService) waitForLiveObserverRetry(record *LiveCallRecord) bool {
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	<-timer.C
+	return s.waitForLiveObserverRetryContext(context.Background(), record)
+}
+
+func (s *OpenAIGatewayService) waitForLiveObserverRetryContext(ctx context.Context, record *LiveCallRecord) bool {
+	if !waitLiveContext(ctx, time.Second) {
+		return false
+	}
 	store, err := s.liveStore()
 	if err != nil {
 		return false
 	}
-	controller, getErr := store.GetLiveController(context.Background(), record.CallHash)
+	controller, getErr := store.GetLiveController(ctx, record.CallHash)
 	if getErr != nil && !errors.Is(getErr, ErrLiveCallNotFound) {
 		// store 报错不等于控制权被接管：返回 true 交回 observeLiveCall 循环顶部，
 		// 由它对 store 故障做有限次重试与 ExpiresAt 兜底 finalize。在这里返回
@@ -1111,13 +1250,57 @@ func (s *OpenAIGatewayService) waitForLiveObserverRetry(record *LiveCallRecord) 
 // 等到会话最长时限 ExpiresAt 再 finalize，保证 usage log 与租约释放最迟在会话到期
 // 时完成。MarkLiveCallClosed 的 first 语义保证与其他恢复路径不会重复落库。
 func (s *OpenAIGatewayService) finalizeLiveCallAfterExpiry(record *LiveCallRecord) {
+	s.finalizeLiveCallAfterExpiryContext(context.Background(), record)
+}
+
+func (s *OpenAIGatewayService) finalizeLiveCallAfterExpiryContext(ctx context.Context, record *LiveCallRecord) {
 	if record == nil {
 		return
 	}
 	if wait := time.Until(record.ExpiresAt); wait > 0 {
-		time.Sleep(wait)
+		if !waitLiveContext(ctx, wait) {
+			return
+		}
 	}
 	s.finalizeLiveCall(record)
+}
+
+func waitLiveContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
+}
+
+// Media bypasses this gateway. Closing only the sideband would leave WebRTC
+// running, so use the existing upstream session.close control message first.
+func (s *OpenAIGatewayService) closeLiveSessionForQuality(record *LiveCallRecord, upstream liveFrameConn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closeSession := func(conn liveFrameConn) error {
+		err := conn.WriteFrame(ctx, coderws.MessageText, []byte(`{"type":"session.close"}`))
+		_ = conn.Close()
+		return err
+	}
+	if upstream != nil && closeSession(upstream) == nil {
+		return
+	}
+	// Dial failure/retry gaps have no usable control socket. Reconnect solely
+	// to terminate the existing call, never to resume it on the moved account.
+	if s.accountRepo == nil || record == nil {
+		return
+	}
+	cleanup, err := s.dialLiveSidebandForControl(ctx, record, true)
+	if err == nil {
+		err = closeSession(cleanup)
+	}
+	if err != nil {
+		logger.L().Warn("openai_live_quality_close_failed", zap.Int64("account_id", record.AccountID), zap.String("error_type", fmt.Sprintf("%T", err)))
+	}
 }
 
 func (s *OpenAIGatewayService) refreshLiveLease(record *LiveCallRecord) bool {

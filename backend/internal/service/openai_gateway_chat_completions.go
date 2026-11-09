@@ -61,7 +61,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	body []byte,
 	promptCacheKey string,
 	defaultMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, resultErr error) {
+	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
+	defer finishAccountRequest()
+	defer func() { finishAccountOpenAIRequest(ctx, result, &resultErr) }()
 	admittedCtx, admissionErr := s.beginPriorityLatencyTurn(ctx, c, account, gjson.GetBytes(body, "model").String())
 	if admissionErr != nil {
 		return nil, admissionErr
@@ -76,7 +79,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	if regionalMeterAttemptFrom(meterCtx) != nil && c.Request != nil {
 		c.Request = c.Request.WithContext(meterCtx)
 	}
-	result, err := s.forwardAsChatCompletions(meterCtx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	result, err = s.forwardAsChatCompletions(meterCtx, c, account, body, promptCacheKey, defaultMappedModel, false)
 	if result != nil && c != nil {
 		result.AuthConnectionID = c.GetString("openai_auth_connection_id")
 	}

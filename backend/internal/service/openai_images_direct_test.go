@@ -23,7 +23,12 @@ func TestCodexDirectImagesRouting(t *testing.T) {
 			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"  原样保留 prompt  ","quality":"max","size":"auto","response_format":"url","extra":{"preserve":true}}`, model))
 			c, rec := newOpenAIImagesTestContext(t, body)
 			upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
-			svc := newOpenAIImagesTestService(upstream)
+			svc := newOpenAIImagesTestService(&accountRequestInspectingUpstream{
+				httpUpstreamRecorder: upstream,
+				beforeSend: func(req *http.Request) {
+					require.NoError(t, req.Context().Err(), "image forwarding must detach ordinary client cancellation")
+				},
+			})
 			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -35,7 +40,6 @@ func TestCodexDirectImagesRouting(t *testing.T) {
 			require.Equal(t, model, result.UpstreamModel)
 			require.Equal(t, "/backend-api/codex/images/generations", result.UpstreamEndpoint)
 			require.Equal(t, "https://chatgpt.com/backend-api/codex/images/generations", upstream.lastReq.URL.String())
-			require.NoError(t, upstream.lastReq.Context().Err())
 			require.Equal(t, "Bearer test-token", upstream.lastReq.Header.Get("Authorization"))
 			require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"))
 			require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))

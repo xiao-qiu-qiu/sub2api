@@ -256,6 +256,9 @@ func recordExcelBPSTransportFailure(ctx context.Context, c *gin.Context, account
 }
 
 func recordExcelBPSTransportFailureAt(ctx context.Context, c *gin.Context, account *Account, upstreamURL, scope, proxy string, err error, stage string, attempt int, retry bool, evidence ...*excelBPSWriteEvidence) {
+	if accountRequestQualityError(ctx) != nil {
+		return
+	}
 	if isExcelBPSClientCancellation(c, err) {
 		logger.FromContext(ctx).Info("excel_bps.client_canceled",
 			zap.Int64("account_id", account.ID), zap.String("stage", stage))

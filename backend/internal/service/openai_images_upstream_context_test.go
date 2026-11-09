@@ -72,7 +72,12 @@ func TestForwardOpenAIImagesAPIKey_NonStreamDetachesUpstreamContext(t *testing.T
 	c, _ := newOpenAIImagesTestContext(t, body)
 
 	recorder := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
-	svc := newOpenAIImagesTestService(recorder)
+	svc := newOpenAIImagesTestService(&accountRequestInspectingUpstream{
+		httpUpstreamRecorder: recorder,
+		beforeSend: func(req *http.Request) {
+			require.NoError(t, req.Context().Err(), "交给上游时必须已脱钩，不随客户端断开取消")
+		},
+	})
 
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
@@ -88,8 +93,6 @@ func TestForwardOpenAIImagesAPIKey_NonStreamDetachesUpstreamContext(t *testing.T
 	require.Equal(t, 1, result.ImageCount, "图片已产出，必须带回结果供计费")
 
 	require.NotNil(t, recorder.lastReq)
-	require.NoError(t, recorder.lastReq.Context().Err(),
-		"交给上游的请求 context 必须已脱钩，不随客户端断开取消")
 }
 
 // 流式路径本来就脱钩，这条守卫防止对齐时把它改坏。
@@ -109,7 +112,12 @@ func TestForwardOpenAIImagesAPIKey_StreamKeepsDetachedUpstreamContext(t *testing
 				"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}}\n\n",
 		)),
 	}}
-	svc := newOpenAIImagesTestService(recorder)
+	svc := newOpenAIImagesTestService(&accountRequestInspectingUpstream{
+		httpUpstreamRecorder: recorder,
+		beforeSend: func(req *http.Request) {
+			require.NoError(t, req.Context().Err(), "流式上游不能随客户端取消")
+		},
+	})
 
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
@@ -121,8 +129,6 @@ func TestForwardOpenAIImagesAPIKey_StreamKeepsDetachedUpstreamContext(t *testing
 	_, _ = svc.ForwardImages(ctx, c, newOpenAIImagesAPIKeyAccount(), body, parsed, "")
 
 	require.NotNil(t, recorder.lastReq)
-	require.NoError(t, recorder.lastReq.Context().Err(),
-		"流式路径原本就脱钩，不能被改回随客户端取消")
 }
 
 // 两个 detach 辅助函数的语义差异是本次修复的根据，锁死它们防止被悄悄改动。

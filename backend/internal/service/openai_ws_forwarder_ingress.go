@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	coderws "github.com/coder/websocket"
@@ -453,6 +454,9 @@ func (r *openAIWSIngressReader) closeAndJoin(status coderws.StatusCode, reason s
 }
 
 func (r *openAIWSIngressReader) closeForControl(ctx context.Context) error {
+	if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+		return r.closeAndJoin(coderws.StatusTryAgainLater, "account quality degraded; please reconnect", qualityErr)
+	}
 	cause := context.Cause(ctx)
 	if errors.Is(cause, ErrOpenAIWSIngressLeaseLost) || errors.Is(cause, ErrAPIKeySlotLeaseLost) {
 		return r.closeAndJoin(coderws.StatusTryAgainLater, "websocket ingress capacity lease lost; please reconnect", cause)
@@ -506,7 +510,8 @@ func (r *openAIWSIngressReader) read(ctx context.Context) (coderws.MessageType, 
 // Disconnect starts an absolute usage-drain window; activity cannot extend it.
 // Control-plane cancellation remains immediate. Cleanup joins the watchdog.
 func openAIWSDrainContext(ctx context.Context) (context.Context, func(), func()) {
-	turnCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	detached, releaseQuality := accountrequest.PreserveCancellation(ctx, context.WithoutCancel(ctx))
+	turnCtx, cancel := context.WithCancelCause(detached)
 	disconnected, _ := ctx.Value(openAIWSDisconnectKey{}).(<-chan struct{})
 	drain := make(chan struct{})
 	var once sync.Once
@@ -533,7 +538,7 @@ func openAIWSDrainContext(ctx context.Context) (context.Context, func(), func())
 		case <-turnCtx.Done():
 		}
 	}()
-	return turnCtx, startDrain, func() { cancel(context.Canceled); <-done }
+	return turnCtx, startDrain, func() { cancel(context.Canceled); <-done; releaseQuality() }
 }
 
 type openAIWSRejectedFieldRetryError struct {
@@ -589,6 +594,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	firstClientMessage []byte,
 	hooks *OpenAIWSIngressHooks,
 ) (returnErr error) {
+	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
+	defer finishAccountRequest()
+	defer func() {
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			returnErr = NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account quality degraded; please reconnect", qualityErr)
+		}
+	}()
 	ctx = s.withRequestTimezoneEgress(ctx, account)
 	if s == nil {
 		return errors.New("service is nil")
@@ -1878,6 +1890,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		turnCtx, startDrain, finishDrain := openAIWSDrainContext(ctx)
 		defer finishDrain()
 		ctx = turnCtx
+		defer func() { finishAccountOpenAIRequest(ctx, forwardResult, &forwardErr) }()
 		wroteDownstream := false
 		oauthStager := openAIWSOAuthStager{enabled: s.oauthRecovery != nil && oauth401CanRecover(account, nil)}
 		if err := s.acquireOpenAIRPMForSend(ctx, latest); err != nil {
@@ -1947,7 +1960,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		defer func() {
-			if smartStrict && forwardErr != nil && forwardResult == nil {
+			if (smartStrict || accountRequestQualityError(ctx) != nil) && forwardErr != nil && forwardResult == nil {
 				forwardResult = &OpenAIForwardResult{
 					RequestID: responseID, Usage: usage, UsageUnavailable: !usageObserved, ObservedUsageOnError: usageObserved,
 					Model: originalModel, UpstreamModel: mappedModel,
@@ -2886,6 +2899,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 
 		result, relayErr := sendAndRelay(turn, sessionLease, currentPayload, currentPayloadBytes, currentOriginalModel, currentImageBillingModel, currentImageSizeTier, currentImageInputSize, currentRequestedReasoningEffort)
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			resetSessionLease(true)
+			controlErr := clientReader.closeForControl(ctx)
+			if hooks != nil && hooks.AfterTurn != nil {
+				hooks.AfterTurn(turn, result, controlErr)
+			}
+			return controlErr
+		}
 		if relayErr != nil && smartStrict {
 			sessionLease.MarkBroken()
 			if hooks != nil && hooks.AfterTurn != nil {

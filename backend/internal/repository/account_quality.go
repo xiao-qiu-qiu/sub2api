@@ -97,6 +97,7 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
+	interruptQualityRequests(ctx, plan, outcome, action, time.Now())
 	syncQualityMembershipAfterAction(ctx, r.db, plan, action)
 	return action, nil
 }
@@ -132,11 +133,11 @@ func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.Schedu
 
 func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, until time.Time, outcome string, commit *bool) (string, error) {
 	plan.QualityRestoreDiagnostic = nil
-	var valid bool
+	var valid sql.NullBool
 	var err error
 	err = tx.QueryRowContext(ctx, `SELECT enabled AND updated_at=$2 AND running_until=$3 AND running_until>NOW() AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`)
  FROM scheduled_test_plans WHERE id=$1 FOR UPDATE`, plan.ID, plan.UpdatedAt, until).Scan(&valid)
-	if err == sql.ErrNoRows || (err == nil && !valid) {
+	if err == sql.ErrNoRows || (err == nil && (!valid.Valid || !valid.Bool)) {
 		return "stale_run", nil
 	}
 	if err != nil {

@@ -1665,7 +1665,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	// here: completed terminal callbacks already consumed activeTurn. Never use
 	// relayResult.Usage, which aggregates earlier completed turns.
 	var unfinishedResult *OpenAIForwardResult
-	if smartProtocolStrict(ctx) && !pendingUpstreamTurn.Load() && relayResult.UnfinishedTurn != nil {
+	if (smartProtocolStrict(ctx) || accountRequestQualityError(ctx) != nil) && !pendingUpstreamTurn.Load() && relayResult.UnfinishedTurn != nil {
 		turn := relayResult.UnfinishedTurn
 		requestModel, upstreamModel := usageMeta.turnModels(turn.RequestModel)
 		unfinishedResult = &OpenAIForwardResult{

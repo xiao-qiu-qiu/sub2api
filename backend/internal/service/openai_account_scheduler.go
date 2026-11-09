@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -3111,6 +3112,11 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	if account == nil {
 		return false
 	}
+	// A quality rule deliberately stopped this request. Do not turn each
+	// interrupted request into an additional upstream-health failure.
+	if !success && len(observedErr) > 0 && errors.Is(observedErr[0], accountrequest.ErrQualityDegraded) {
+		return false
+	}
 	if !success && len(observedErr) > 0 && isGrokRequestScopedFailure(observedErr[0]) {
 		return false
 	}
@@ -3147,7 +3153,7 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) {
+	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) || errors.Is(observedErr, accountrequest.ErrQualityDegraded) {
 		return false
 	}
 	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)

@@ -2280,7 +2280,15 @@ func TestForwardAsAnthropic_UpstreamRequestIgnoresClientCancel(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
 	}}
 
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	inspected := false
+	svc := &OpenAIGatewayService{httpUpstream: &accountRequestInspectingUpstream{
+		httpUpstreamRecorder: upstream,
+		beforeSend: func(req *http.Request) {
+			inspected = true
+			require.ErrorIs(t, reqCtx.Err(), context.Canceled)
+			require.NoError(t, req.Context().Err(), "client cancellation must be detached while forwarding")
+		},
+	}}
 	account := &Account{
 		ID:          1,
 		Name:        "openai-oauth",
@@ -2297,7 +2305,7 @@ func TestForwardAsAnthropic_UpstreamRequestIgnoresClientCancel(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.True(t, inspected, "must inspect context at the physical send boundary")
 }
 
 func TestForwardAsAnthropic_AstraContinuationRestoresHistoryAndDisablesUnsupportedSession(t *testing.T) {

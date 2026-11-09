@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 )
 
 var ErrAPIKeySlotLeaseLost = errors.New("API key concurrency lease lost")
@@ -61,11 +63,13 @@ func detachAPIKeyUpstreamContext(ctx context.Context) (context.Context, context.
 	base := context.WithoutCancel(ctx)
 	owner, ok := apiKeyAdmissionOwnerFromContext(ctx)
 	if !ok {
-		return base, func() {}
+		detached, _ := accountrequest.PreserveCancellation(ctx, base)
+		return detached, func() {}
 	}
 	// Existing builders release immediately after constructing a request. Keep
 	// that no-op release contract: the auth owner, not the builder, owns lifetime.
-	return apiKeyUpstreamContext{Context: owner.ctx, values: base}, func() {}
+	detached, _ := accountrequest.PreserveCancellation(ctx, apiKeyUpstreamContext{Context: owner.ctx, values: base})
+	return detached, func() {}
 }
 
 type apiKeyUpstreamContext struct {

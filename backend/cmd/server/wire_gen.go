@@ -555,6 +555,7 @@ func provideCleanup(
 	pluginManager *service.PluginManager,
 	cyberModeration *service.ContentModerationService,
 ) func() {
+	stopAccountRequests := startAccountRequestInterrupts(rdb)
 	if openAIGateway != nil {
 		openAIGateway.StartBPSWarmPool()
 		if cfg.RunsBackgroundJobs() {
@@ -562,6 +563,7 @@ func provideCleanup(
 		}
 	}
 	return func() {
+		stopAccountRequests()
 		if balanceNotify != nil {
 			balanceNotify.Stop()
 		}

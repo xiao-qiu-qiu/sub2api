@@ -220,6 +220,9 @@ func newExcelBPSRequestTo(ctx context.Context, targetURL, accept string, body []
 // BPS deliberately bypasses Codex ticket/cookie injection and OAuth plugins:
 // only the selected account's bearer and ChatGPT account ID belong on this host.
 func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time) (forwardResult *OpenAIForwardResult, forwardErr error) {
+	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
+	defer finishAccountRequest()
+	defer func() { finishAccountOpenAIRequest(ctx, forwardResult, &forwardErr) }()
 	var compactUsage OpenAIUsage
 	var compactID string
 	originalImagePolicyModel := gjson.GetBytes(body, "model").String()
@@ -234,6 +237,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		addImagePolicyUsage(&forwardResult.Usage, compactUsage)
 	}()
 	fail := func(status int, code, message string, param ...string) (*OpenAIForwardResult, error) {
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			return nil, qualityErr
+		}
 		// A compact keepalive may already have committed SSE headers. Otherwise
 		// finish a single JSON response so the handler cannot append another error.
 		committed := StopOpenAICompactSSEKeepaliveCommitted(c)
@@ -918,6 +924,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	result.Duration = time.Since(start)
 	result.UpstreamTerminalEvent = terminal
 	if err = scanner.Err(); err != nil || terminal == "" {
+		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+			return result, qualityErr
+		}
 		if ctx.Err() != nil {
 			if isExcelBPSClientCancellation(c, ctx.Err()) {
 				MarkOpsClientCancellation(c, stream)
