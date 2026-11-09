@@ -149,7 +149,8 @@ type NormalizedCodexLimits struct {
 }
 
 // Normalize converts primary/secondary fields to canonical 5h/7d fields.
-// Strategy: Compare window_minutes to determine which is 5h vs 7d.
+// Explicit durations must match a known window. Image quotas also use these
+// headers, but their 24h window must never replace the account's weekly quota.
 // Returns nil if snapshot is nil or has no useful data.
 func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 	if s == nil {
@@ -158,69 +159,32 @@ func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 
 	result := &NormalizedCodexLimits{}
 
-	primaryMins := 0
-	secondaryMins := 0
-	hasPrimaryWindow := false
-	hasSecondaryWindow := false
-
-	if s.PrimaryWindowMinutes != nil {
-		primaryMins = *s.PrimaryWindowMinutes
-		hasPrimaryWindow = true
-	}
-	if s.SecondaryWindowMinutes != nil {
-		secondaryMins = *s.SecondaryWindowMinutes
-		hasSecondaryWindow = true
-	}
-
-	// Determine mapping based on window_minutes
-	use5hFromPrimary := false
-	use7dFromPrimary := false
-
-	if hasPrimaryWindow && hasSecondaryWindow {
-		// Both known: smaller window is 5h, larger is 7d
-		if primaryMins < secondaryMins {
-			use5hFromPrimary = true
-		} else {
-			use7dFromPrimary = true
-		}
-	} else if hasPrimaryWindow {
-		// Only primary known: classify by threshold (<=360 min = 6h -> 5h window)
-		if primaryMins <= 360 {
-			use5hFromPrimary = true
-		} else {
-			use7dFromPrimary = true
-		}
-	} else if hasSecondaryWindow {
-		// Only secondary known: classify by threshold
-		if secondaryMins <= 360 {
-			// 5h from secondary, so primary (if any data) is 7d
-			use7dFromPrimary = true
-		} else {
-			// 7d from secondary, so primary (if any data) is 5h
-			use5hFromPrimary = true
-		}
-	} else {
-		// No window_minutes: fall back to legacy assumption (primary=7d, secondary=5h)
-		use7dFromPrimary = true
-	}
-
-	// Assign values
-	if use5hFromPrimary {
-		result.Used5hPercent = s.PrimaryUsedPercent
-		result.Reset5hSeconds = s.PrimaryResetAfterSeconds
-		result.Window5hMinutes = s.PrimaryWindowMinutes
-		result.Used7dPercent = s.SecondaryUsedPercent
-		result.Reset7dSeconds = s.SecondaryResetAfterSeconds
-		result.Window7dMinutes = s.SecondaryWindowMinutes
-	} else if use7dFromPrimary {
+	if s.PrimaryWindowMinutes == nil && s.SecondaryWindowMinutes == nil {
+		// Preserve old snapshots which predate explicit window durations.
 		result.Used7dPercent = s.PrimaryUsedPercent
 		result.Reset7dSeconds = s.PrimaryResetAfterSeconds
-		result.Window7dMinutes = s.PrimaryWindowMinutes
 		result.Used5hPercent = s.SecondaryUsedPercent
 		result.Reset5hSeconds = s.SecondaryResetAfterSeconds
-		result.Window5hMinutes = s.SecondaryWindowMinutes
+		return result
 	}
 
+	for _, minutes := range []int{300, 10080} {
+		primary := s.PrimaryWindowMinutes != nil && *s.PrimaryWindowMinutes == minutes
+		secondary := s.SecondaryWindowMinutes != nil && *s.SecondaryWindowMinutes == minutes
+		if primary == secondary {
+			// Missing/unknown windows and duplicate slots cannot identify this quota.
+			continue
+		}
+		used, reset, window := s.PrimaryUsedPercent, s.PrimaryResetAfterSeconds, s.PrimaryWindowMinutes
+		if secondary {
+			used, reset, window = s.SecondaryUsedPercent, s.SecondaryResetAfterSeconds, s.SecondaryWindowMinutes
+		}
+		if minutes == 300 {
+			result.Used5hPercent, result.Reset5hSeconds, result.Window5hMinutes = used, reset, window
+		} else {
+			result.Used7dPercent, result.Reset7dSeconds, result.Window7dMinutes = used, reset, window
+		}
+	}
 	return result
 }
 

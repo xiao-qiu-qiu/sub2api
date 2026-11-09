@@ -703,16 +703,16 @@ func resolveAccountExtraNumber(extra map[string]any, keys ...string) (float64, b
 // without this check an old used_percent would keep the account paused forever even
 // after the real window reset.
 func resolveOpenAIQuotaUtilization(extra map[string]any, window string, now time.Time) (float64, bool) {
-	usedPercent := readOpenAIQuotaUsedPercent(extra, window)
-	if usedPercent <= 0 {
+	usedPercent, source, ok := extractOpenAICodexUsageWindow(extra, window)
+	if !ok || usedPercent <= 0 {
 		return 0, false
 	}
-	if openAIQuotaWindowReset(extra, window, now) {
+	if openAIQuotaWindowReset(extra, source, now) {
 		return 0, false
 	}
 	// 快照过于陈旧且没有明确的未来重置时间时，不再据此暂停。放行后下一次响应头
 	// 会刷新快照实现自愈，避免账号在错误/过期的 used% 上被永久跳过（issue #2994）。
-	if openAICodexSnapshotStaleForPause(extra, now) && !openAIQuotaWindowResetPending(extra, window, now) {
+	if openAICodexSnapshotStaleForPause(extra, now) && !openAIQuotaWindowResetPending(extra, source, now) {
 		return 0, false
 	}
 	return usedPercent / 100, true
@@ -759,6 +759,9 @@ func openAICodexWindowResetAt(extra map[string]any, window string) (time.Time, b
 	if len(extra) == 0 {
 		return time.Time{}, false
 	}
+	if (window == "5h" || window == "7d") && !openAICodexCanonicalWindowValid(extra, window) {
+		return time.Time{}, false
+	}
 	if resetAtRaw, ok := extra["codex_"+window+"_reset_at"]; ok {
 		if resetAt, err := parseTime(fmt.Sprint(resetAtRaw)); err == nil {
 			return resetAt, true
@@ -776,10 +779,7 @@ func openAICodexWindowResetAt(extra map[string]any, window string) (time.Time, b
 }
 
 func readOpenAIQuotaUsedPercent(extra map[string]any, window string) float64 {
-	if len(extra) == 0 {
-		return 0
-	}
-	if value, ok := resolveAccountExtraNumber(extra, "codex_"+window+"_used_percent"); ok {
+	if value, _, ok := extractOpenAICodexUsageWindow(extra, window); ok {
 		return value
 	}
 	return 0

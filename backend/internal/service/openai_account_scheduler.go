@@ -3679,53 +3679,17 @@ type openAICanonicalQuotaWindow struct {
 	reset       bool
 }
 
-// 规范字段优先；历史原始字段复用写入端 Normalize 的窗口分类，不能固定把 primary 当作 7d。
+// Canonical and historical raw windows share the duration validation used by
+// display, threshold and quality readers.
 func openAICanonicalQuotaWindows(extra map[string]any, now time.Time) (window5h, window7d openAICanonicalQuotaWindow) {
-	if used, ok := resolveAccountExtraNumber(extra, "codex_5h_used_percent"); ok {
-		window5h = openAICanonicalQuotaWindow{usedPercent: used, hasUsed: true, reset: openAIQuotaWindowReset(extra, "5h", now)}
-	}
-	if used, ok := resolveAccountExtraNumber(extra, "codex_7d_used_percent"); ok {
-		window7d = openAICanonicalQuotaWindow{usedPercent: used, hasUsed: true, reset: openAIQuotaWindowReset(extra, "7d", now)}
-	}
-	if window5h.hasUsed && window7d.hasUsed {
-		return window5h, window7d
-	}
-
-	snapshot := &OpenAICodexUsageSnapshot{}
-	if used, ok := resolveAccountExtraNumber(extra, "codex_primary_used_percent"); ok {
-		snapshot.PrimaryUsedPercent = &used
-	}
-	if used, ok := resolveAccountExtraNumber(extra, "codex_secondary_used_percent"); ok {
-		snapshot.SecondaryUsedPercent = &used
-	}
-	if minutes := parseExtraInt(extra["codex_primary_window_minutes"]); minutes > 0 {
-		snapshot.PrimaryWindowMinutes = &minutes
-	}
-	if minutes := parseExtraInt(extra["codex_secondary_window_minutes"]); minutes > 0 {
-		snapshot.SecondaryWindowMinutes = &minutes
-	}
-	normalized := snapshot.Normalize()
-	if normalized == nil {
-		return window5h, window7d
-	}
-	fromRaw := func(used *float64) openAICanonicalQuotaWindow {
-		if used == nil {
+	readWindow := func(window string) openAICanonicalQuotaWindow {
+		used, source, ok := extractOpenAICodexUsageWindow(extra, window)
+		if !ok {
 			return openAICanonicalQuotaWindow{}
 		}
-		// Normalize 保留原始字段指针，据此配对同一个窗口的用量和重置时间。
-		window := "secondary"
-		if used == snapshot.PrimaryUsedPercent {
-			window = "primary"
-		}
-		return openAICanonicalQuotaWindow{usedPercent: *used, hasUsed: true, reset: openAIQuotaWindowReset(extra, window, now)}
+		return openAICanonicalQuotaWindow{usedPercent: used, hasUsed: true, reset: openAIQuotaWindowReset(extra, source, now)}
 	}
-	if !window5h.hasUsed {
-		window5h = fromRaw(normalized.Used5hPercent)
-	}
-	if !window7d.hasUsed {
-		window7d = fromRaw(normalized.Used7dPercent)
-	}
-	return window5h, window7d
+	return readWindow("5h"), readWindow("7d")
 }
 
 func openAISchedulingResetWindowEnd(account *Account, now time.Time) (time.Time, bool) {

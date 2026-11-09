@@ -1175,6 +1175,13 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	if snapshot == nil {
 		return nil
 	}
+	normalized := snapshot.Normalize()
+	if normalized == nil || (normalized.Used5hPercent == nil && normalized.Reset5hSeconds == nil && normalized.Window5hMinutes == nil &&
+		normalized.Used7dPercent == nil && normalized.Reset7dSeconds == nil && normalized.Window7dMinutes == nil) {
+		// An unrelated quota must not overwrite raw fallback fields or make an
+		// old account quota look freshly observed.
+		return nil
+	}
 
 	baseTime := codexSnapshotBaseTime(snapshot, fallbackNow)
 	updates := make(map[string]any)
@@ -1204,7 +1211,7 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	updates["codex_usage_updated_at"] = baseTime.Format(time.RFC3339Nano)
 
 	// 归一化到 5h/7d 规范字段
-	if normalized := snapshot.Normalize(); normalized != nil {
+	if normalized != nil {
 		if normalized.Used5hPercent != nil {
 			updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 		}

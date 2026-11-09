@@ -74,12 +74,13 @@ func TestOpenAIQuotaHeadroomFactorCanonicalPrecedence(t *testing.T) {
 func TestOpenAIQuotaHeadroomFactorRawWindowReset(t *testing.T) {
 	now := time.Now()
 	extra := map[string]any{
-		"codex_primary_used_percent":   96.0,
-		"codex_primary_window_minutes": 300,
-		"codex_primary_reset_at":       now.Add(-time.Minute).Format(time.RFC3339),
-		"codex_secondary_used_percent": 25.0,
-		"codex_secondary_reset_at":     now.Add(time.Hour).Format(time.RFC3339),
-		"codex_usage_updated_at":       now.Add(-time.Hour).Format(time.RFC3339),
+		"codex_primary_used_percent":     96.0,
+		"codex_primary_window_minutes":   300,
+		"codex_primary_reset_at":         now.Add(-time.Minute).Format(time.RFC3339),
+		"codex_secondary_used_percent":   25.0,
+		"codex_secondary_window_minutes": 10080,
+		"codex_secondary_reset_at":       now.Add(time.Hour).Format(time.RFC3339),
+		"codex_usage_updated_at":         now.Add(-time.Hour).Format(time.RFC3339),
 	}
 	require.InDelta(t, 0.75, openAIQuotaHeadroomFactor(&Account{Extra: extra}, now), 1e-9)
 	extra["codex_secondary_reset_at"] = now.Add(-time.Minute).Format(time.RFC3339)

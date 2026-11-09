@@ -248,35 +248,16 @@ func firstStringValue(values map[string]any, keys ...string) string {
 }
 
 func openAIThresholdCandidate(extra map[string]any, window string, now time.Time) *accountSchedulingThresholdCandidate {
-	if len(extra) == 0 {
-		return nil
-	}
-
-	var (
-		usedPercentKey string
-		resetAtKey     string
-	)
-	switch window {
-	case "5h":
-		usedPercentKey = "codex_5h_used_percent"
-		resetAtKey = "codex_5h_reset_at"
-	case "7d":
-		usedPercentKey = "codex_7d_used_percent"
-		resetAtKey = "codex_7d_reset_at"
-	default:
-		return nil
-	}
-
-	usedPercent, ok := extra[usedPercentKey]
+	usedPercent, source, ok := extractOpenAICodexUsageWindow(extra, window)
 	if !ok {
 		return nil
 	}
-	if openAIQuotaWindowReset(extra, window, now) || (openAICodexSnapshotStaleForPause(extra, now) && !openAIQuotaWindowResetPending(extra, window, now)) {
+	if openAIQuotaWindowReset(extra, source, now) || (openAICodexSnapshotStaleForPause(extra, now) && !openAIQuotaWindowResetPending(extra, source, now)) {
 		return nil
 	}
-	until := parseSchedulingResetAt(extra[resetAtKey])
+	until := parseSchedulingResetAt(extra["codex_"+source+"_reset_at"])
 	if until == nil {
-		if resetAt, ok := openAICodexWindowResetAt(extra, window); ok {
+		if resetAt, ok := openAICodexWindowResetAt(extra, source); ok {
 			until = &resetAt
 		}
 	}
