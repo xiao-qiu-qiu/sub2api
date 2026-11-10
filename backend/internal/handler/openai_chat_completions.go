@@ -203,9 +203,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
-			if isOpenAIOAuthRecoveryError(err) {
-				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, false)
-				return
+			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, false); handled {
+				if !retry {
+					return
+				}
+				continue
 			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
@@ -287,6 +289,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 		forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
 		writerSizeBeforeForward := c.Writer.Size()
+		clearOpenAIOAuthRecoveryFallback(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {

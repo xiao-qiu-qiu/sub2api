@@ -29,16 +29,24 @@ type oauthRecoveryHandlerRepo struct {
 	service.AccountRepository
 	mu               sync.Mutex
 	account          service.Account
+	alternatives     []service.Account
 	denyAdmission    atomic.Bool
 	admissionDenials atomic.Int32
 }
 
-func (r *oauthRecoveryHandlerRepo) GetByID(context.Context, int64) (*service.Account, error) {
+func (r *oauthRecoveryHandlerRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	a := r.account
-	a.Credentials = make(map[string]any, len(r.account.Credentials))
-	for k, v := range r.account.Credentials {
+	for _, alternative := range r.alternatives {
+		if alternative.ID == id {
+			a = alternative
+			break
+		}
+	}
+	credentials := a.Credentials
+	a.Credentials = make(map[string]any, len(credentials))
+	for k, v := range credentials {
 		a.Credentials[k] = v
 	}
 	return &a, nil
@@ -54,11 +62,14 @@ func (r *oauthRecoveryHandlerRepo) GetOpenAITurnAdmission(ctx context.Context, i
 }
 
 func (r *oauthRecoveryHandlerRepo) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
-	a, err := r.GetByID(ctx, 0)
-	if err != nil || a.Platform != platform || !a.IsSchedulable() {
-		return nil, err
+	accounts, err := r.ListAllWithFilters(ctx, "", "", "", "", 0, "")
+	var result []service.Account
+	for _, account := range accounts {
+		if account.Platform == platform && account.IsSchedulable() {
+			result = append(result, account)
+		}
 	}
-	return []service.Account{*a}, nil
+	return result, err
 }
 
 func (r *oauthRecoveryHandlerRepo) ListSchedulableByGroupIDAndPlatform(ctx context.Context, _ int64, platform string) ([]service.Account, error) {
@@ -74,12 +85,17 @@ func (r *oauthRecoveryHandlerRepo) ListAllWithFilters(ctx context.Context, _, _,
 	if err != nil {
 		return nil, err
 	}
-	return []service.Account{*a}, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]service.Account{*a}, r.alternatives...), nil
 }
 
-func (r *oauthRecoveryHandlerRepo) SetError(_ context.Context, _ int64, _ string) error {
+func (r *oauthRecoveryHandlerRepo) SetError(_ context.Context, id int64, message string) error {
 	r.mu.Lock()
-	r.account.Status = service.StatusError
+	if id == r.account.ID {
+		r.account.Status = service.StatusError
+		r.account.ErrorMessage = message
+	}
 	r.mu.Unlock()
 	return nil
 }
@@ -104,7 +120,10 @@ type oauthRecoveryHandlerGuard struct {
 
 func (g *oauthRecoveryHandlerGuard) RequestImmediateReauth(context.Context, *service.Account) (*service.OpenAIOAuthReauthTask, error) {
 	g.requests.Add(1)
-	g.repo.mutate(func(a *service.Account) { a.Status = service.StatusError })
+	g.repo.mutate(func(a *service.Account) {
+		a.Status = service.StatusError
+		a.ErrorMessage = service.ImmediateOAuthRecoveryErrorMessage
+	})
 	if g.onRequest != nil {
 		g.onRequest()
 	}
@@ -136,6 +155,7 @@ func (g *oauthRecoveryHandlerGuard) VerifyImmediateReauth(context.Context, int64
 	g.verified.Add(1)
 	g.repo.mutate(func(a *service.Account) {
 		a.Status = service.StatusActive
+		a.ErrorMessage = ""
 		a.Credentials["access_token"] = "recovered-token"
 		if count := g.requests.Load(); count > 1 {
 			a.Credentials["access_token"] = fmt.Sprintf("recovered-token-%d", count)
@@ -149,14 +169,15 @@ func (g *oauthRecoveryHandlerGuard) VerifyImmediateReauth(context.Context, int64
 
 type oauthRecoveryHandlerUpstream struct {
 	service.HTTPUpstream
-	mu            sync.Mutex
-	ids           []int64
-	tokens        []string
-	bodies        [][]byte
-	always401     bool
-	failCalls     map[int]bool
-	onFirst       func()
-	firstResponse func() *http.Response
+	mu              sync.Mutex
+	ids             []int64
+	tokens          []string
+	bodies          [][]byte
+	always401       bool
+	failCalls       map[int]bool
+	onFirst         func()
+	firstResponse   func() *http.Response
+	responseForCall func(int, int64) *http.Response
 }
 
 func (u *oauthRecoveryHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -170,6 +191,11 @@ func (u *oauthRecoveryHandlerUpstream) Do(req *http.Request, _ string, accountID
 	u.mu.Unlock()
 	if first && u.onFirst != nil {
 		u.onFirst()
+	}
+	if u.responseForCall != nil {
+		if response := u.responseForCall(call, accountID); response != nil {
+			return response, nil
+		}
 	}
 	if first && u.firstResponse != nil {
 		return u.firstResponse(), nil
@@ -206,6 +232,10 @@ func (r *oauthRecoveryUsageRepo) Create(context.Context, *service.UsageLog) (boo
 }
 
 func newOAuthRecoveryHandler(t *testing.T, upstream service.HTTPUpstream, ready <-chan struct{}) (*OpenAIGatewayHandler, *oauthRecoveryHandlerGuard, *concurrencyCacheMock, *oauthRecoveryUsageRepo) {
+	return newOAuthRecoveryHandlerWithBindings(t, upstream, ready, nil)
+}
+
+func newOAuthRecoveryHandlerWithBindings(t *testing.T, upstream service.HTTPUpstream, ready <-chan struct{}, bindings service.GatewayCache) (*OpenAIGatewayHandler, *oauthRecoveryHandlerGuard, *concurrencyCacheMock, *oauthRecoveryUsageRepo) {
 	t.Helper()
 	repo := &oauthRecoveryHandlerRepo{account: service.Account{
 		ID: 1, Name: "oauth-recovery", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
@@ -224,7 +254,7 @@ func newOAuthRecoveryHandler(t *testing.T, upstream service.HTTPUpstream, ready 
 		acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
 	}
 	concurrency := service.NewConcurrencyService(cache)
-	gateway := service.NewOpenAIGatewayService(repo, nil, usage, nil, nil, nil, nil, nil, cfg, nil, concurrency, service.NewBillingService(cfg, nil), rateLimit, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+	gateway := service.NewOpenAIGatewayService(repo, nil, usage, nil, nil, nil, nil, bindings, cfg, nil, concurrency, service.NewBillingService(cfg, nil), rateLimit, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
 	gateway.SetOpenAIOAuthRecovery(guard)
 	t.Cleanup(gateway.CloseOpenAIWSPool)
 	h := NewOpenAIGatewayHandler(gateway, concurrency, billing, service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
@@ -624,7 +654,7 @@ func TestOpenAIOAuthRecovery_DoesNotReplaySemanticOrUnrelatedFailures(t *testing
 func TestOpenAIOAuthRecovery_HTTPErrorFormatsAndTimeout(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, anthropic := range []bool{false, true} {
-		for _, err := range []error{service.ErrOAuthRecoveryTimeout, fmt.Errorf("wrapped: %w", service.ErrOAuthRecoveryFailed)} {
+		for _, err := range []error{service.ErrOAuthRecoveryTimeout, service.ErrOAuthRecoveryQueueFull, fmt.Errorf("wrapped: %w", service.ErrOAuthRecoveryFailed)} {
 			c, rec := oauthRecoveryHandlerRequest(t, context.Background(), "responses")
 			h := &OpenAIGatewayHandler{}
 			h.handleOpenAIOAuthRecoveryError(c, err, false, anthropic)
@@ -644,7 +674,7 @@ func TestOpenAIOAuthRecovery_HTTPErrorFormatsAndTimeout(t *testing.T) {
 
 func TestOpenAIOAuthRecovery_WSStable503Frame(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, recoveryErr := range []error{service.ErrOAuthRecoveryFailed, service.ErrOAuthRecoveryTimeout} {
+	for _, recoveryErr := range []error{service.ErrOAuthRecoveryFailed, service.ErrOAuthRecoveryTimeout, service.ErrOAuthRecoveryQueueFull} {
 		t.Run(recoveryErr.Error(), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := coderws.Accept(w, r, nil)

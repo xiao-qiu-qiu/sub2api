@@ -1010,9 +1010,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
-			if isOpenAIOAuthRecoveryError(err) {
-				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, false)
-				return
+			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, false); handled {
+				if !retry {
+					return
+				}
+				continue
 			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
@@ -1153,6 +1155,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 用扣除非语义心跳字节的口径快照：心跳注释不构成语义响应，
 		// 不能因心跳字节变化而放弃 failover 换号（#3887）。
 		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+		clearOpenAIOAuthRecoveryFallback(c)
 		// 跨 passthrough 边界的 failover：从 Kiro 等透传账号切到 Bedrock 等非透传账号前，
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
@@ -1740,9 +1743,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
-			if isOpenAIOAuthRecoveryError(err) {
-				h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, true)
-				return
+			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, true); handled {
+				if !retry {
+					return
+				}
+				continue
 			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
@@ -1826,6 +1831,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
 		writerSizeBeforeForward := c.Writer.Size()
+		clearOpenAIOAuthRecoveryFallback(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -2564,7 +2570,7 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 		if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) {
 			// The interrupted admission has released its key/user queue state;
 			// wait on the original request and then run ordinary admission again.
-			if !h.waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c, *streamStarted) {
+			if !h.waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c, *streamStarted, false) {
 				return nil, false
 			}
 			continue
@@ -3361,6 +3367,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var rpmAdmission openAIRPMAdmission
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
+	var oauthRecoveryFallbackErr error
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
 		if !service.OpenAIWSIngressCanFailover(ctx, c) {
@@ -3466,8 +3473,25 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
-			if isOpenAIOAuthRecoveryError(err) {
-				closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, err)
+			if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) || isOpenAIOAuthRecoveryError(err) {
+				releaseTurnSlots()
+				recoveryErr := err
+				if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) {
+					recoveryErr = waitForOpenAIOAuthWSRecovery(ctx, c, h.gatewayService, apiKey.GroupID, wsForwardModel)
+				}
+				if recoveryErr != nil && !prepareOpenAIOAuthRecoveryFallback(ctx, recoveryErr, true) {
+					closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, recoveryErr)
+					return
+				}
+				oauthRecoveryFallbackErr = recoveryErr
+				if !service.OpenAIWSIngressCanFailover(ctx, c) || !ensureUserSlotHeld() {
+					return
+				}
+				continue
+			}
+			if oauthRecoveryFallbackErr != nil && (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) {
+				releaseTurnSlots()
+				closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, oauthRecoveryFallbackErr)
 				return
 			}
 			if errors.Is(err, service.ErrPriorityLatencyUnavailable) {
@@ -4048,6 +4072,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			// Carry that frame's timestamps into the new ingress attempt too.
 			hooks.InitialTurnStartedAt = firstTurnStartedAt
 			hooks.InitialFrameArrivedAt = firstFrameArrivedAt
+			oauthRecoveryFallbackErr = nil
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
 			if err == nil {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
@@ -4134,8 +4159,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					releaseTurnSlots()
 					handled, recoveryErr := recoverOpenAIOAuthWS401(ctx, c, h.gatewayService, account, failoverErr)
 					if recoveryErr != nil {
-						closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, recoveryErr)
-						return
+						if !prepareOpenAIOAuthRecoveryFallback(ctx, recoveryErr, retrySafe) {
+							closeOpenAIOAuthWSRecoveryError(ctx, c, wsConn, recoveryErr)
+							return
+						}
+						oauthRecoveryFallbackErr = recoveryErr
+						handled = true
 					}
 					if handled {
 						wsAttemptMessage = nextAttemptMessage

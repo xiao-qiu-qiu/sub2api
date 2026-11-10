@@ -10,11 +10,15 @@ import (
 	"time"
 )
 
-const OpenAIOAuthRecoveryWait = time.Minute
+const (
+	OpenAIOAuthRecoveryWait       = time.Minute
+	openAIOAuthRecoveryMaxWaiters = 100
+)
 
 var (
 	ErrOAuthRecoveryTimeout              = errors.New("upstream authentication recovery timed out")
 	ErrOAuthRecoveryFailed               = errors.New("upstream authentication recovery failed")
+	ErrOAuthRecoveryQueueFull            = errors.New("upstream authentication recovery queue is full")
 	ErrOAuthRecoveryAdmissionInterrupted = errors.New("leave concurrency admission to wait for OAuth recovery")
 )
 
@@ -47,6 +51,8 @@ type oauthRecoveryBudget struct {
 	attempts map[int64]bool
 	tokens   map[int64]string
 	pending  []*oauthRecoveryFlight
+	routing  oauthRecoveryRouting
+	observed []*oauthRecoveryFlight
 }
 
 // WithOpenAIOAuthRecoveryBudget shares one minute across all recovery waits in
@@ -138,7 +144,12 @@ type oauthRecoveryFlight struct {
 	token     string
 	done      chan struct{}
 	err       error // published by closing done
-	finished  time.Time
+	// The remaining fields are protected by the coordinator's mutex.
+	taskID   int64
+	deadline time.Time
+	changed  chan struct{}
+	waiters  int
+	finished time.Time
 }
 
 type openAIOAuthRecoveryCoordinator struct {
@@ -202,20 +213,22 @@ func (r *openAIOAuthRecoveryCoordinator) begin(ctx context.Context, account *Acc
 		r.mu.Unlock()
 		return nil, false
 	}
-	// Keep completed flights briefly so concurrent, late responses for the old
-	// token see the same outcome instead of starting another login.
-	for id, flight := range r.flights {
-		if !flight.finished.IsZero() && time.Since(flight.finished) > OpenAIOAuthRecoveryWait {
-			delete(r.flights, id)
-		}
-	}
+	// Late responses retain the old outcome unless another owner has already
+	// started a newer durable task. Looking for that task must not create one.
 	if flight := r.flights[account.ID]; flight != nil {
-		if flight.finished.IsZero() || flight.token == rejectedToken {
+		if flight.finished.IsZero() {
 			r.mu.Unlock()
 			return flight, true
 		}
+		if flight.token == rejectedToken {
+			r.mu.Unlock()
+			if current := r.discover(ctx, account, true); current != nil {
+				return current, true
+			}
+			return flight, true
+		}
 	}
-	flight := &oauthRecoveryFlight{accountID: account.ID, token: rejectedToken, done: make(chan struct{})}
+	flight := r.newFlight(account.ID, rejectedToken, nil)
 	r.flights[account.ID] = flight
 	r.wg.Add(1)
 	r.mu.Unlock()
@@ -252,11 +265,45 @@ func (r *openAIOAuthRecoveryCoordinator) begin(ctx context.Context, account *Acc
 		}
 		return flight, true
 	}
+	r.mu.Lock()
+	if task != nil {
+		flight.taskID = task.ID
+		if deadline := r.taskDeadline(task); deadline.Before(flight.deadline) {
+			flight.deadline = deadline
+			close(flight.changed)
+			flight.changed = make(chan struct{})
+		}
+	}
+	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
 		r.observe(flight, task)
 	}()
 	return flight, true
+}
+
+func (r *openAIOAuthRecoveryCoordinator) taskDeadline(task *OpenAIOAuthReauthTask) time.Time {
+	start := time.Now()
+	if task != nil {
+		created := task.CreatedAt
+		if !created.IsZero() && created.Before(start) {
+			start = created
+		}
+	}
+	return start.Add(r.waitTime)
+}
+
+// newFlight is called with r.mu held. Discovery uses durable creation time;
+// local creation starts its window before any task insertion or token lookup.
+func (r *openAIOAuthRecoveryCoordinator) newFlight(accountID int64, token string, task *OpenAIOAuthReauthTask) *oauthRecoveryFlight {
+	flight := &oauthRecoveryFlight{
+		accountID: accountID, token: token, done: make(chan struct{}),
+		deadline: r.taskDeadline(task), changed: make(chan struct{}),
+	}
+	if task != nil {
+		flight.taskID = task.ID
+	}
+	return flight
 }
 
 func (r *openAIOAuthRecoveryCoordinator) finish(flight *oauthRecoveryFlight, err error) {
@@ -331,33 +378,104 @@ func (r *openAIOAuthRecoveryCoordinator) wait(ctx context.Context, flights []*oa
 	budget := recoveryBudget(ctx)
 	waitCtx, cancel := budget.waitContext(ctx, r.waitTime)
 	defer cancel()
-	cases := []reflect.SelectCase{{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(waitCtx.Done())}}
+	// Reserve once per distinct account flight. A pool wait must neither consume
+	// duplicate slots nor mutate the caller's pending/observed flight slices.
+	joined := make([]*oauthRecoveryFlight, 0, len(flights))
+	held := make(map[*oauthRecoveryFlight]bool)
+	seen := make(map[*oauthRecoveryFlight]bool)
+	ready := make(map[*oauthRecoveryFlight]bool)
+	queueFull, timedOut := false, false
+	observed := make([]*oauthRecoveryFlight, 0, len(flights))
+	r.mu.Lock()
 	for _, flight := range flights {
-		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(flight.done)})
+		if flight == nil || seen[flight] {
+			continue
+		}
+		seen[flight] = true
+		observed = append(observed, flight)
+		if !flight.finished.IsZero() {
+			ready[flight] = true
+		} else {
+			if flight.waiters >= openAIOAuthRecoveryMaxWaiters {
+				queueFull = true
+				continue
+			}
+			flight.waiters++
+			held[flight] = true
+		}
+		joined = append(joined, flight)
 	}
-	for len(cases) > 1 {
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		for flight := range held {
+			flight.waiters--
+		}
+		r.mu.Unlock()
+	}()
+	budget.mu.Lock()
+	// Include full queues too: the handler must know which account rejected
+	// this wait. Replace earlier targets so a later failure cannot exclude a
+	// different account whose recovery already succeeded in this request.
+	budget.observed = observed
+	budget.mu.Unlock()
+	for {
 		if waitCtx.Err() != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
 			}
 			return ErrOAuthRecoveryTimeout
 		}
-		chosen, _, _ := reflect.Select(cases)
-		if chosen == 0 || waitCtx.Err() != nil {
-			if ctx.Err() != nil {
-				return context.Cause(ctx)
+		cases := []reflect.SelectCase{{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(waitCtx.Done())}}
+		var deadline time.Time
+		var recovered *oauthRecoveryFlight
+		now := time.Now()
+		r.mu.Lock()
+		remaining := joined[:0]
+		for _, flight := range joined {
+			finished := !flight.finished.IsZero()
+			expired := !flight.deadline.After(now)
+			if finished && (ready[flight] || !flight.finished.After(flight.deadline)) {
+				if flight.err == nil {
+					recovered = flight
+				}
+			} else if expired {
+				timedOut = true
+			} else {
+				remaining = append(remaining, flight)
+				if deadline.IsZero() || flight.deadline.Before(deadline) {
+					deadline = flight.deadline
+				}
+				cases = append(cases,
+					reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(flight.done)},
+					reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(flight.changed)})
+				continue
 			}
-			return ErrOAuthRecoveryTimeout
+			if held[flight] {
+				flight.waiters--
+				delete(held, flight)
+			}
 		}
-		flight := flights[chosen-1]
-		if flight.err == nil {
-			budget.attempted(flight.accountID, true)
+		joined = remaining
+		r.mu.Unlock()
+		if recovered != nil {
+			budget.attempted(recovered.accountID, true)
 			return nil
 		}
-		cases = append(cases[:chosen], cases[chosen+1:]...)
-		flights = append(flights[:chosen-1], flights[chosen:]...)
+		if len(joined) == 0 {
+			if timedOut {
+				return ErrOAuthRecoveryTimeout
+			}
+			if queueFull {
+				return ErrOAuthRecoveryQueueFull
+			}
+			return ErrOAuthRecoveryFailed
+		}
+		timer := time.NewTimer(time.Until(deadline))
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timer.C)})
+		reflect.Select(cases)
+		timer.Stop()
 	}
-	return ErrOAuthRecoveryFailed
 }
 
 func (r *openAIOAuthRecoveryCoordinator) matching(ctx context.Context, account *Account) *oauthRecoveryFlight {
@@ -372,6 +490,93 @@ func (r *openAIOAuthRecoveryCoordinator) matching(ctx context.Context, account *
 		return flight
 	}
 	return nil
+}
+
+// discover only observes durable work; it never requests a new login. A newer
+// durable task supersedes a completed outcome even with unchanged credentials.
+func (r *openAIOAuthRecoveryCoordinator) discover(ctx context.Context, account *Account, reuseFinished bool) *oauthRecoveryFlight {
+	rejectedToken := oauthRecoveryRejectedToken(ctx, account)
+	r.mu.Lock()
+	flight := r.flights[account.ID]
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	if flight != nil && flight.finished.IsZero() {
+		r.mu.Unlock()
+		return flight
+	}
+	r.mu.Unlock()
+	task, err := r.guard.GetImmediateReauthTask(ctx, account.ID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	flight = r.flights[account.ID]
+	if flight != nil && flight.finished.IsZero() {
+		return flight
+	}
+	if err != nil || task == nil || task.AccountID != account.ID {
+		if reuseFinished && flight != nil && flight.token == rejectedToken {
+			return flight
+		}
+		return nil
+	}
+	// Another discovery may have installed and completed a newer flight while
+	// this lookup was in progress. Task IDs are monotonic; never move backwards.
+	if flight != nil && flight.taskID >= task.ID {
+		return flight
+	}
+	flight = r.newFlight(account.ID, rejectedToken, task)
+	r.flights[account.ID] = flight
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.observe(flight, task)
+	}()
+	return flight
+}
+
+func (b *oauthRecoveryBudget) queue(flights []*oauthRecoveryFlight) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, flight := range flights {
+		pending := false
+		for _, previous := range b.pending {
+			pending = pending || previous == flight
+		}
+		if !pending {
+			b.pending = append(b.pending, flight)
+		}
+	}
+	b.observed = append([]*oauthRecoveryFlight(nil), b.pending...)
+}
+
+// QueueOpenAIOAuthRecoveryForAccount is called after the scheduler has checked
+// the selected account's eligibility. True tells admission to release its slots
+// and call WaitForOpenAIOAuthRecovery, including for a completed failed round.
+// It neither starts a login nor decides whether fallback is allowed.
+func (s *OpenAIGatewayService) QueueOpenAIOAuthRecoveryForAccount(ctx context.Context, accountID int64) bool {
+	if s == nil || s.oauthRecovery == nil || s.accountRepo == nil || oauthRecoveryAccountExcluded(ctx, accountID) {
+		return false
+	}
+	budget := recoveryBudget(ctx)
+	if budget == nil {
+		return false
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil || account == nil {
+		return false
+	}
+	flight := s.oauthRecovery.discover(ctx, account, true)
+	if flight == nil {
+		return false
+	}
+	budget.queue([]*oauthRecoveryFlight{flight})
+	_, cancel := budget.waitContext(ctx, s.oauthRecovery.waitTime)
+	cancel()
+	return true
 }
 
 // RecoverOpenAIOAuth401 is called only before semantic output is sent. It does
@@ -433,9 +638,7 @@ func (s *OpenAIGatewayService) HasPendingOpenAIOAuthRecovery(ctx context.Context
 	if budget != nil {
 		// Queue cleanup can overlap task completion. Keep this request's exact
 		// observed flights so their failure cannot turn into "no accounts".
-		budget.mu.Lock()
-		budget.pending = append([]*oauthRecoveryFlight(nil), flights...)
-		budget.mu.Unlock()
+		budget.queue(flights)
 		_, cancel := budget.waitContext(ctx, s.oauthRecovery.waitTime)
 		cancel()
 	}
@@ -485,6 +688,9 @@ func (s *OpenAIGatewayService) pendingOpenAIOAuthRecovery(ctx context.Context, g
 	var candidates []*Account
 	for i := range accounts {
 		account := &accounts[i]
+		if oauthRecoveryAccountExcluded(ctx, account.ID) {
+			continue
+		}
 		if !account.Schedulable || !s.openAIAccountMatchesSchedulingGroup(account, groupID) || (selection.requireCompact && openAICompactSupportTier(account) == 0) {
 			continue
 		}
@@ -510,30 +716,7 @@ func (s *OpenAIGatewayService) pendingOpenAIOAuthRecovery(ctx context.Context, g
 	}
 	var flights []*oauthRecoveryFlight
 	for _, account := range candidates {
-		r.mu.Lock()
-		flight := r.flights[account.ID]
-		if flight != nil && !flight.finished.IsZero() {
-			flight = nil
-		}
-		r.mu.Unlock()
-		if flight == nil {
-			task, taskErr := r.guard.GetImmediateReauthTask(ctx, account.ID)
-			if taskErr != nil || task == nil {
-				continue
-			}
-			r.mu.Lock()
-			flight = r.flights[account.ID]
-			if !r.closed && (flight == nil || !flight.finished.IsZero()) {
-				flight = &oauthRecoveryFlight{accountID: account.ID, token: account.GetCredential("access_token"), done: make(chan struct{})}
-				r.flights[account.ID] = flight
-				r.wg.Add(1)
-				go func(f *oauthRecoveryFlight, task *OpenAIOAuthReauthTask) {
-					defer r.wg.Done()
-					r.observe(f, task)
-				}(flight, task)
-			}
-			r.mu.Unlock()
-		}
+		flight := r.discover(ctx, account, false)
 		if flight != nil {
 			flights = append(flights, flight)
 		}

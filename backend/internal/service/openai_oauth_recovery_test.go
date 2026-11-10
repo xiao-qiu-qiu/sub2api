@@ -205,7 +205,7 @@ func TestOAuthRecoveryTimeoutAndCancellationDoNotCancelLogin(t *testing.T) {
 			svc.oauthRecovery.waitTime = 25 * time.Millisecond
 			ctx, cancel := context.WithCancel(WithOpenAIOAuthRecoveryBudget(context.Background()))
 			defer cancel()
-			_, started := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
+			flight, started := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
 			require.True(t, started)
 			if cancelClient {
 				cancel()
@@ -219,6 +219,13 @@ func TestOAuthRecoveryTimeoutAndCancellationDoNotCancelLogin(t *testing.T) {
 			}
 			require.True(t, svc.oauthRecovery.active(account.ID))
 			guard.complete(OpenAIOAuthReauthStatusSucceeded)
+			// The shared window has expired, so a new request cannot wait for
+			// another minute. It may consume the outcome once verification ends.
+			select {
+			case <-flight.done:
+			case <-time.After(time.Second):
+				t.Fatal("recovery observer did not finish")
+			}
 			freshCtx := WithOpenAIOAuthRecoveryBudget(context.Background())
 			_, err = svc.RecoverOpenAIOAuth401(freshCtx, account, oauthRecoveryTest401)
 			require.NoError(t, err)
@@ -461,13 +468,15 @@ func TestOAuthRecoveryExactlyOneMinuteAndFreshTurnBudget(t *testing.T) {
 		svc, guard, account := newOAuthRecoveryFixture(t)
 		defer svc.oauthRecovery.stop()
 		ctx := WithOpenAIOAuthRecoveryBudget(context.Background())
-		_, started := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
+		flight, started := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
 		require.True(t, started)
 		start := time.Now()
 		_, err := svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
 		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
 		require.Equal(t, time.Minute, time.Since(start))
 		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		synctest.Wait()
+		<-flight.done
 		// A ready flight does not make an expired request eligible again.
 		_, err = svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
 		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)

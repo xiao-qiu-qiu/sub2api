@@ -23,9 +23,10 @@ type openAIOAuthRecoveryGateway interface {
 type openAIOAuthRecoveryAdmissionKey struct{}
 
 type openAIOAuthRecoveryAdmission struct {
-	groupID   *int64
-	model     string
-	anthropic bool
+	groupID     *int64
+	model       string
+	anthropic   bool
+	fallbackErr error
 }
 
 // A long-lived ingress captures its context before later response.create
@@ -104,8 +105,13 @@ func (h *OpenAIGatewayHandler) recoverOpenAIOAuthHTTP401(c *gin.Context, slots *
 	slots.release()
 	handled, err := recoverOpenAIOAuth401(c.Request.Context(), h.gatewayService, account, result, failoverErr, true)
 	if err != nil {
-		h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, anthropic)
-		return true, false
+		if !prepareOpenAIOAuthHTTPRecoveryFallback(c, err, true) {
+			h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, anthropic)
+			return true, false
+		}
+		// Reselect normally with the recovery account excluded. This request
+		// borrows a healthy account without replacing its original binding.
+		handled = true
 	}
 	if failoverClientGone(c) || !slots.acquire() {
 		return true, false
@@ -116,12 +122,37 @@ func (h *OpenAIGatewayHandler) recoverOpenAIOAuthHTTP401(c *gin.Context, slots *
 }
 
 func isOpenAIOAuthRecoveryError(err error) bool {
-	return errors.Is(err, service.ErrOAuthRecoveryTimeout) || errors.Is(err, service.ErrOAuthRecoveryFailed)
+	return errors.Is(err, service.ErrOAuthRecoveryTimeout) || errors.Is(err, service.ErrOAuthRecoveryFailed) || errors.Is(err, service.ErrOAuthRecoveryQueueFull)
+}
+
+func prepareOpenAIOAuthRecoveryFallback(ctx context.Context, err error, replaySafe bool) bool {
+	return replaySafe && ctx.Err() == nil && isOpenAIOAuthRecoveryError(err) && service.PrepareOpenAIOAuthRecoveryFallback(ctx, err)
+}
+
+func prepareOpenAIOAuthHTTPRecoveryFallback(c *gin.Context, err error, replaySafe bool) bool {
+	if !prepareOpenAIOAuthRecoveryFallback(c.Request.Context(), err, replaySafe) {
+		return false
+	}
+	if admission, ok := c.Request.Context().Value(openAIOAuthRecoveryAdmissionKey{}).(*openAIOAuthRecoveryAdmission); ok {
+		admission.fallbackErr = err
+	}
+	return true
+}
+
+func clearOpenAIOAuthRecoveryFallback(c *gin.Context) {
+	if admission, ok := c.Request.Context().Value(openAIOAuthRecoveryAdmissionKey{}).(*openAIOAuthRecoveryAdmission); ok {
+		// A new upstream attempt owns any later error. Do not mask it with a
+		// previous recovery's failure if ordinary failover is later exhausted.
+		admission.fallbackErr = nil
+	}
 }
 
 func openAIOAuthRecoveryErrorDetails(err error) (string, string) {
 	if errors.Is(err, service.ErrOAuthRecoveryTimeout) {
 		return "upstream_auth_recovery_timeout", "Upstream authentication recovery timed out; please retry"
+	}
+	if errors.Is(err, service.ErrOAuthRecoveryQueueFull) {
+		return "upstream_auth_recovery_queue_full", "Upstream authentication recovery queue is full; please retry later"
 	}
 	return "upstream_auth_recovery_failed", "Upstream authentication recovery failed; please retry later"
 }
@@ -130,7 +161,7 @@ func openAIOAuthRecoveryErrorDetails(err error) (string, string) {
 // New requests wait without consuming user or API key concurrency slots.
 func (h *OpenAIGatewayHandler) waitForOpenAIOAuthRecoveryBeforeAdmission(c *gin.Context, groupID *int64, model string, streamStarted, anthropic bool) bool {
 	ctx := service.WithOpenAIOAuthRecoveryBudget(c.Request.Context())
-	ctx = context.WithValue(ctx, openAIOAuthRecoveryAdmissionKey{}, openAIOAuthRecoveryAdmission{groupID: groupID, model: model, anthropic: anthropic})
+	ctx = context.WithValue(ctx, openAIOAuthRecoveryAdmissionKey{}, &openAIOAuthRecoveryAdmission{groupID: groupID, model: model, anthropic: anthropic})
 	ctx = service.WithOAuthRecoveryAdmissionCheck(ctx, func(checkCtx context.Context) bool {
 		return h.gatewayService.HasPendingOpenAIOAuthRecovery(checkCtx, groupID, model)
 	})
@@ -143,14 +174,48 @@ func (h *OpenAIGatewayHandler) waitForOpenAIOAuthRecoveryBeforeAdmission(c *gin.
 	return !failoverClientGone(c)
 }
 
-func (h *OpenAIGatewayHandler) waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c *gin.Context, streamStarted bool) bool {
-	admission, _ := c.Request.Context().Value(openAIOAuthRecoveryAdmissionKey{}).(openAIOAuthRecoveryAdmission)
+func (h *OpenAIGatewayHandler) waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c *gin.Context, streamStarted, selectionObserved bool) bool {
+	admission, _ := c.Request.Context().Value(openAIOAuthRecoveryAdmissionKey{}).(*openAIOAuthRecoveryAdmission)
+	if admission == nil {
+		admission = &openAIOAuthRecoveryAdmission{}
+	}
 	_, err := h.gatewayService.WaitForOpenAIOAuthRecovery(c.Request.Context(), admission.groupID, admission.model)
 	if err != nil {
+		if prepareOpenAIOAuthHTTPRecoveryFallback(c, err, selectionObserved) {
+			return !failoverClientGone(c)
+		}
 		h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, admission.anthropic)
 		return false
 	}
 	return !failoverClientGone(c)
+}
+
+// Selection can discover a bound account's recovery after user/key admission.
+// Leave both slots before parking, then perform fresh admission before selecting
+// again. Ordinary selection failures must keep their original error handling.
+func (h *OpenAIGatewayHandler) handleOpenAIOAuthRecoverySelectionError(c *gin.Context, slots *openAIOAuthRecoveryUserSlot, err error, streamStarted, anthropic bool) (handled, retry bool) {
+	if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) {
+		slots.release()
+		if !h.waitForOpenAIOAuthRecoveryAfterAdmissionInterruption(c, streamStarted, true) {
+			return true, false
+		}
+		return true, !failoverClientGone(c) && slots.acquire()
+	}
+	if isOpenAIOAuthRecoveryError(err) {
+		slots.release()
+		if prepareOpenAIOAuthHTTPRecoveryFallback(c, err, true) {
+			return true, !failoverClientGone(c) && slots.acquire()
+		}
+		h.handleOpenAIOAuthRecoveryError(c, err, streamStarted, anthropic)
+		return true, false
+	}
+	if admission, ok := c.Request.Context().Value(openAIOAuthRecoveryAdmissionKey{}).(*openAIOAuthRecoveryAdmission); ok && admission.fallbackErr != nil &&
+		(errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) {
+		slots.release()
+		h.handleOpenAIOAuthRecoveryError(c, admission.fallbackErr, streamStarted, anthropic)
+		return true, false
+	}
+	return false, false
 }
 
 func (h *OpenAIGatewayHandler) handleOpenAIOAuthRecoveryError(c *gin.Context, err error, streamStarted, anthropic bool) {

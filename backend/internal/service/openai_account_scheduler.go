@@ -2701,6 +2701,32 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	if s.oauthRecovery != nil && NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI && requiredImageCapability == "" {
+		ctx = WithOpenAIOAuthRecoveryBudget(ctx)
+		excludedIDs = withOAuthRecoveryExcludedAccounts(ctx, excludedIDs)
+		queueBoundRecovery := func() bool {
+			return s.queueBoundOpenAIOAuthRecovery(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs,
+				requiredTransport, requiredCapability, requireCompact, previousResponseCanMove)
+		}
+		if queueBoundRecovery() {
+			return nil, decision, ErrOAuthRecoveryAdmissionInterrupted
+		}
+		// A concurrent 401 can start after the precheck. Release any acquired
+		// account slot and let ingress leave user/key admission before waiting.
+		defer func() {
+			if err == nil && selection != nil && selection.Account != nil && queueBoundRecovery() {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				selection = nil
+				decision.SelectedAccountID = 0
+				decision.SelectedAccountType = ""
+				decision.StickyPreviousHit = false
+				decision.StickySessionHit = false
+				err = ErrOAuthRecoveryAdmissionInterrupted
+			}
+		}()
+	}
 	selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
 	if err == nil {
 		return selection, decision, err
@@ -2724,12 +2750,10 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	recoveryCtx = context.WithValue(recoveryCtx, oauthRecoverySelectionKey{}, oauthRecoverySelection{
 		excluded: excludedIDs, transport: requiredTransport, capability: requiredCapability, imageCapability: requiredImageCapability, requireCompact: requireCompact,
 	})
-	waited, recoveryErr := s.WaitForOpenAIOAuthRecovery(recoveryCtx, groupID, requestedModel)
-	if recoveryErr != nil {
-		return nil, decision, recoveryErr
-	}
-	if waited {
-		return s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	if s.HasPendingOpenAIOAuthRecovery(recoveryCtx, groupID, requestedModel) {
+		// Selection still runs inside user/key admission. Ingress must release
+		// those slots before waiting, just as it does for a bound session.
+		return nil, decision, ErrOAuthRecoveryAdmissionInterrupted
 	}
 	return selection, decision, err
 }

@@ -131,6 +131,7 @@ func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, gr
 
 	accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), primaryKey)
 	if err == nil && accountID > 0 {
+		rememberOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID)
 		return accountID, nil
 	}
 	if !s.openAISessionHashReadOldFallbackEnabled() {
@@ -146,6 +147,7 @@ func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, gr
 	legacyAccountID, legacyErr := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), legacyKey)
 	if legacyErr == nil && legacyAccountID > 0 {
 		openAIStickyLegacyReadFallbackHit.Add(1)
+		rememberOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, legacyAccountID)
 		return legacyAccountID, nil
 	}
 	return accountID, err
@@ -159,10 +161,14 @@ func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, gr
 	if primaryKey == "" {
 		return nil
 	}
+	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID) {
+		return s.refreshStickySessionTTL(ctx, groupID, sessionHash, ttl)
+	}
 
 	if err := s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), primaryKey, accountID, ttl); err != nil {
 		return err
 	}
+	rememberOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID)
 
 	if !s.openAISessionHashDualWriteOldEnabled() {
 		return nil
@@ -201,6 +207,9 @@ func (s *OpenAIGatewayService) refreshStickySessionTTL(ctx context.Context, grou
 
 func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) error {
 	if s == nil || s.cache == nil {
+		return nil
+	}
+	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, 0) {
 		return nil
 	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)
