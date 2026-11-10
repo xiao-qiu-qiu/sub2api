@@ -154,7 +154,13 @@ func (t *accountWSTurns) close(hooks *OpenAIWSIngressHooks, err error) {
 	turn, active := t.turn, t.scope != nil
 	t.mu.Unlock()
 	if active {
-		hooks.AfterTurn(turn, nil, err)
+		// A tracked frame may be rejected before the relay admits a model turn.
+		// Release its quality scope without inventing an accounting callback.
+		// A quality cancellation still needs the synthetic zero-usage evidence.
+		result, finishErr := t.finish(turn, nil, err)
+		if result != nil && result.QualityInterrupted && hooks != nil && hooks.AfterTurn != nil {
+			hooks.AfterTurn(turn, result, finishErr)
+		}
 	}
 	t.cancel(context.Canceled)
 }

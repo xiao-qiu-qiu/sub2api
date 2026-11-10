@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -132,6 +133,7 @@ func TestWSNodeOwnerNativeIngress(t *testing.T) {
 					require.Zero(t, dialer.DialCount())
 					require.Empty(t, capture.writes)
 					require.Zero(t, completed.Load())
+					require.Zero(t, accountrequest.Default.Cancel(account.ID, time.Now()), "rejected turn must release its quality scope")
 					if name == "lost-pool-connection-no-send" {
 						require.LessOrEqual(t, afterTurn.Load(), int64(1), "failed acquisition may only release the admitted turn once")
 					} else {
