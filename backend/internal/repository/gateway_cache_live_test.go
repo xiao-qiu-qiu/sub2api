@@ -19,6 +19,7 @@ func TestGatewayCacheLiveCallIdentityAndController(t *testing.T) {
 	otherInstance, ok := NewGatewayCache(client).(service.LiveCallStore)
 	require.True(t, ok)
 	record := &service.LiveCallRecord{
+		RequestStartedAt:      time.Now().Add(-2 * time.Minute),
 		CallID:                "call_secret",
 		CallHash:              HashLiveCallID("call_secret"),
 		AccountID:             11,
@@ -39,6 +40,11 @@ func TestGatewayCacheLiveCallIdentityAndController(t *testing.T) {
 	require.Equal(t, record.CallID, loaded.CallID)
 	require.Equal(t, record.AccountID, loaded.AccountID)
 	require.Equal(t, record.AttestationCiphertext, loaded.AttestationCiphertext)
+	require.True(t, record.RequestStartedAt.Equal(loaded.RequestStartedAt), "controller handoff must preserve the ingress clock")
+	require.NoError(t, client.HDel(context.Background(), liveCallKey(record.CallHash), "request_started_at").Err())
+	legacy, err := otherInstance.GetLiveCall(context.Background(), record.CallHash)
+	require.NoError(t, err)
+	require.True(t, legacy.RequestStartedAt.IsZero(), "legacy records must not invent an ingress timestamp")
 
 	claimed, err := cache.ClaimLiveController(context.Background(), record.CallHash, service.LiveControllerObserver, "observer-1")
 	require.NoError(t, err)

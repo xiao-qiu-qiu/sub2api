@@ -1,5 +1,5 @@
 // Package accountrequest interrupts in-flight business requests for an account
-// without preventing new requests after the quality transition cutoff.
+// within a quality transition's request creation window.
 package accountrequest
 
 import (
@@ -30,6 +30,32 @@ type Registry struct {
 func NewRegistry() *Registry { return &Registry{} }
 
 type scopeKey struct{}
+type startedAtKey struct{}
+
+// WithStartedAt attaches the business request's creation time before Begin or
+// Track. A nonzero value is used verbatim, even when it predates an already
+// processed cutoff. It cannot change an existing same-account scope's time.
+func WithStartedAt(ctx context.Context, started time.Time) context.Context {
+	return context.WithValue(ctx, startedAtKey{}, started)
+}
+
+// StartedAt returns the scope's original creation time, or the time injected by
+// WithStartedAt before registration. Without either it returns the zero time.
+// context.WithoutCancel and PreserveCancellation retain a scope's timestamp.
+func StartedAt(ctx context.Context) time.Time {
+	if scope := scopeFrom(ctx); scope != nil {
+		return scope.started
+	}
+	return injectedStartedAt(ctx)
+}
+
+func injectedStartedAt(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	started, _ := ctx.Value(startedAtKey{}).(time.Time)
+	return started
+}
 
 type binding struct{ cancel func(error) }
 
@@ -72,14 +98,18 @@ func (r *Registry) begin(ctx context.Context, accountID int64, releaseCause erro
 	parent := scopeFrom(ctx)
 	scope := &requestScope{accountID: accountID, parent: parent}
 	r.mu.Lock()
-	scope.started = time.Now()
+	scope.started = injectedStartedAt(ctx)
+	explicit := !scope.started.IsZero()
+	if !explicit {
+		scope.started = time.Now()
+	}
 	for ancestor := parent; ancestor != nil; ancestor = ancestor.parent {
 		if ancestor.accountID == accountID {
 			scope.started = ancestor.started
 			break
 		}
 	}
-	if !hasAccount(parent, accountID) && !scope.started.After(r.cutoffs[accountID]) {
+	if !explicit && !hasAccount(parent, accountID) && !scope.started.After(r.cutoffs[accountID]) {
 		// Wall clocks can have coarse ticks or move backwards. A root admitted
 		// after a processed event belongs strictly after that event.
 		scope.started = r.cutoffs[accountID].Add(time.Nanosecond)
@@ -101,7 +131,7 @@ func (r *Registry) begin(ctx context.Context, accountID int64, releaseCause erro
 		}
 	})
 	if parent != nil {
-		scope.onStop(parent.bind(scope.stop))
+		scope.onStop(parent.bind(func(cause error) { scope.stop(cause) }))
 	}
 	return context.WithValue(request, scopeKey{}, scope), sync.OnceFunc(func() { scope.stop(releaseCause) })
 }
@@ -139,31 +169,59 @@ func (r *Registry) Cancel(accountID int64, cutoff time.Time) int {
 	if accountID <= 0 || cutoff.IsZero() {
 		return 0
 	}
-	cutoff = cutoff.Round(0) // Match the wall-clock timestamp sent over Redis.
-	r.mu.Lock()
-	if previous, ok := r.cutoffs[accountID]; ok && !cutoff.After(previous) {
-		r.mu.Unlock()
+	return r.cancel(accountID, time.Time{}, cutoff.Round(0), true)
+}
+
+// CancelWindow synchronously interrupts only active registrations created in
+// (after, before]. Unlike Cancel it does not use a cutoff high-water mark: an
+// older or wider window can still contain requests outside a later window.
+// Empty or reversed windows are no-ops. The count excludes scopes whose release
+// wins the race with cancellation, including successfully completed Tracks.
+func (r *Registry) CancelWindow(accountID int64, after, before time.Time) int {
+	after, before = after.Round(0), before.Round(0)
+	if accountID <= 0 || before.IsZero() || !before.After(after) {
 		return 0
 	}
-	if r.cutoffs == nil {
-		r.cutoffs = make(map[int64]time.Time)
+	return r.cancel(accountID, after, before, false)
+}
+
+func (r *Registry) cancel(accountID int64, after, before time.Time, legacy bool) int {
+	r.mu.Lock()
+	if legacy {
+		if previous, ok := r.cutoffs[accountID]; ok && !before.After(previous) {
+			r.mu.Unlock()
+			return 0
+		}
+		if r.cutoffs == nil {
+			r.cutoffs = make(map[int64]time.Time)
+		}
+		r.cutoffs[accountID] = before
 	}
-	r.cutoffs[accountID] = cutoff
 	var targets []*requestScope
 	for scope := range r.requests[accountID] {
-		if !scope.started.After(cutoff) {
+		if !scope.started.After(before) && (legacy || scope.started.After(after)) {
+			// A release may already own the scope while its registry cleanup is
+			// pending. Never count or relabel that completed request.
+			scope.mu.Lock()
+			active := scope.stopped == nil
+			scope.mu.Unlock()
 			delete(r.requests[accountID], scope)
-			targets = append(targets, scope)
+			if active {
+				targets = append(targets, scope)
+			}
 		}
 	}
 	if len(r.requests[accountID]) == 0 {
 		delete(r.requests, accountID)
 	}
 	r.mu.Unlock()
+	count := 0
 	for _, scope := range targets {
-		scope.stop(ErrQualityDegraded)
+		if scope.stop(ErrQualityDegraded) {
+			count++
+		}
 	}
-	return len(targets)
+	return count
 }
 
 // PreserveCancellation adds the parent's account control to detached while
@@ -195,13 +253,14 @@ func QualityDegraded(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
-	for scope := scopeFrom(ctx); scope != nil; scope = scope.parent {
+	if scope := scopeFrom(ctx); scope != nil {
 		scope.mu.Lock()
 		degraded := errors.Is(scope.cause, ErrQualityDegraded)
 		scope.mu.Unlock()
-		if degraded {
-			return true
-		}
+		// The scope freezes its outcome at release. Walking ancestors or using
+		// context.Cause here would relabel a completed child after its parent
+		// is interrupted (ordinary context cancellation still propagates).
+		return degraded
 	}
 	return errors.Is(context.Cause(ctx), ErrQualityDegraded)
 }
@@ -238,13 +297,15 @@ func (s *requestScope) onStop(cleanup func()) {
 	s.mu.Unlock()
 }
 
-func (s *requestScope) stop(cause error) {
+// stop freezes the outcome before fanout; concurrent callers join the winner.
+// It reports whether that final outcome is a quality interrupt.
+func (s *requestScope) stop(cause error) bool {
 	s.mu.Lock()
 	if s.stopped != nil {
 		done := s.stopped
 		s.mu.Unlock()
 		<-done
-		return
+		return errors.Is(s.cause, ErrQualityDegraded)
 	}
 	s.cause = cause
 	s.stopped = make(chan struct{})
@@ -258,4 +319,5 @@ func (s *requestScope) stop(cause error) {
 	for _, cleanup := range cleanups {
 		cleanup()
 	}
+	return errors.Is(cause, ErrQualityDegraded)
 }

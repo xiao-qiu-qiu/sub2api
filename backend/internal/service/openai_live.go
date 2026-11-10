@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"slices"
 	"strings"
 	"time"
 
@@ -220,13 +219,27 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		}
 
 		account := selection.Account
-		accountCtx, finishAccount := accountrequest.Default.Begin(ctx, account.ID)
+		accountCtx, finishAccount := accountrequest.Default.Begin(withGatewayRequestStart(ctx), account.ID)
+		liveStored := false
 		defer func() {
-			if accountrequest.QualityDegraded(accountCtx) {
-				result, returnErr = nil, accountrequest.ErrQualityDegraded
-			}
 			if finishAccount != nil {
 				finishAccount()
+			}
+			if accountrequest.QualityDegraded(accountCtx) {
+				result, returnErr = nil, accountrequest.ErrQualityDegraded
+				if !liveStored && s.usageLogRepo != nil {
+					model := strings.TrimSpace(gjson.GetBytes(request.Session, "model").String())
+					if model == "" {
+						model = "gpt-live"
+					}
+					if err := recordQualityInterruptedUsage(accountCtx, s.usageLogRepo, &OpenAIRecordUsageInput{
+						Result: &OpenAIForwardResult{Model: model, RequestStartedAt: gatewayRequestStartedAt(accountCtx), QualityInterrupted: true, UsageUnavailable: true},
+						APIKey: &APIKey{ID: identity.APIKeyID, GroupID: identity.GroupID}, User: &User{ID: identity.UserID}, Account: account,
+						UserAgent: identity.UserAgent, IPAddress: identity.IPAddress, InboundEndpoint: identity.InboundEndpoint, UpstreamEndpoint: "/backend-api/codex/realtime/calls",
+					}); err != nil {
+						logger.L().Warn("openai_live_quality_usage_failed", zap.Error(err))
+					}
+				}
 			}
 		}()
 		if joint.leaseID == "" {
@@ -348,6 +361,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			model = "gpt-live"
 		}
 		record := &LiveCallRecord{
+			RequestStartedAt:      gatewayRequestStartedAt(accountCtx),
 			CallID:                created.CallID,
 			CallHash:              hashLiveCallID(created.CallID),
 			AccountID:             account.ID,
@@ -378,6 +392,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			releaseJoint()
 			return nil, fmt.Errorf("save live call mapping: %w", saveErr)
 		}
+		liveStored = true
 		created.Account = account
 		s.startLiveObserver(accountCtx, record, finishAccount)
 		finishAccount = nil
@@ -828,12 +843,8 @@ func (s *OpenAIGatewayService) dialLiveSidebandForControl(ctx context.Context, r
 	if account == nil || !account.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive) {
 		return nil, ErrLiveUnavailable
 	}
-	// A disconnected observer or a stale client must not rejoin a call after
-	// its account has left the call's group. Cleanup alone may reconnect to
-	// send session.close; it never forwards user frames.
-	if !closeOnly && record.GroupID > 0 && !slices.Contains(account.GroupIDs, record.GroupID) {
-		return nil, accountrequest.ErrQualityDegraded
-	}
+	// Existing calls retain their original identity through account moves.
+	// Window cancellation and the closed-call/controller gate own termination.
 	headers, err := s.liveSidebandHeaders(ctx, account, record)
 	if err != nil {
 		return nil, err
@@ -885,14 +896,14 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 	if record == nil || downstream == nil {
 		return ErrLiveCallNotFound
 	}
-	ctx, finishAccount := accountrequest.Default.Begin(ctx, record.AccountID)
+	ctx, finishAccount := accountrequest.Default.Begin(liveRequestStartContext(ctx, record), record.AccountID)
 	var upstream liveFrameConn
 	qualityClosed := false
 	defer func() {
 		if accountrequest.QualityDegraded(ctx) || errors.Is(returnErr, accountrequest.ErrQualityDegraded) {
 			if !qualityClosed {
 				s.closeLiveSessionForQuality(record, upstream)
-				s.finalizeLiveCall(record)
+				s.finalizeLiveCall(record, true)
 			}
 			_ = downstream.CloseNow()
 			returnErr = accountrequest.ErrQualityDegraded
@@ -978,7 +989,7 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 	cancel()
 	if liveSessionEnded(runErr) || !time.Now().Before(record.ExpiresAt) {
 		qualityClosed = errors.Is(runErr, accountrequest.ErrQualityDegraded)
-		s.finalizeLiveCall(record)
+		s.finalizeLiveCall(record, qualityClosed)
 		return runErr
 	}
 	_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
@@ -1050,7 +1061,7 @@ func (s *OpenAIGatewayService) observeLiveCall(record *LiveCallRecord) {
 	if record == nil {
 		return
 	}
-	ctx, release := accountrequest.Default.Begin(context.Background(), record.AccountID)
+	ctx, release := accountrequest.Default.Begin(liveRequestStartContext(context.Background(), record), record.AccountID)
 	defer release()
 	s.observeLiveCallContext(ctx, record)
 }
@@ -1060,7 +1071,7 @@ func (s *OpenAIGatewayService) observeLiveCallContext(ctx context.Context, recor
 	defer func() {
 		if accountrequest.QualityDegraded(ctx) && !qualityClosed {
 			s.closeLiveSessionForQuality(record, nil)
-			s.finalizeLiveCall(record)
+			s.finalizeLiveCall(record, true)
 		}
 	}()
 	if ctx.Err() != nil {
@@ -1118,7 +1129,7 @@ func (s *OpenAIGatewayService) observeLiveCallContext(ctx context.Context, recor
 		if dialErr != nil {
 			if errors.Is(dialErr, accountrequest.ErrQualityDegraded) {
 				s.closeLiveSessionForQuality(record, nil)
-				s.finalizeLiveCall(record)
+				s.finalizeLiveCall(record, true)
 				qualityClosed = true
 				return
 			}
@@ -1131,7 +1142,7 @@ func (s *OpenAIGatewayService) observeLiveCallContext(ctx context.Context, recor
 		_ = upstream.Close()
 		if errors.Is(runErr, accountrequest.ErrQualityDegraded) {
 			qualityClosed = true
-			s.finalizeLiveCall(record)
+			s.finalizeLiveCall(record, true)
 			return
 		}
 		if errors.Is(runErr, ErrLiveControllerChanged) {
@@ -1314,7 +1325,7 @@ func (s *OpenAIGatewayService) releaseLiveLease(accountID, userID, apiKeyID int6
 	_ = cache.ReleaseLiveLease(ctx, accountID, userID, apiKeyID, leaseID)
 }
 
-func (s *OpenAIGatewayService) finalizeLiveCall(record *LiveCallRecord) {
+func (s *OpenAIGatewayService) finalizeLiveCall(record *LiveCallRecord, qualityInterrupted ...bool) {
 	if record == nil {
 		return
 	}
@@ -1353,22 +1364,33 @@ func (s *OpenAIGatewayService) finalizeLiveCall(record *LiveCallRecord) {
 	// 这是该会话唯一一次落库机会（MarkLiveCallClosed 已标记 first），失败即永久
 	// 丢失，因此走带日志与同步兜底的 writeUsageLogBestEffort（issue #3656）。
 	writeUsageLogBestEffort(context.Background(), s.usageLogRepo, &UsageLog{
-		UserID:           record.UserID,
-		APIKeyID:         record.APIKeyID,
-		AccountID:        record.AccountID,
-		RequestID:        record.CallHash,
-		Model:            record.Model,
-		RequestedModel:   record.Model,
-		GroupID:          liveOptionalID(record.GroupID),
-		SubscriptionID:   liveOptionalID(record.SubscriptionID),
-		RateMultiplier:   1,
-		BillingType:      billingType,
-		RequestType:      RequestTypeLive,
-		DurationMs:       &duration,
-		UserAgent:        &userAgent,
-		IPAddress:        &ipAddress,
-		InboundEndpoint:  &inboundEndpoint,
-		UpstreamEndpoint: &upstreamEndpoint,
-		CreatedAt:        record.CreatedAt,
+		RequestStartedAt:   usageRequestStartedAt(record.RequestStartedAt, nil),
+		QualityInterrupted: len(qualityInterrupted) > 0 && qualityInterrupted[0],
+		UserID:             record.UserID,
+		APIKeyID:           record.APIKeyID,
+		AccountID:          record.AccountID,
+		RequestID:          record.CallHash,
+		Model:              record.Model,
+		RequestedModel:     record.Model,
+		GroupID:            liveOptionalID(record.GroupID),
+		SubscriptionID:     liveOptionalID(record.SubscriptionID),
+		RateMultiplier:     1,
+		BillingType:        billingType,
+		RequestType:        RequestTypeLive,
+		DurationMs:         &duration,
+		UserAgent:          &userAgent,
+		IPAddress:          &ipAddress,
+		InboundEndpoint:    &inboundEndpoint,
+		UpstreamEndpoint:   &upstreamEndpoint,
+		CreatedAt:          record.CreatedAt,
 	}, "service.openai_live")
+}
+
+// Resume existing Live work at its creation clock, never its controller/dial time.
+func liveRequestStartContext(ctx context.Context, record *LiveCallRecord) context.Context {
+	start := record.RequestStartedAt
+	if start.IsZero() {
+		start = record.CreatedAt
+	} // legacy records have no ingress clock
+	return accountrequest.WithStartedAt(ctx, start)
 }

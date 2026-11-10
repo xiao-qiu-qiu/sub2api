@@ -31,6 +31,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -1761,11 +1762,15 @@ func beginAccountHTTPRequest(req *http.Request, accountID int64) (*http.Request,
 	if req == nil {
 		return req, func(resp *http.Response, err error) (*http.Response, error) { return resp, err }
 	}
-	ctx, release := accountrequest.Default.Begin(req.Context(), accountID)
+	requestCtx := req.Context()
+	if start, ok := requestCtx.Value(ctxkey.RequestStartTime).(time.Time); ok && !start.IsZero() && accountrequest.StartedAt(requestCtx).IsZero() {
+		requestCtx = accountrequest.WithStartedAt(requestCtx, start)
+	}
+	ctx, release := accountrequest.Default.Begin(requestCtx, accountID)
 	return req.WithContext(ctx), func(resp *http.Response, err error) (*http.Response, error) {
 		if err != nil || resp == nil || resp.Body == nil {
-			degraded := accountrequest.QualityDegraded(ctx)
 			release()
+			degraded := accountrequest.QualityDegraded(ctx)
 			if degraded {
 				return resp, accountrequest.ErrQualityDegraded
 			}

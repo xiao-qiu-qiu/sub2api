@@ -175,17 +175,22 @@ func TestLiveQualityInterruptDuringRetryOnlyReconnectsToClose(t *testing.T) {
 	require.EqualValues(t, 2, dialer.calls.Load(), "only the failed attempt and a close-only connection are permitted")
 }
 
-func TestLiveQualityMovedAccountCannotResumeExistingCall(t *testing.T) {
+func TestLiveQualityMovedAccountCanResumeOlderCall(t *testing.T) {
 	svc, record, dialer, cache, usage := liveQualityFixture(t, 9961954)
 	repo, ok := svc.accountRepo.(*liveTestAccountRepo)
 	require.True(t, ok)
 	repo.account.GroupIDs = []int64{99}
-	_, err := svc.dialLiveSideband(t.Context(), record)
-	require.ErrorIs(t, err, accountrequest.ErrQualityDegraded)
-	require.Zero(t, dialer.calls.Load(), "must reject stale call admission before dialing")
-	svc.observeLiveCall(record)
-	requireLiveQualityClosed(t, svc, record, dialer, cache, usage)
-	require.EqualValues(t, 1, dialer.calls.Load(), "moved account may only dial to close the existing session")
+	record.RequestStartedAt = time.Now().Add(-2 * time.Minute)
+	ctx, finish := accountrequest.Default.Begin(liveRequestStartContext(t.Context(), record), record.AccountID)
+	defer finish()
+	require.True(t, accountrequest.StartedAt(ctx).Equal(record.RequestStartedAt))
+	require.Zero(t, accountrequest.Default.CancelWindow(record.AccountID, time.Now().Add(-time.Minute), time.Now()))
+	conn, err := svc.dialLiveSideband(ctx, record)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.EqualValues(t, 1, dialer.calls.Load(), "moving groups must not prevent old calls from reconnecting")
+	require.Empty(t, usage.logs)
+	require.Zero(t, cache.releases)
 }
 
 func TestLiveQualityObserverHandoffKeepsOriginalCancellation(t *testing.T) {

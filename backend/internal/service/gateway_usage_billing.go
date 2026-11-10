@@ -821,6 +821,14 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	user := input.User
 	account := input.Account
 	subscription := input.Subscription
+	if result.QualityInterrupted && result.Usage.InputTokens == 0 && result.Usage.OutputTokens == 0 && result.Usage.CacheCreationInputTokens == 0 && result.Usage.CacheReadInputTokens == 0 && result.Usage.ImageOutputTokens == 0 && result.ImageCount == 0 && result.SearchCount == 0 && (result.AudioUsage == nil || result.AudioUsage.DurationOrUnits <= 0) && result.CacheStorageTokenHours == 0 {
+		result.RequestID = qualityInterruptionRequestID(result.RequestID)
+		return recordQualityInterruptedUsage(ctx, s.usageLogRepo, &OpenAIRecordUsageInput{
+			Result: &OpenAIForwardResult{RequestStartedAt: result.RequestStartedAt, QualityInterrupted: true, Model: result.Model, UpstreamModel: result.UpstreamModel, RequestID: result.RequestID, UpstreamHeaders: result.UpstreamHeaders, Stream: result.Stream, Duration: result.Duration, ReasoningEffort: result.ReasoningEffort, RequestedReasoningEffort: result.RequestedReasoningEffort},
+			APIKey: apiKey, User: user, Account: account, Subscription: subscription,
+			InboundEndpoint: input.InboundEndpoint, UpstreamEndpoint: input.UpstreamEndpoint, UserAgent: input.UserAgent, IPAddress: input.IPAddress, SessionID: input.SessionID, ChannelUsageFields: input.ChannelUsageFields,
+		})
+	}
 	ApplyForwardImageBillingResolution(result)
 	logServiceTierBillingDowngrade("service.gateway", account, result.RequestID, ApplyForwardServiceTierBillingResolution(result))
 
@@ -1433,6 +1441,8 @@ func (s *GatewayService) buildRecordUsageLog(
 		)
 	}
 	usageLog := &UsageLog{
+		RequestStartedAt:         usageRequestStartedAt(result.RequestStartedAt, ctx),
+		QualityInterrupted:       result.QualityInterrupted,
 		UserID:                   user.ID,
 		APIKeyID:                 apiKey.ID,
 		AccountID:                account.ID,

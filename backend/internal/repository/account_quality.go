@@ -97,7 +97,7 @@ func (r *scheduledTestPlanRepository) ApplyQualityOutcome(ctx context.Context, p
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	interruptQualityRequests(ctx, plan, outcome, action, time.Now())
+	interruptQualityRequests(ctx, plan, outcome, action)
 	syncQualityMembershipAfterAction(ctx, r.db, plan, action)
 	return action, nil
 }
@@ -112,6 +112,7 @@ func qualityActionRollsBack(action string) bool {
 
 // Caller commits only complete actions; rejected partial transitions roll back.
 func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, until time.Time, outcome string, commit *bool) (string, error) {
+	plan.QualityRequestWindowStart, plan.QualityRequestWindowEnd = nil, nil
 	action, err := applyQualityOutcomeCoreTx(ctx, tx, plan, until, outcome, commit)
 	if err == nil && plan.PelicanConfig != nil && plan.PelicanConfig.Quality.RecoveryProbeActive() {
 		if action == "restore_conflict" {
@@ -127,6 +128,9 @@ func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.Schedu
 		if *commit {
 			err = scheduleQualityRecoveryProbe(ctx, tx, plan, time.Now())
 		}
+	}
+	if err == nil && *commit && !qualityActionRollsBack(action) {
+		err = persistQualityRequestWindow(ctx, tx, plan, outcome, action)
 	}
 	return action, err
 }

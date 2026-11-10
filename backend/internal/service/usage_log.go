@@ -102,6 +102,14 @@ func ApplyLegacyRequestFields(requestType RequestType, fallbackStream bool, fall
 	}
 }
 
+// QualityWindowEvidence identifies the recorded account quality window containing
+// the real request start. It is loaded at read time, including for delayed logs.
+type QualityWindowEvidence struct {
+	StartAt     time.Time
+	EndAt       time.Time
+	Interrupted bool
+}
+
 type UsageLog struct {
 	ContentTiming *requesttiming.ContentObservation
 	ID            int64
@@ -214,7 +222,12 @@ type UsageLog struct {
 	VideoResolution      *string
 	VideoDurationSeconds *int
 
-	CreatedAt time.Time
+	// RequestStartedAt is the observed request start; unknown historical starts
+	// remain nil and must never be inferred from CreatedAt or DurationMs.
+	RequestStartedAt   *time.Time
+	QualityInterrupted bool
+	QualityWindow      *QualityWindowEvidence
+	CreatedAt          time.Time
 
 	User         *User
 	APIKey       *APIKey

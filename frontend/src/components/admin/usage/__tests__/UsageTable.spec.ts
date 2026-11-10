@@ -110,6 +110,10 @@ const messages: Record<string, string> = {
   'usage.stream': 'Stream',
   'usage.sync': 'Sync',
   'usage.nativeCompactionV2': 'Compaction',
+  'usage.qualityWindow': 'Quality window',
+  'usage.qualityInterrupted': 'Quality interrupted',
+  'usage.qualityWindowHint': 'Flagged for observation; not interrupted.',
+  'usage.qualityInterruptedHint': 'Interrupted by the quality action.',
   'admin.usage.billingModeToken': 'Token',
   'admin.usage.billingModePerRequest': 'Per request',
   'admin.usage.billingModeImage': 'Image',
@@ -185,6 +189,26 @@ const baseImageRow = {
 }
 
 describe('admin UsageTable tooltip', () => {
+  it('distinguishes completed window requests from actual interruptions without marking historical rows', async () => {
+    const bounds = { start_at: '2026-01-02T03:04:00Z', end_at: '2026-01-02T03:05:00Z' }
+    const wrapper = mount(UsageTable, {
+      props: { columns: [], data: [
+        { ...baseImageRow, request_id: 'completed', quality_window: { ...bounds, interrupted: false } },
+        { ...baseImageRow, request_id: 'interrupted', quality_window: { ...bounds, interrupted: true } },
+        { ...baseImageRow, request_id: 'old' },
+      ] },
+      global: { stubs: { DataTable: { props: ['data'], template: '<div><div v-for="row in data" :key="row.request_id"><slot name="cell-stream" :row="row" /></div></div>' }, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    const badges = wrapper.findAll('[data-testid="quality-window-badge"]')
+    expect(badges.map(badge => badge.text())).toEqual(['Quality window', 'Quality interrupted'])
+    expect(badges[0].classes()).toContain('bg-amber-50')
+    expect(badges[1].classes()).toContain('bg-rose-100')
+    expect(badges[0].attributes('title')).toContain('→')
+    expect(badges[1].attributes('title')).toContain('Interrupted by the quality action.')
+    await wrapper.setProps({ cacheRateAudience: 'user' })
+    expect(wrapper.find('[data-testid="quality-window-badge"]').exists()).toBe(false)
+  })
+
   it('shows output TPS in the latency cell using total duration', () => {
     const row = { ...baseImageRow, image_count: 0, billing_mode: 'token', output_tokens: 1000, duration_ms: 20_000, first_token_ms: 10_000 }
     const wrapper = mount(UsageTable, {

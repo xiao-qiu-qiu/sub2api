@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/accountrequest"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -180,6 +181,7 @@ func (h *OpenAIGatewayHandler) serveGrokVoiceWebSocket(c *gin.Context, ws grokVo
 		cancelProbe()
 		if openErr != nil {
 			if errors.Is(openErr, accountrequest.ErrQualityDegraded) {
+				h.recordInterruptedOpenAIUsage(c, apiKey, account, subscription, &service.OpenAIForwardResult{Model: ws.inflight.Model, QualityInterrupted: true, UsageUnavailable: true})
 				release()
 				h.errorResponse(c, http.StatusServiceUnavailable, "account_quality_degraded", "Account quality degraded; please retry")
 				return
@@ -226,6 +228,17 @@ func (h *OpenAIGatewayHandler) serveGrokVoiceWebSocket(c *gin.Context, ws grokVo
 	defer func() { _ = conn.CloseNow() }()
 
 	result, proxyErr := ws.proxy(c.Request.Context(), conn, upstream)
+	if errors.Is(proxyErr, accountrequest.ErrQualityDegraded) {
+		if result == nil {
+			result = &service.OpenAIForwardResult{Model: ws.inflight.Model, UsageUnavailable: true}
+		}
+		result.QualityInterrupted = true
+		result.ObservedUsageOnError = result.AudioUsage != nil
+	}
+	if result != nil {
+		result.RequestStartedAt, _ = c.Request.Context().Value(ctxkey.RequestStartTime).(time.Time)
+	}
+
 	if proxyErr != nil {
 		reqLog.Info("grok_"+ws.name+".proxy_failed", zap.Error(proxyErr))
 		if errors.Is(proxyErr, accountrequest.ErrQualityDegraded) {
@@ -396,6 +409,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			defer release()
 			return h.gatewayService.ForwardGrokVoice(c.Request.Context(), c, account, endpoint, body, contentType)
 		}()
+		if forwardErr != nil {
+			h.recordInterruptedOpenAIUsage(c, apiKey, account, subscription, result)
+		}
 		if forwardErr == nil {
 			h.recordGrokVoiceUsage(c, apiKey, account, subscription, endpoint, body, result)
 			return
@@ -432,11 +448,11 @@ func (h *OpenAIGatewayHandler) recordGrokVoiceUsage(
 	if h == nil || c == nil || apiKey == nil || account == nil || result == nil {
 		return
 	}
-	if result.AudioUsage == nil {
+	if result.AudioUsage == nil && !result.QualityInterrupted {
 		return
 	}
 	// Ensure forced durable request ids even if callers forget (realtime/tts/stt money path).
-	if mode := strings.TrimSpace(result.AudioUsage.Mode); mode == "realtime" {
+	if result.AudioUsage != nil && strings.TrimSpace(result.AudioUsage.Mode) == "realtime" {
 		result.RequestID = service.StableGrokRealtimeBillingRequestID(result.RequestID)
 	} else {
 		result.RequestID = service.StableGrokAudioBillingRequestID(result.RequestID)

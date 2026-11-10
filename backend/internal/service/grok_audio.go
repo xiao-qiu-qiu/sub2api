@@ -36,7 +36,13 @@ var supportedGrokVoiceHTTPEndpoints = map[string]struct{}{
 // the custom-voices CRUD/audio subresources).
 // The response is intentionally passed through because TTS returns audio bytes
 // while STT returns JSON and xAI may add format-specific headers.
-func (s *OpenAIGatewayService) ForwardGrokVoice(ctx context.Context, c *gin.Context, account *Account, endpoint string, body []byte, contentType string) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) ForwardGrokVoice(ctx context.Context, c *gin.Context, account *Account, endpoint string, body []byte, contentType string) (result *OpenAIForwardResult, resultErr error) {
+	requestMetadata := openAIAccountRequestMetadata(body)
+	ctx, finishAccount := beginAccountGatewayRequest(ctx, account)
+	defer func() {
+		finishAccount()
+		finishAccountOpenAIRequest(ctx, &result, &resultErr, requestMetadata)
+	}()
 	if s == nil || account == nil {
 		return nil, fmt.Errorf("grok voice service/account is required")
 	}

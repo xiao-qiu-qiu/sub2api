@@ -41,7 +41,9 @@ func TestQualityInterruptionOnlyForNewFailedAccountQuarantine(t *testing.T) {
 			// A completed probe's cancellation cannot prevent the stop signal.
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			interruptQualityRequests(ctx, plan, tc.outcome, tc.action, time.Now())
+			start, end := time.Now().Add(-time.Minute), time.Now()
+			plan.QualityRequestWindowStart, plan.QualityRequestWindowEnd = &start, &end
+			interruptQualityRequests(ctx, plan, tc.outcome, tc.action)
 			if tc.interrupted {
 				require.ErrorIs(t, context.Cause(request), accountrequest.ErrQualityDegraded)
 			} else {

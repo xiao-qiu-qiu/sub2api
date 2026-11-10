@@ -60,22 +60,23 @@ type LiveCallIdentity struct {
 }
 
 type LiveCallRecord struct {
-	CallID          string
-	CallHash        string
-	AccountID       int64
-	APIKeyID        int64
-	UserID          int64
-	GroupID         int64
-	SubscriptionID  int64
-	LeaseID         string
-	Model           string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	Controller      string
-	ControllerOwner string
-	UserAgent       string
-	IPAddress       string
-	InboundEndpoint string
+	RequestStartedAt time.Time
+	CallID           string
+	CallHash         string
+	AccountID        int64
+	APIKeyID         int64
+	UserID           int64
+	GroupID          int64
+	SubscriptionID   int64
+	LeaseID          string
+	Model            string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	Controller       string
+	ControllerOwner  string
+	UserAgent        string
+	IPAddress        string
+	InboundEndpoint  string
 	// AttestationCiphertext 仅用于让同一会话的 Sideband 复用创建时的证明。
 	AttestationCiphertext string
 }

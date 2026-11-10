@@ -201,7 +201,11 @@ type OpenAIUsage struct {
 
 // OpenAIForwardResult represents the result of forwarding
 type OpenAIForwardResult struct {
-	AuthConnectionID string
+	// RequestStartedAt is the HTTP ingress or response.create frame arrival, including queue waits.
+	RequestStartedAt time.Time
+	// QualityInterrupted means this request was actually canceled by account quality control.
+	QualityInterrupted bool
+	AuthConnectionID   string
 	// RegionalMetered prevents the legacy asynchronous path from double charging.
 	RegionalMetered bool
 	RequestID       string

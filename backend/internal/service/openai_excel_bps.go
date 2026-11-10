@@ -220,9 +220,12 @@ func newExcelBPSRequestTo(ctx context.Context, targetURL, accept string, body []
 // BPS deliberately bypasses Codex ticket/cookie injection and OAuth plugins:
 // only the selected account's bearer and ChatGPT account ID belong on this host.
 func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time) (forwardResult *OpenAIForwardResult, forwardErr error) {
+	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
-	defer finishAccountRequest()
-	defer func() { finishAccountOpenAIRequest(ctx, forwardResult, &forwardErr) }()
+	defer func() {
+		finishAccountRequest()
+		finishAccountOpenAIRequest(ctx, &forwardResult, &forwardErr, requestMetadata)
+	}()
 	var compactUsage OpenAIUsage
 	var compactID string
 	originalImagePolicyModel := gjson.GetBytes(body, "model").String()

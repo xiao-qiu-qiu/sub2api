@@ -221,6 +221,9 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 		}
 		service.SetOpsLatencyMs(c, service.OpsResponseLatencyMsKey, responseLatencyMs)
 
+		if result != nil && result.QualityInterrupted {
+			h.recordInterruptedOpenAIUsage(c, apiKey, account, subscription, result)
+		}
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {

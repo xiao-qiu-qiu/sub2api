@@ -253,6 +253,7 @@ func (r *scheduledTestPlanRepository) finalizeQualityBatchRun(ctx context.Contex
 	// rules carry a persistent episode that can safely outlive collection.
 	run.Apply = run.Apply && (run.Trigger != "upstream_5xx" || run.Plan.PelicanConfig.Quality.Action == service.QualityActionRemoveModel)
 	outcome := service.EvaluateQualityBatch(run, peers)
+	service.SetQualityProbeFinishedAt(run.Plan, run.Results)
 	if _, err = tx.ExecContext(ctx, `SAVEPOINT quality_batch_action`); err != nil {
 		return err
 	}
@@ -312,7 +313,7 @@ func (r *scheduledTestPlanRepository) finalizeQualityBatchRun(ctx context.Contex
 		return err
 	}
 	if commitAction {
-		interruptQualityRequests(ctx, run.Plan, outcome, action, time.Now())
+		interruptQualityRequests(ctx, run.Plan, outcome, action)
 	}
 	syncQualityMembershipAfterAction(ctx, r.db, run.Plan, action)
 	return nil

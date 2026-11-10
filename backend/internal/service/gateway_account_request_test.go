@@ -144,6 +144,10 @@ func TestBPSImagesClientDisconnectAndQualityInterruptLifecycle(t *testing.T) {
 			case got := <-finished:
 				if interrupt {
 					require.ErrorIs(t, got.err, accountrequest.ErrQualityDegraded)
+					require.NotNil(t, got.result)
+					require.Equal(t, parsed.Model, got.result.Model)
+					require.Equal(t, parsed.Stream, got.result.Stream)
+					require.True(t, got.result.QualityInterrupted)
 				} else {
 					require.NoError(t, got.err)
 					require.Equal(t, 1, got.result.ImageCount)

@@ -62,9 +62,12 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (result *OpenAIForwardResult, resultErr error) {
+	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
-	defer finishAccountRequest()
-	defer func() { finishAccountOpenAIRequest(ctx, result, &resultErr) }()
+	defer func() {
+		finishAccountRequest()
+		finishAccountOpenAIRequest(ctx, &result, &resultErr, requestMetadata)
+	}()
 	admittedCtx, admissionErr := s.beginPriorityLatencyTurn(ctx, c, account, gjson.GetBytes(body, "model").String())
 	if admissionErr != nil {
 		return nil, admissionErr

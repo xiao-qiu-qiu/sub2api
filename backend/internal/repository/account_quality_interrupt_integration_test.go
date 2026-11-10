@@ -152,6 +152,9 @@ func TestQualityInterruptRolledBackMoveKeepsRequestsActive(t *testing.T) {
 			before := f.snapshot()
 			_, err = f.plans.ApplyQualityOutcome(ctx, f.plan, f.until, "failed")
 			require.ErrorContains(t, err, "synthetic quality interruption rollback")
+			var windows int
+			require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_quality_request_windows WHERE plan_id=$1`, f.plan.ID).Scan(&windows))
+			require.Zero(t, windows, "rolled-back quarantine must not label unrelated usage")
 			require.JSONEq(t, before, f.snapshot(), "failed writes and failed commits must roll back the entire quarantine")
 			for _, request := range requests {
 				requireQualityRequestActive(t, request)

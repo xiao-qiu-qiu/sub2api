@@ -14,6 +14,21 @@ const QualityActionRemoveModel = "remove_models"
 const QualityActionIsolateModels = "isolate_models"
 const QualityModelIsolationKey = "quality_model_isolation"
 
+// SetQualityProbeFinishedAt freezes the latest actual sample completion. Shared
+// comparison batches may be finalized later, but never move this boundary.
+func SetQualityProbeFinishedAt(plan *ScheduledTestPlan, results []*ScheduledTestResult) {
+	plan.QualityProbeFinishedAt = nil
+	for _, result := range results {
+		if result == nil || result.FinishedAt.IsZero() {
+			continue
+		}
+		if plan.QualityProbeFinishedAt == nil || result.FinishedAt.After(*plan.QualityProbeFinishedAt) {
+			finished := result.FinishedAt
+			plan.QualityProbeFinishedAt = &finished
+		}
+	}
+}
+
 // Quality cooldown deadlines schedule the next check, not permission to route
 // traffic. Recognize existing records too so upgrades do not reopen failed models.
 func IsQualityModelCooldown(entry any) bool {

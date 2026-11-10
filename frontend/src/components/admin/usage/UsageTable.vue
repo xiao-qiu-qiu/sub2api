@@ -144,6 +144,17 @@
             >
               {{ t('usage.nativeCompactionV2') }}
             </span>
+            <span
+              v-if="cacheRateAudience !== 'user' && row.quality_window"
+              data-testid="quality-window-badge"
+              class="inline-flex cursor-help items-center rounded px-2 py-0.5 text-xs font-medium ring-1 ring-inset"
+              :class="row.quality_window.interrupted
+                ? 'bg-rose-100 text-rose-800 ring-rose-200 dark:bg-rose-950 dark:text-rose-200 dark:ring-rose-800'
+                : 'bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-950 dark:text-amber-200 dark:ring-amber-800'"
+              :title="qualityWindowTitle(row)"
+            >
+              {{ t(row.quality_window.interrupted ? 'usage.qualityInterrupted' : 'usage.qualityWindow') }}
+            </span>
           </div>
         </template>
 
@@ -664,6 +675,16 @@ const userVisibleResponseModel = (row: AdminUsageLog): string => (
 )
 
 const showIpGeoToolbar = computed(() => props.columns.some((col) => col.key === 'ip_address'))
+
+const qualityWindowTitle = (row: AdminUsageLog): string => {
+  const window = row.quality_window
+  if (!window) return ''
+  return [
+    ...(row.request_started_at ? [`${t('usage.qualityRequestStarted')}: ${formatDateTime(row.request_started_at)}`] : []),
+    `${formatDateTime(window.start_at)} → ${formatDateTime(window.end_at)}`,
+    t(window.interrupted ? 'usage.qualityInterruptedHint' : 'usage.qualityWindowHint'),
+  ].join('\n')
+}
 
 const hasReasoningEffortMapping = (row: AdminUsageLog): boolean => {
   const requested = row.reasoning_effort?.trim() || ''

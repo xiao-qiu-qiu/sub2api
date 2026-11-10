@@ -594,9 +594,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	firstClientMessage []byte,
 	hooks *OpenAIWSIngressHooks,
 ) (returnErr error) {
-	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
-	defer finishAccountRequest()
+	if account == nil {
+		return errors.New("account is nil")
+	}
+	if hooks == nil {
+		hooks = &OpenAIWSIngressHooks{}
+	}
+	if hooks.InitialRequestModel == "" {
+		copyHooks := *hooks
+		copyHooks.InitialRequestModel = gjson.GetBytes(firstClientMessage, "model").String()
+		hooks = &copyHooks
+	}
+	ctx, hooks, accountTurns := newAccountWSTurns(ctx, account, hooks)
 	defer func() {
+		accountTurns.close(hooks, returnErr)
 		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
 			returnErr = NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account quality degraded; please reconnect", qualityErr)
 		}
@@ -1890,7 +1901,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		turnCtx, startDrain, finishDrain := openAIWSDrainContext(ctx)
 		defer finishDrain()
 		ctx = turnCtx
-		defer func() { finishAccountOpenAIRequest(ctx, forwardResult, &forwardErr) }()
+		defer func() {
+			finishAccountOpenAIRequest(ctx, &forwardResult, &forwardErr, accountRequestMetadata{model: originalModel, stream: true})
+		}()
 		wroteDownstream := false
 		oauthStager := openAIWSOAuthStager{enabled: s.oauthRecovery != nil && oauth401CanRecover(account, nil)}
 		if err := s.acquireOpenAIRPMForSend(ctx, latest); err != nil {

@@ -316,6 +316,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		if result != nil && result.FirstTokenMs != nil {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
+		if result != nil && result.QualityInterrupted && result.ImageCount <= 0 {
+			h.recordInterruptedOpenAIUsage(c, apiKey, account, subscription, result)
+		}
 		if err != nil {
 			var modelErr *service.OpenAIImagesModelError
 			if errors.As(err, &modelErr) {

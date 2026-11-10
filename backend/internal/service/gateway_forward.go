@@ -90,10 +90,23 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // Forward 转发请求到Claude API
 func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) (result *ForwardResult, err error) {
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
-	defer finishAccountRequest()
 	defer func() {
-		if qualityErr := accountRequestQualityError(ctx); qualityErr != nil {
+		finishAccountRequest()
+		if qualityErr := accountRequestQualityError(ctx, err); qualityErr != nil {
 			err = qualityErr
+			if result == nil {
+				result = &ForwardResult{UsageUnavailable: true}
+				if parsed != nil {
+					result.Model = parsed.Model
+					result.Stream = parsed.Stream
+				}
+			}
+			result.QualityInterrupted = true
+			result.ClientDisconnect = false
+			result.ObservedUsageOnError = !result.UsageUnavailable
+		}
+		if result != nil {
+			result.RequestStartedAt = gatewayRequestStartedAt(ctx)
 		}
 	}()
 	startTime := time.Now()

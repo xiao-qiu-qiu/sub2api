@@ -2093,6 +2093,8 @@ export interface UsageLogAccountSummary {
 }
 
 export interface AdminUsageLog extends UsageLog {
+  quality_window?: { start_at: string; end_at: string; interrupted: boolean } | null
+  request_started_at?: string | null
   upstream_model?: string | null
   upstream_reasoning_effort?: string | null
   upstream_response_model?: string | null

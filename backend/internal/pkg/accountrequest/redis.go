@@ -15,11 +15,19 @@ import (
 
 const interruptChannel = "accountrequest:quality:interrupt:v1"
 
+// Legacy subscribers ignore unknown JSON fields, so publishing a window on v1
+// would widen it to an unbounded cutoff. Window events exclusively use v2;
+// every participating process must support v2 for cross-process windows.
+const interruptWindowChannel = "accountrequest:quality:interrupt:v2"
+
 const redisTimeout = 3 * time.Second
 
 type interruptEvent struct {
 	AccountID int64     `json:"account_id"`
 	Cutoff    time.Time `json:"cutoff"`
+	// A pointer distinguishes legacy events (no lower bound) from a window
+	// whose explicit lower bound is the zero time.
+	After *time.Time `json:"after,omitempty"`
 }
 
 type subscription struct {
@@ -29,8 +37,9 @@ type subscription struct {
 	done   chan struct{}
 }
 
-// Start confirms the Redis subscription before returning. The returned stop is
-// idempotent, closes the subscription and joins its worker; canceling ctx also
+// Start confirms both legacy v1 and window v2 subscriptions before returning.
+// The returned stop is idempotent, closes the subscription and joins its worker;
+// canceling ctx also
 // stops it. The caller retains ownership of rdb. A nil rdb enables local-only
 // operation. Only one subscription may run per registry; Start may be called
 // again after stop. Receive errors are logged and retried with exponential
@@ -60,7 +69,7 @@ func (r *Registry) Start(ctx context.Context, rdb redis.UniversalClient) (func()
 	r.transport = run
 	r.transportMu.Unlock()
 
-	run.pubsub = rdb.Subscribe(runCtx, interruptChannel)
+	run.pubsub = rdb.Subscribe(runCtx, interruptChannel, interruptWindowChannel)
 	closePubSub := sync.OnceFunc(func() { _ = run.pubsub.Close() })
 	stopClose := context.AfterFunc(runCtx, closePubSub)
 	finish := func() {
@@ -74,12 +83,20 @@ func (r *Registry) Start(ctx context.Context, rdb redis.UniversalClient) (func()
 		r.transportMu.Unlock()
 		close(run.done)
 	}
-	message, err := run.pubsub.ReceiveTimeout(runCtx, redisTimeout)
-	if err == nil {
-		ready, ok := message.(*redis.Subscription)
-		if !ok || ready.Kind != "subscribe" || ready.Channel != interruptChannel {
-			err = errors.New("unexpected Redis subscription acknowledgement")
+	pending := map[string]bool{interruptChannel: true, interruptWindowChannel: true}
+	var err error
+	for len(pending) > 0 {
+		var message any
+		message, err = run.pubsub.ReceiveTimeout(runCtx, redisTimeout)
+		if err != nil {
+			break
 		}
+		ready, ok := message.(*redis.Subscription)
+		if !ok || ready.Kind != "subscribe" || !pending[ready.Channel] {
+			err = errors.New("unexpected Redis subscription acknowledgement")
+			break
+		}
+		delete(pending, ready.Channel)
 	}
 	if err == nil {
 		err = runCtx.Err()
@@ -113,7 +130,7 @@ func (r *Registry) Start(ctx context.Context, rdb redis.UniversalClient) (func()
 			if runCtx.Err() != nil {
 				return
 			}
-			if err := r.handleEvent(message.Payload); err != nil {
+			if err := r.handleEvent(message.Channel, message.Payload); err != nil {
 				slog.Warn("accountrequest ignored invalid interrupt event", "error", err)
 			}
 		}
@@ -135,25 +152,48 @@ func (r *Registry) InterruptAt(ctx context.Context, accountID int64, cutoff time
 		return 0, nil
 	}
 	count := r.Cancel(accountID, cutoff)
+	return r.publishInterrupt(ctx, interruptEvent{AccountID: accountID, Cutoff: cutoff.Round(0)}, count)
+}
+
+// InterruptWindow cancels registrations created in (after, before] locally
+// before Redis I/O and broadcasts both original bounds. A delayed, duplicated,
+// or reordered broadcast cannot include requests outside that window. Windows
+// publish only on v2; legacy processes will not receive them and must be upgraded
+// to participate in cross-process window interruption.
+// Publish errors preserve local cancellation and return its count.
+func (r *Registry) InterruptWindow(ctx context.Context, accountID int64, after, before time.Time) (int, error) {
+	after, before = after.Round(0), before.Round(0)
+	if accountID <= 0 || before.IsZero() || !before.After(after) {
+		return 0, nil
+	}
+	count := r.CancelWindow(accountID, after, before)
+	return r.publishInterrupt(ctx, interruptEvent{AccountID: accountID, Cutoff: before, After: &after}, count)
+}
+
+func (r *Registry) publishInterrupt(ctx context.Context, event interruptEvent, count int) (int, error) {
 	r.transportMu.Lock()
 	run := r.transport
 	r.transportMu.Unlock()
 	if run == nil {
 		return count, nil
 	}
-	payload, err := json.Marshal(interruptEvent{AccountID: accountID, Cutoff: cutoff.Round(0)})
+	payload, err := json.Marshal(event)
 	if err != nil {
 		return count, fmt.Errorf("accountrequest: encode interrupt: %w", err)
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, redisTimeout)
 	defer cancel()
-	if err := run.rdb.Publish(publishCtx, interruptChannel, payload).Err(); err != nil {
+	channel := interruptChannel
+	if event.After != nil {
+		channel = interruptWindowChannel
+	}
+	if err := run.rdb.Publish(publishCtx, channel, payload).Err(); err != nil {
 		return count, fmt.Errorf("accountrequest: publish interrupt: %w", err)
 	}
 	return count, nil
 }
 
-func (r *Registry) handleEvent(payload string) error {
+func (r *Registry) handleEvent(channel, payload string) error {
 	var event interruptEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		return err
@@ -161,6 +201,22 @@ func (r *Registry) handleEvent(payload string) error {
 	if event.AccountID <= 0 || event.Cutoff.IsZero() {
 		return errors.New("missing account ID or cutoff")
 	}
-	r.Cancel(event.AccountID, event.Cutoff)
+	switch channel {
+	case interruptWindowChannel:
+		if event.After == nil {
+			return errors.New("missing interrupt window lower bound")
+		}
+		if !event.Cutoff.After(*event.After) {
+			return errors.New("empty or reversed interrupt window")
+		}
+		r.CancelWindow(event.AccountID, *event.After, event.Cutoff)
+	case interruptChannel:
+		if event.After != nil {
+			return errors.New("window events require the v2 channel")
+		}
+		r.Cancel(event.AccountID, event.Cutoff)
+	default:
+		return errors.New("unknown interrupt channel")
+	}
 	return nil
 }

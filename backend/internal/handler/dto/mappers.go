@@ -812,8 +812,18 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 	}
 	usageLog := usageLogFromServiceUser(l)
 	usageLog.UpstreamEndpoint = l.UpstreamEndpoint
+	var qualityWindow *UsageQualityWindow
+	if l.QualityWindow != nil {
+		qualityWindow = &UsageQualityWindow{
+			StartAt:     l.QualityWindow.StartAt,
+			EndAt:       l.QualityWindow.EndAt,
+			Interrupted: l.QualityWindow.Interrupted,
+		}
+	}
 	return &AdminUsageLog{
 		UsageLog:                usageLog,
+		QualityWindow:           qualityWindow,
+		RequestStartedAt:        l.RequestStartedAt,
 		UpstreamModel:           l.UpstreamModel,
 		UpstreamReasoningEffort: adminUpstreamReasoningEffort(l),
 		UpstreamResponseModel:   l.UpstreamResponseModel,

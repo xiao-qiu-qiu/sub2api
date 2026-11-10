@@ -624,7 +624,13 @@ type AudioUsage struct {
 }
 
 type ForwardResult struct {
-	RequestID string
+	// RequestStartedAt is the HTTP ingress or response.create frame arrival, including queue waits.
+	RequestStartedAt time.Time
+	// QualityInterrupted means this request was actually canceled by account quality control.
+	QualityInterrupted   bool
+	UsageUnavailable     bool
+	ObservedUsageOnError bool
+	RequestID            string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           ClaudeUsage

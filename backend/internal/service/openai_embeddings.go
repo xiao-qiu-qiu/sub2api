@@ -24,9 +24,12 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 	body []byte,
 	defaultMappedModel string,
 ) (result *OpenAIForwardResult, resultErr error) {
+	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
-	defer finishAccountRequest()
-	defer func() { finishAccountOpenAIRequest(ctx, result, &resultErr) }()
+	defer func() {
+		finishAccountRequest()
+		finishAccountOpenAIRequest(ctx, &result, &resultErr, requestMetadata)
+	}()
 	managed := account.HasManagedOpenAIConnections()
 	if account != nil && account.Platform == PlatformOpenAI && s.excelOAuthReauth != nil {
 		if repo, ok := s.excelOAuthReauth.repo.(OpenAIAuthConnectionRepository); ok {

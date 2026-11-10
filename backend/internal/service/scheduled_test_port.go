@@ -33,6 +33,10 @@ type PelicanTestConfig struct {
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
+	// Runtime evidence only: the probe's completion boundary, never commit time.
+	QualityProbeFinishedAt    *time.Time `json:"-"`
+	QualityRequestWindowStart *time.Time `json:"-"`
+	QualityRequestWindowEnd   *time.Time `json:"-"`
 	// Set by the lease claimant; recovery confirmation must start after its wait.
 	QualityRecoveryProbeStartedAt *time.Time        `json:"-"`
 	QualityBatchEvaluated         bool              `json:"-"`

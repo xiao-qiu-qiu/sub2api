@@ -75,7 +75,7 @@ func TestQualitySharedBatchPostgresFinalizationAndRestart(t *testing.T) {
 				}
 				run := &service.QualityBatchRun{Apply: true, Plan: plan, Until: until, Results: []*service.ScheduledTestResult{result}}
 				runs = append(runs, run)
-				requests = append(requests, beginQualityRequest(t, account))
+				requests = append(requests, beginQualityRequestAt(t, account, sampleStarted))
 				require.NoError(t, repo.CollectQualityBatch(ctx, run))
 				require.NoError(t, repo.CollectQualityBatch(ctx, run), "collection is idempotent")
 				require.NoError(t, repo.FinalizeQualityBatches(ctx), "start window still open")
@@ -102,7 +102,9 @@ func TestQualitySharedBatchPostgresFinalizationAndRestart(t *testing.T) {
 			_, err := integrationDB.ExecContext(ctx, `UPDATE quality_probe_batches SET start_deadline=clock_timestamp()-interval '1 second' WHERE id=$1`, batch.ID)
 			require.NoError(t, err)
 			restarted := NewScheduledTestPlanRepository(integrationDB).(*scheduledTestPlanRepository)
+			afterProbe := beginQualityRequestAt(t, runs[0].Plan.AccountID, runs[0].Results[0].FinishedAt.Add(time.Second))
 			require.NoError(t, restarted.FinalizeQualityBatches(ctx))
+			requireQualityRequestActive(t, afterProbe)
 			if scenario == "passing-peer-finishes-last" {
 				requireQualityRequestInterrupted(t, requests[0])
 			} else {
