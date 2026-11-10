@@ -307,11 +307,19 @@ func TestOpenAIOAuthRecoveryWS_FailedRecoveryBorrowsHealthyBackupForCurrentTurn(
 			} else {
 				require.Equal(t, []int64{1, 2}, ids)
 			}
-			bindings.mu.Lock()
-			for _, owner := range bindings.owners {
-				require.EqualValues(t, 1, owner)
-			}
-			bindings.mu.Unlock()
+			// The completed response belongs to the backup; the session keeps its
+			// original owner. Response ownership is published after delivery.
+			sessionKey := "openai:" + service.DeriveSessionHashFromSeed("ws-recovery-backup")
+			require.Eventually(t, func() bool {
+				// A fresh reader observes the shared publication instead of memoizing
+				// the first turn's response owner while the second turn finishes.
+				responseOwner, err := service.NewOpenAIWSStateStore(bindings).GetResponseAccount(ctx, 3131, "resp_recovered")
+				if err != nil || responseOwner != 2 {
+					return false
+				}
+				sessionOwner, err := bindings.GetSessionAccountID(ctx, 3131, sessionKey)
+				return err == nil && sessionOwner == 1
+			}, time.Second, time.Millisecond, "backup response and original session must retain their distinct owners")
 			require.EqualValues(t, 1, guard.requests.Load())
 			wantUsage := int32(1)
 			if laterTurn {
