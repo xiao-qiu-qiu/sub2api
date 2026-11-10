@@ -226,7 +226,7 @@ func (s *OpenAIGatewayService) requestCodex780Shot(ctx context.Context, account 
 		client, req, err = codexMintHTTPClient(req, proxy, controls.EdgeIP)
 		if err == nil {
 			defer client.CloseIdleConnections()
-			resp, err = client.Do(req)
+			resp, err = client.Do(req) //nolint:gosec // G704: 固定 ChatGPT URL，仅允许已校验的公网 Edge IP；保留 TLS 主机校验且禁止重定向。
 		}
 	} else {
 		resp, err = s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)

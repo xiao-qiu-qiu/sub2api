@@ -54,7 +54,7 @@ func TestRedisInterruptWindowPreservesBothBounds(t *testing.T) {
 		t.Fatalf("Start returned before v2 ready: subscribers=%d", got)
 	}
 	wire := client1.Subscribe(context.Background(), interruptWindowChannel)
-	defer wire.Close()
+	defer func() { _ = wire.Close() }()
 	if _, err := wire.ReceiveTimeout(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestRedisWindowNeverPublishesToLegacySubscriber(t *testing.T) {
 	r := NewRegistry()
 	stop := startRegistry(t, r, context.Background(), client)
 	legacyWire := client.Subscribe(context.Background(), interruptChannel)
-	defer legacyWire.Close()
+	defer func() { _ = legacyWire.Close() }()
 	if _, err := legacyWire.ReceiveTimeout(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}

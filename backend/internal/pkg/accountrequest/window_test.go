@@ -85,7 +85,7 @@ func TestStartedAtPreservesBusinessTimeAndNestedScopes(t *testing.T) {
 	future := time.Now().Add(time.Hour).Round(0)
 	r1.Cancel(1, future) // Legacy clock admission must not rewrite explicit time.
 	plain := WithStartedAt(context.Background(), created)
-	if StartedAt(plain) != created || !StartedAt(nil).IsZero() || !StartedAt(context.Background()).IsZero() {
+	if StartedAt(plain) != created || !StartedAt(nil).IsZero() || !StartedAt(context.Background()).IsZero() { //nolint:staticcheck // SA1012: 验证 StartedAt 对 nil 上下文的兼容契约。
 		t.Fatal("injected or absent creation time is incorrect")
 	}
 	root, finishRoot := r1.Track(plain, 1)

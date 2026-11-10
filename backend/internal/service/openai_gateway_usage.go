@@ -170,7 +170,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if s.regionalMetering != nil {
 		return errors.New("legacy billing disabled for metered request")
 	}
-	if result.UsageUnavailable && !(result.QualityInterrupted && openAIResultHasObservedUnits(result)) {
+	if result.UsageUnavailable && (!result.QualityInterrupted || !openAIResultHasObservedUnits(result)) {
 		return errors.New("upstream usage unavailable; token usage was not recorded and request was not billed")
 	}
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
