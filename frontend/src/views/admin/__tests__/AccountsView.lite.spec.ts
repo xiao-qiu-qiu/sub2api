@@ -198,6 +198,68 @@ describe('admin AccountsView lite account list', () => {
     vi.restoreAllMocks()
   })
 
+  it('keeps the refresh menu in a narrow viewport and repositions it on scroll and resize', async () => {
+    const viewportWidth = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(200)
+    const viewportHeight = vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(400)
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(0)
+    const wrapper = mountView()
+    await flushPromises()
+    const trigger = wrapper.get('[data-testid="account-auto-refresh"] > button')
+    const bounds = vi.spyOn(trigger.element, 'getBoundingClientRect')
+      .mockReturnValue({ top: 40, bottom: 80, right: 60 } as DOMRect)
+    await trigger.trigger('click')
+    const menu = wrapper.get<HTMLElement>('[data-testid="auto-refresh-menu"]')
+    expect(menu.element.style).toMatchObject({ top: '88px', bottom: 'auto', left: '16px', width: '168px', maxHeight: '280px' })
+    expect(menu.findAll('button')).toHaveLength(5)
+
+    viewportWidth.mockReturnValue(393)
+    viewportHeight.mockReturnValue(844)
+    window.dispatchEvent(new Event('resize'))
+    await flushPromises()
+    expect(menu.element.style).toMatchObject({ top: '88px', left: '16px', width: '224px', maxHeight: '590px' })
+
+    bounds.mockReturnValue({ top: 760, bottom: 800, right: 60 } as DOMRect)
+    window.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    expect(menu.element.style).toMatchObject({ top: 'auto', bottom: '92px', maxHeight: '590px' })
+    expect(listAccounts).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('keeps the refresh menu anchored on desktop and preserves toggling, settings and outside dismissal', async () => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1280)
+    vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(900)
+    // The layout viewport can be narrower than innerWidth because of the scrollbar.
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(1200)
+    const wrapper = mountView()
+    await flushPromises()
+    const trigger = wrapper.get('[data-testid="account-auto-refresh"] > button')
+    vi.spyOn(trigger.element, 'getBoundingClientRect')
+      .mockReturnValue({ top: 40, bottom: 80, right: 1195 } as DOMRect)
+    await trigger.trigger('click')
+    const menu = wrapper.get<HTMLElement>('[data-testid="auto-refresh-menu"]')
+    expect(menu.element.style).toMatchObject({ left: '960px', width: '224px' })
+    await menu.findAll('button')[2].trigger('click')
+    expect(JSON.parse(localStorage.getItem('account-auto-refresh')!)).toMatchObject({ interval_seconds: 10 })
+    expect(menu.exists()).toBe(true)
+
+    const toolsTrigger = wrapper.get('button[title="admin.accounts.moreActions"]')
+    await toolsTrigger.trigger('click')
+    expect(wrapper.find('[data-testid="auto-refresh-menu"]').exists()).toBe(false)
+    expect(toolsTrigger.attributes('aria-expanded')).toBe('true')
+    await trigger.trigger('click')
+    expect(toolsTrigger.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('[data-testid="auto-refresh-menu"]').exists()).toBe(true)
+    await trigger.trigger('click')
+    expect(wrapper.find('[data-testid="auto-refresh-menu"]').exists()).toBe(false)
+
+    await trigger.trigger('click')
+    document.body.click()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="auto-refresh-menu"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('refreshes the saved cost after probing even with unchanged snapshot and default sorting', async () => {
     const snapshot = { status: 'ok', data: { effective_rate_multiplier: 0.14 } }
     const row = { ...listRow, type: 'apikey', extra: { cost_multiplier: 0.1, upstream_billing_probe: snapshot } }

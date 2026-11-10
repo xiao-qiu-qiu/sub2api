@@ -278,6 +278,70 @@ describe('account immediate scheduling without confirmation', () => {
     expect(wrapper.findComponent({ name: 'SchedulableTimerControl' }).props('refreshKey')).toBe(0)
   })
 
+  it.each([7, 9])('guards each account until its own request finishes when account %s resolves first', async (firstId) => {
+    const resolvers = new Map<number, (value: { id: number; schedulable: boolean }) => void>()
+    setSchedulable.mockImplementation((id: number) => new Promise(resolve => { resolvers.set(id, resolve) }))
+    listAccounts.mockResolvedValue({
+      items: [
+        { ...baseAccount, id: 7, name: 'first-account' },
+        { ...baseAccount, id: 9, name: 'second-account' }
+      ],
+      total: 2, page: 1, page_size: 20, pages: 1
+    })
+    wrapper = mountView()
+    await flushPromises()
+
+    await schedulingButton(7).trigger('click')
+    await schedulingButton(9).trigger('click')
+    expect(setSchedulable.mock.calls).toEqual([[7, false], [9, false]])
+    for (const id of [7, 9]) {
+      expect(schedulingButton(id).attributes('disabled')).toBeDefined()
+    }
+
+    resolvers.get(firstId)!({ id: firstId, schedulable: false })
+    await flushPromises()
+    const pendingId = firstId === 7 ? 9 : 7
+    expect(schedulingButton(firstId).attributes('disabled')).toBeUndefined()
+    expect(schedulingButton(firstId).attributes('title')).toBe('admin.accounts.schedulableDisabled')
+    expect(schedulingButton(pendingId).attributes('disabled')).toBeDefined()
+    expect(schedulingButton(pendingId).attributes('title')).toBe('admin.accounts.schedulableEnabled')
+    await schedulingButton(pendingId).trigger('click')
+    expect(setSchedulable).toHaveBeenCalledTimes(2)
+
+    resolvers.get(pendingId)!({ id: pendingId, schedulable: false })
+    await flushPromises()
+    for (const id of [7, 9]) {
+      expect(schedulingButton(id).attributes('disabled')).toBeUndefined()
+      expect(schedulingButton(id).attributes('title')).toBe('admin.accounts.schedulableDisabled')
+    }
+    expect(wrapper.findComponent({ name: 'SchedulableTimerControl' }).props('refreshKey')).toBe(2)
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('ignores repeated clicks before Vue disables the switch and allows the next action after completion', async () => {
+    let resolveRequest!: (value: { schedulable: boolean }) => void
+    setSchedulable.mockImplementationOnce(() => new Promise(resolve => { resolveRequest = resolve }))
+      .mockResolvedValueOnce({ schedulable: true })
+    wrapper = mountView()
+    await flushPromises()
+
+    const button = schedulingButton(7).element as HTMLButtonElement
+    button.click()
+    button.click()
+    await flushPromises()
+    expect(setSchedulable).toHaveBeenCalledTimes(1)
+    expect(setSchedulable).toHaveBeenCalledWith(7, false)
+    expect(schedulingButton(7).attributes('disabled')).toBeDefined()
+
+    resolveRequest({ schedulable: false })
+    await flushPromises()
+    expect(schedulingButton(7).attributes('disabled')).toBeUndefined()
+    await schedulingButton(7).trigger('click')
+    await flushPromises()
+    expect(setSchedulable.mock.calls).toEqual([[7, false], [7, true]])
+    expect(schedulingButton(7).attributes('title')).toBe('admin.accounts.schedulableEnabled')
+  })
+
   it.each([true, false])('directly applies batch schedulable=%s to every selected account, including unchanged values', async (schedulable) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     bulkUpdate.mockResolvedValue({ success: 2, failed: 0, success_ids: [7, 11], failed_ids: [] })

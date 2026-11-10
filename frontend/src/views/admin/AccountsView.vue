@@ -24,12 +24,10 @@
               </button>
               <a href="/admin/upstream-channels" class="btn btn-secondary" data-testid="manage-upstream-channels">{{ t('upstreamEntities.manage') }}</a>
               <!-- Auto Refresh Dropdown -->
-              <div class="relative" ref="autoRefreshDropdownRef">
+              <div class="relative" ref="autoRefreshDropdownRef" data-testid="account-auto-refresh">
                 <button
-                  @click="
-                    showAutoRefreshDropdown = !showAutoRefreshDropdown;
-                    showAccountToolsDropdown = false
-                  "
+                  ref="autoRefreshTriggerRef"
+                  @click="toggleAutoRefreshDropdown"
                   class="btn btn-secondary px-2 md:px-3"
                   :title="t('admin.accounts.autoRefresh')"
                 >
@@ -44,7 +42,9 @@
                 </button>
                 <div
                   v-if="showAutoRefreshDropdown"
-                  class="absolute right-0 z-50 mt-2 w-56 origin-top-right rounded-lg border border-gray-200 bg-white shadow-lg dark:border-dark-700 dark:bg-dark-800"
+                  data-testid="auto-refresh-menu"
+                  :style="autoRefreshDropdownStyle"
+                  class="fixed z-50 overflow-y-auto origin-top-right rounded-lg border border-gray-200 bg-white shadow-lg dark:border-dark-700 dark:bg-dark-800"
                 >
                   <div class="p-2">
                     <button
@@ -309,7 +309,7 @@
           </template>
           <template #cell-schedulable="{ row }">
             <SchedulableTimerControl v-if="authStore.isAdmin" :account-id="row.id" :refresh-key="timerRefreshKey" @executed="handleTimerExecuted" />
-            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
+            <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulableIds.has(row.id)" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
@@ -692,7 +692,7 @@ const iqTestingAcc = ref<Account | null>(null)
 const showSchedulePanel = ref(false)
 const scheduleAcc = ref<Account | null>(null)
 const scheduleModelOptions = ref<SelectOption[]>([])
-const togglingSchedulable = ref<number | null>(null)
+const togglingSchedulableIds = reactive(new Set<number>())
 const menu = reactive<{show:boolean, acc:Account|null, anchorRect:DOMRect|null}>({ show: false, acc: null, anchorRect: null })
 const exportingData = ref(false)
 const probingUpstreamBilling = reactive(new Set<number>())
@@ -793,6 +793,21 @@ const sortState = reactive<AccountSortState>(loadInitialAccountSortState())
 // Auto refresh settings
 const showAutoRefreshDropdown = ref(false)
 const autoRefreshDropdownRef = ref<HTMLElement | null>(null)
+const autoRefreshTriggerRef = ref<HTMLElement | null>(null)
+const autoRefreshDropdownPosition = reactive({
+  top: null as number | null,
+  bottom: null as number | null,
+  left: 16,
+  width: 224,
+  maxHeight: 0
+})
+const autoRefreshDropdownStyle = computed(() => ({
+  top: autoRefreshDropdownPosition.top == null ? 'auto' : `${autoRefreshDropdownPosition.top}px`,
+  bottom: autoRefreshDropdownPosition.bottom == null ? 'auto' : `${autoRefreshDropdownPosition.bottom}px`,
+  left: `${autoRefreshDropdownPosition.left}px`,
+  width: `${autoRefreshDropdownPosition.width}px`,
+  maxHeight: `${autoRefreshDropdownPosition.maxHeight}px`
+}))
 const AUTO_REFRESH_STORAGE_KEY = 'account-auto-refresh'
 const autoRefreshIntervals = [5, 10, 15, 30] as const
 const autoRefreshEnabled = ref(false)
@@ -1727,6 +1742,24 @@ const toggleAccountToolsDropdown = () => {
   showAutoRefreshDropdown.value = false
   if (nextVisible) updateAccountToolsDropdownPosition()
   showAccountToolsDropdown.value = nextVisible
+}
+
+const updateAutoRefreshDropdownPosition = () => {
+  const trigger = autoRefreshTriggerRef.value
+  if (!trigger) return
+  Object.assign(autoRefreshDropdownPosition, getFloatingPanelPosition(
+    trigger.getBoundingClientRect(),
+    document.documentElement.clientWidth || window.innerWidth,
+    window.innerHeight,
+    { maxWidth: 224 }
+  ))
+}
+
+const toggleAutoRefreshDropdown = () => {
+  const nextVisible = !showAutoRefreshDropdown.value
+  showAccountToolsDropdown.value = false
+  if (nextVisible) updateAutoRefreshDropdownPosition()
+  showAutoRefreshDropdown.value = nextVisible
 }
 
 const openSyncFromCrs = () => {
@@ -2741,8 +2774,9 @@ const confirmDelete = async (note: string) => {
   }
 }
 const handleToggleSchedulable = async (a: Account) => {
+  if (togglingSchedulableIds.has(a.id)) return
   const nextSchedulable = !a.schedulable
-  togglingSchedulable.value = a.id
+  togglingSchedulableIds.add(a.id)
   try {
     const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable)
     timerRefreshKey.value++
@@ -2752,7 +2786,7 @@ const handleToggleSchedulable = async (a: Account) => {
     console.error('Failed to toggle schedulable:', error)
     appStore.showError(t('admin.accounts.failedToToggleSchedulable'))
   } finally {
-    togglingSchedulable.value = null
+    togglingSchedulableIds.delete(a.id)
   }
 }
 const handleManualRestUpdated = (state: NonNullable<Account['account_rotation']>, ended: boolean) => {
@@ -2839,10 +2873,12 @@ const handleScroll = (event: Event) => {
   if (event.target instanceof Element && event.target.closest('.action-menu-content')) return
   menu.show = false
   if (showAccountToolsDropdown.value) updateAccountToolsDropdownPosition()
+  if (showAutoRefreshDropdown.value) updateAutoRefreshDropdownPosition()
 }
 
 const handleViewportResize = () => {
   if (showAccountToolsDropdown.value) updateAccountToolsDropdownPosition()
+  if (showAutoRefreshDropdown.value) updateAutoRefreshDropdownPosition()
 }
 
 // 点击外部关闭顶部下拉菜单

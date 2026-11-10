@@ -21,12 +21,20 @@ const defaultFilters = () => ({
   search: 'existing search', lite: '1', sort_by: 'priority', sort_order: 'asc'
 })
 
+const groupCatalog = [
+  { id: 42, name: 'OpenAI group', platform: 'openai' },
+  { id: 43, name: 'Gemini group', platform: 'gemini' },
+  { id: 44, name: 'Composite group', platform: 'composite' },
+  { id: 45, name: 'Anthropic group', platform: 'anthropic' },
+  { id: 46, name: 'Antigravity group', platform: 'antigravity' }
+] as AdminGroup[]
+
 function mountFilters(filters: Record<string, unknown> = defaultFilters()) {
   return mount(AccountTableFilters, {
     attachTo: document.body,
     props: {
       searchQuery: 'existing search', filters,
-      groups: [{ id: 42, name: 'A very long group name' } as AdminGroup]
+      groups: [{ id: 42, name: 'A very long group name', platform: 'openai' } as AdminGroup]
     },
     global: { stubs: { Teleport: true } }
   })
@@ -78,13 +86,64 @@ describe('AccountTableFilters', () => {
         await select.get('button').trigger('click')
         await select.findAll('[role="option"]')[optionIndex].trigger('click')
         changes += 1
-        expect(wrapper.emitted('update:filters')?.at(-1)).toEqual([{ ...filters, [key]: value }])
+        const group = key === 'platform' && value && value !== 'openai' ? '' : filters.group
+        expect(wrapper.emitted('update:filters')?.at(-1)).toEqual([{ ...filters, group, [key]: value }])
         expect(wrapper.emitted('change')).toHaveLength(changes)
         expect(wrapper.props('filters')).toEqual(filters)
       }
     }
     expect(wrapper.findAllComponents(Select)[4].props('options')[2].label).toBe('A very long group name')
     wrapper.unmount()
+  })
+
+  it('offers compatible groups after the catalog loads, including composite and mixed scheduling groups', async () => {
+    const wrapper = mountFilters({ ...defaultFilters(), platform: 'openai' })
+    const groupSelect = wrapper.findAllComponents(Select)[4]
+    await wrapper.setProps({ groups: [] })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped'])
+
+    await wrapper.setProps({ groups: groupCatalog })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped', '42', '44'])
+
+    await wrapper.setProps({ filters: { ...defaultFilters(), platform: 'gemini' } })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped', '43', '44'])
+
+    await wrapper.setProps({ filters: { ...defaultFilters(), platform: 'antigravity' } })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped', '43', '44', '45', '46'])
+
+    await wrapper.setProps({ filters: { ...defaultFilters(), platform: 'anthropic' } })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped', '44', '45'])
+
+    await wrapper.setProps({ filters: defaultFilters() })
+    expect(groupSelect.props('options').map(option => option.value)).toEqual(['', 'ungrouped', '42', '43', '44', '45', '46'])
+    expect(wrapper.emitted('update:filters')).toBeUndefined()
+    expect(wrapper.emitted('change')).toBeUndefined()
+  })
+
+  it.each([
+    { platform: '', group: '42', target: 'gemini', expectedGroup: '' },
+    { platform: 'openai', group: '42', target: 'gemini', expectedGroup: '' },
+    { platform: '', group: '42', target: 'openai', expectedGroup: '42' },
+    { platform: 'openai', group: '42', target: '', expectedGroup: '42' },
+    { platform: 'openai', group: 'ungrouped', target: 'gemini', expectedGroup: 'ungrouped' },
+    { platform: 'openai', group: '', target: 'gemini', expectedGroup: '' },
+    { platform: 'openai', group: '44', target: 'gemini', expectedGroup: '44' },
+    { platform: 'gemini', group: '43', target: 'antigravity', expectedGroup: '43' },
+    { platform: 'anthropic', group: '45', target: 'antigravity', expectedGroup: '45' },
+    { platform: 'antigravity', group: '46', target: 'openai', expectedGroup: '' },
+    { platform: '', group: '999', target: 'openai', expectedGroup: '' }
+  ])('updates platform and group together: $platform/$group → $target/$expectedGroup', async ({ platform, group, target, expectedGroup }) => {
+    const filters = { ...defaultFilters(), platform, group, status: 'active', privacy_mode: '__unset__' }
+    const wrapper = mountFilters(filters)
+    await wrapper.setProps({ groups: groupCatalog })
+    const platformSelect = wrapper.findAllComponents(Select)[0]
+    await platformSelect.get('button').trigger('click')
+    const optionIndex = platformSelect.props('options').findIndex(option => option.value === target)
+    await platformSelect.findAll('[role="option"]')[optionIndex].trigger('click')
+
+    expect(wrapper.emitted('update:filters')).toEqual([[{ ...filters, platform: target, group: expectedGroup }]])
+    expect(wrapper.emitted('change')).toEqual([[]])
+    expect(wrapper.props('filters')).toEqual(filters)
   })
 
   it('preserves immediate search updates and the debounced search change event', async () => {
