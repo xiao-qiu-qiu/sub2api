@@ -3515,15 +3515,23 @@ func TestRoutingAvailabilityAPIContract(t *testing.T) {
 	group := &service.Group{ID: 42, Platform: service.PlatformAnthropic, Status: service.StatusActive, Hydrated: true}
 	key := &service.APIKey{ID: 7, UserID: 9, GroupID: &group.ID, Group: group}
 	for _, tc := range []struct {
-		query  string
-		status int
+		query      string
+		status     int
+		wantFormat string
 	}{
-		{"?model=gpt-5.4&service_tier=priority&transport=http&require_compact=false", 200},
-		{"?model=gpt-5.4&service_tier=ultrafast&transport=websocket&require_compact=true", 200},
-		{"?model=gpt-5.4", 200},
-		{"", 400}, {"?model=", 400}, {"?model=gpt-5.4&model=other", 400},
-		{"?model=gpt-5.4&require_compact=1", 400}, {"?model=gpt-5.4&transport=udp", 400},
-		{"?model=gpt-5.4&service_tier=invalid", 400}, {"?model=gpt-5.4&service_tier=", 400},
+		{"?model=gpt-5.4&service_tier=priority&transport=http&require_compact=false", 200, service.APIProtocolResponses},
+		{"?model=gpt-5.4&service_tier=ultrafast&transport=websocket&require_compact=true", 200, service.APIProtocolResponses},
+		{"?model=gpt-5.4", 200, service.APIProtocolResponses},
+		{"?model=gpt-5.4&api_format=", 200, service.APIProtocolResponses},
+		{"?model=gpt-5.4&api_format=responses", 200, service.APIProtocolResponses},
+		{"?model=gpt-5.4&api_format=chat_completions&transport=http", 200, service.APIProtocolChatCompletions},
+		{"?model=gpt-5.4&api_format=chat", 400, ""},
+		{"?model=gpt-5.4&api_format=chat_completions&api_format=responses", 400, ""},
+		{"?model=gpt-5.4&api_format=chat_completions&transport=websocket", 400, ""},
+		{"?model=gpt-5.4&api_format=chat_completions&require_compact=true", 400, ""},
+		{"", 400, ""}, {"?model=", 400, ""}, {"?model=gpt-5.4&model=other", 400, ""},
+		{"?model=gpt-5.4&require_compact=1", 400, ""}, {"?model=gpt-5.4&transport=udp", 400, ""},
+		{"?model=gpt-5.4&service_tier=invalid", 400, ""}, {"?model=gpt-5.4&service_tier=", 400, ""},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			h := &OpenAIGatewayHandler{}
@@ -3536,9 +3544,10 @@ func TestRoutingAvailabilityAPIContract(t *testing.T) {
 			if tc.status == http.StatusOK {
 				var result map[string]any
 				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
-				assert.Len(t, result, 6)
+				assert.Len(t, result, 7)
 				assert.Equal(t, "routing.availability", result["object"])
 				assert.Equal(t, "gpt-5.4", result["model"])
+				assert.Equal(t, tc.wantFormat, result["api_format"])
 				assert.Equal(t, "unknown", result["state"])
 				assert.Equal(t, "platform_not_supported", result["reason"])
 				checkedAt, ok := result["checked_at"].(float64)

@@ -22,13 +22,13 @@ func (h *OpenAIGatewayHandler) RoutingAvailability(c *gin.Context) {
 		return
 	}
 	query := c.Request.URL.Query()
-	for _, name := range []string{"model", "service_tier", "transport", "require_compact"} {
-		if values, ok := query[name]; ok && (len(values) != 1 || values[0] == "") {
+	for _, name := range []string{"model", "service_tier", "transport", "require_compact", "api_format"} {
+		if values, ok := query[name]; ok && (len(values) != 1 || values[0] == "" && name != "api_format") {
 			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Query parameters must have exactly one non-empty value")
 			return
 		}
 	}
-	request := service.RoutingAvailabilityRequest{Model: query.Get("model"), ServiceTier: query.Get("service_tier"), Transport: query.Get("transport")}
+	request := service.RoutingAvailabilityRequest{Model: query.Get("model"), APIFormat: query.Get("api_format"), ServiceTier: query.Get("service_tier"), Transport: query.Get("transport")}
 	switch query.Get("require_compact") {
 	case "", "false":
 	case "true":

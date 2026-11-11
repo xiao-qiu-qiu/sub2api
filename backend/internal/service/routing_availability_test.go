@@ -90,6 +90,97 @@ func routingAvailabilityFixture() (*OpenAIGatewayService, *APIKey, *routingAvail
 	return &OpenAIGatewayService{accountRepo: repo, concurrencyService: concurrency, cfg: &config.Config{}}, key, repo, cache
 }
 
+func TestRoutingAvailabilityAPIFormatValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, format, transport string
+		compact                 bool
+		wantFormat, wantError   string
+	}{
+		{name: "default", wantFormat: APIProtocolResponses},
+		{name: "responses", format: APIProtocolResponses, wantFormat: APIProtocolResponses},
+		{name: "responses_websocket_compact", format: APIProtocolResponses, transport: "websocket", compact: true, wantFormat: APIProtocolResponses},
+		{name: "chat_default_http", format: APIProtocolChatCompletions, wantFormat: APIProtocolChatCompletions},
+		{name: "chat_http", format: APIProtocolChatCompletions, transport: "http", wantFormat: APIProtocolChatCompletions},
+		{name: "invalid_format", format: "chat", wantError: "api_format must be responses or chat_completions"},
+		{name: "chat_websocket", format: APIProtocolChatCompletions, transport: "websocket", wantError: "chat_completions requires transport=http and require_compact=false"},
+		{name: "chat_compact", format: APIProtocolChatCompletions, compact: true, wantError: "chat_completions requires transport=http and require_compact=false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := RoutingAvailabilityRequest{Model: "gpt-5.4", APIFormat: tc.format, Transport: tc.transport, RequireCompact: tc.compact}
+			err := request.Validate()
+			if tc.wantError != "" {
+				require.EqualError(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFormat, request.APIFormat)
+			if tc.transport == "" {
+				assert.Equal(t, "http", request.Transport)
+			} else {
+				assert.Equal(t, tc.transport, request.Transport)
+			}
+		})
+	}
+}
+
+func TestRoutingAvailabilityChatAndResponsesPools(t *testing.T) {
+	for _, tc := range []struct {
+		name                                       string
+		mixed, chatLimited, responsesLimited, full bool
+		otherGroup                                 bool
+		wantChat, wantResponses                    string
+	}{
+		{name: "chat_only", wantChat: "ready", wantResponses: "empty"},
+		{name: "chat_only_rate_limited", chatLimited: true, wantChat: "empty", wantResponses: "empty"},
+		{name: "chat_only_other_group", otherGroup: true, wantChat: "empty", wantResponses: "empty"},
+		{name: "mixed_responses_full", mixed: true, full: true, wantChat: "ready", wantResponses: "busy"},
+		{name: "mixed_responses_rate_limited", mixed: true, responsesLimited: true, wantChat: "ready", wantResponses: "empty"},
+		{name: "mixed_chat_rate_limited", mixed: true, chatLimited: true, wantChat: "ready", wantResponses: "ready"},
+		{name: "mixed_all_rate_limited", mixed: true, chatLimited: true, responsesLimited: true, wantChat: "empty", wantResponses: "empty"},
+		{name: "mixed_only_free_account_rate_limited", mixed: true, chatLimited: true, full: true, wantChat: "busy", wantResponses: "busy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, key, repo, cache := routingAvailabilityFixture()
+			repo.accounts[0].Extra = map[string]any{"openai_responses_supported": false}
+			until := time.Now().Add(time.Hour)
+			if tc.chatLimited {
+				repo.accounts[0].RateLimitResetAt = &until
+			}
+			if tc.otherGroup {
+				repo.accounts[0].GroupIDs = []int64{99}
+			}
+			if tc.mixed {
+				account := repo.accounts[0]
+				account.ID = 2
+				account.Extra = map[string]any{"openai_responses_supported": true}
+				account.RateLimitResetAt = nil
+				if tc.responsesLimited {
+					account.RateLimitResetAt = &until
+				}
+				repo.accounts = append(repo.accounts, account)
+				if tc.full {
+					cache.loads[2] = &AccountLoadInfo{CurrentConcurrency: account.Concurrency}
+				}
+			}
+			before := svc.SnapshotOpenAIAccountSchedulerMetrics()
+			for _, format := range []string{APIProtocolChatCompletions, APIProtocolResponses} {
+				got := svc.RoutingAvailability(t.Context(), key, RoutingAvailabilityRequest{Model: "gpt-5.4", APIFormat: format})
+				want := tc.wantChat
+				if format == APIProtocolResponses {
+					want = tc.wantResponses
+				}
+				assert.Equal(t, want, got.State, format)
+				assert.Equal(t, format, got.APIFormat)
+			}
+			assert.Equal(t, before, svc.SnapshotOpenAIAccountSchedulerMetrics())
+			assert.Nil(t, svc.openaiScheduler, "capacity polling must not select or admit an account")
+			for _, account := range repo.accounts {
+				assert.Nil(t, account.LastUsedAt)
+			}
+		})
+	}
+}
+
 func TestRoutingAvailabilityEligibilityAndCapacity(t *testing.T) {
 	cases := []struct {
 		name, state string
@@ -177,6 +268,7 @@ func TestRoutingAvailabilityEligibilityAndCapacity(t *testing.T) {
 			assert.Equal(t, tc.state, got.State, got)
 			assert.Equal(t, "routing.availability", got.Object)
 			assert.Equal(t, request.Model, got.Model)
+			assert.Equal(t, APIProtocolResponses, got.APIFormat)
 			assert.NotEmpty(t, got.Reason)
 			assert.Greater(t, got.CheckedAt, int64(0))
 			assert.Equal(t, before, svc.SnapshotOpenAIAccountSchedulerMetrics(), "a probe is not a scheduler selection")

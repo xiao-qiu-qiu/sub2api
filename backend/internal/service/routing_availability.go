@@ -11,10 +11,11 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
-// RoutingAvailabilityRequest describes a Responses request before account-level
+// RoutingAvailabilityRequest describes a Chat or Responses request before account-level
 // model mapping. Model is still checked against the authenticated group's ACL.
 type RoutingAvailabilityRequest struct {
 	Model          string
+	APIFormat      string
 	ServiceTier    string
 	Transport      string
 	RequireCompact bool
@@ -25,11 +26,20 @@ func (r *RoutingAvailabilityRequest) Validate() error {
 	if r.Model == "" || len(r.Model) > 512 {
 		return errors.New("model is required and must be at most 512 bytes")
 	}
+	if r.APIFormat == "" {
+		r.APIFormat = APIProtocolResponses
+	}
+	if r.APIFormat != APIProtocolResponses && r.APIFormat != APIProtocolChatCompletions {
+		return errors.New("api_format must be responses or chat_completions")
+	}
 	if r.Transport == "" {
 		r.Transport = "http"
 	}
 	if r.Transport != "http" && r.Transport != "websocket" {
 		return errors.New("transport must be http or websocket")
+	}
+	if r.APIFormat == APIProtocolChatCompletions && (r.Transport != "http" || r.RequireCompact) {
+		return errors.New("chat_completions requires transport=http and require_compact=false")
 	}
 	if r.ServiceTier == "" {
 		r.ServiceTier = "default"
@@ -45,6 +55,7 @@ func (r *RoutingAvailabilityRequest) Validate() error {
 type RoutingAvailability struct {
 	Object            string `json:"object"`
 	Model             string `json:"model"`
+	APIFormat         string `json:"api_format,omitempty"`
 	State             string `json:"state"`
 	Reason            string `json:"reason"`
 	CheckedAt         int64  `json:"checked_at"`
@@ -67,7 +78,11 @@ type routingAvailabilityEvaluation struct {
 // particular it never calls Select, creates bindings, reserves RPM, or forwards.
 func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *APIKey, input RoutingAvailabilityRequest) RoutingAvailability {
 	result := RoutingAvailability{Object: "routing.availability", Model: strings.TrimSpace(input.Model), State: "unknown", Reason: "evaluation_unavailable", CheckedAt: time.Now().Unix(), RetryAfterSeconds: 3}
-	if input.Validate() != nil || key == nil || key.Group == nil || key.GroupID == nil || key.Group.ID != *key.GroupID {
+	if input.Validate() != nil {
+		return result
+	}
+	result.APIFormat = input.APIFormat
+	if key == nil || key.Group == nil || key.GroupID == nil || key.Group.ID != *key.GroupID {
 		return result
 	}
 	// GET group selection intentionally skips generation billing eligibility.
@@ -121,13 +136,18 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 		transport = OpenAIUpstreamTransportResponsesWebsocketV2Ingress
 	}
 	capability := OpenAIEndpointCapabilityResponses
-	if input.RequireCompact {
+	endpoint := "/v1/responses"
+	if input.APIFormat == APIProtocolChatCompletions {
+		capability = OpenAIEndpointCapabilityChatCompletions
+		endpoint = "/v1/chat/completions"
+		transport = OpenAIUpstreamTransportAny
+	} else if input.RequireCompact {
 		capability = OpenAIEndpointCapabilityResponsesCompact
 	}
 	evaluation := &routingAvailabilityEvaluation{cache: cache, rotationWaiting: make(map[int64]bool)}
 	req := OpenAIAccountScheduleRequest{
 		GroupID: key.GroupID, Platform: PlatformOpenAI, RequestedModel: model,
-		HistoryModel: input.Model, InboundEndpoint: "/v1/responses", UseUpstreamTokenCost: true,
+		HistoryModel: input.Model, InboundEndpoint: endpoint, UseUpstreamTokenCost: true,
 		RequirePrivacySet: key.Group.RequirePrivacySet, RequiredTransport: transport,
 		RequiredCapability: capability, RequireCompact: input.RequireCompact,
 		routingAvailability: evaluation,
