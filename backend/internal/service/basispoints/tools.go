@@ -511,8 +511,6 @@ func (b *Bridge) translateHistory(input []any) ([]any, error) {
 			}
 			item["id"] = itemID
 			toolImages = separateToolImages(item)
-		case "configuration_update":
-			return nil, fmt.Errorf("basispoints does not support configuration_update; start a new request with the desired effort")
 		}
 		if err := b.validateHistoryContent(item["content"], index, "content"); err != nil {
 			return nil, err

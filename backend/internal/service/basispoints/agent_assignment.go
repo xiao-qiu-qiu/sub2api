@@ -23,7 +23,7 @@ func validateNewAgentMessage(input any) error {
 	for index := len(items) - 1; index >= 0; index-- {
 		item, _ := items[index].(object)
 		switch text(item["type"]) {
-		case "additional_tools", "tool_search_output", "compaction_trigger":
+		case "additional_tools", "tool_search_output", "compaction_trigger", "configuration_update":
 			continue
 		case "agent_message":
 			if path := encryptedAgentPath(item, index); path != "" {

@@ -97,6 +97,9 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	if err := decode(raw, &source); err != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
 	}
+	if _, err := resolveConfigurationUpdates(source); err != nil {
+		return nil, nil, err
+	}
 	if err := validateNewAgentMessage(source["input"]); err != nil {
 		return nil, nil, err
 	}
@@ -121,6 +124,18 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	structured, err := prepareStructuredOutput(source["text"])
 	if err != nil {
 		return nil, nil, err
+	}
+	// Explicit compaction produces an opaque state window rather than a final
+	// answer. Validate the requested format above, but do not constrain or
+	// validate that window as a user-facing JSON answer.
+	if input, ok := source["input"].([]any); ok {
+		for _, raw := range input {
+			item, _ := raw.(object)
+			if text(item["type"]) == "compaction_trigger" {
+				structured = nil
+				break
+			}
+		}
 	}
 	b := &Bridge{nativeToolImages: nativeToolImages, RequestedEffort: requested, Effort: effort, tools: make(map[string]tool), unsupportedTools: make(map[string]bool), structured: structured, replay: replay, scope: scope}
 	b.clientStream, _ = source["stream"].(bool)

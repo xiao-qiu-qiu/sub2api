@@ -43,10 +43,7 @@ func prepareStructuredOutput(raw any) (*structuredOutput, error) {
 		return nil, fmt.Errorf("basispoints text.format must be an object")
 	}
 	kind := text(format["type"])
-	if kind == "text" {
-		return nil, nil
-	}
-	if kind != "json_object" && kind != "json_schema" {
+	if kind != "text" && kind != "json_object" && kind != "json_schema" {
 		return nil, fmt.Errorf("basispoints text.format requires text, json_object or json_schema")
 	}
 	for key := range format {
@@ -54,6 +51,9 @@ func prepareStructuredOutput(raw any) (*structuredOutput, error) {
 			continue
 		}
 		return nil, fmt.Errorf("basispoints text.format contains an unsupported field")
+	}
+	if kind == "text" {
+		return nil, nil
 	}
 	result := &structuredOutput{format: format}
 	if kind == "json_object" {

@@ -1,3 +1,23 @@
+# Configuration updates
+
+The adapter resolves `input` items of type `configuration_update` in order.
+Request-level settings are the initial values; the last non-null update to
+`reasoning.effort` and `text.format` wins independently. Missing fields, nulls
+and empty update objects are no-ops. Optional string IDs are accepted, while
+unknown fields and invalid values are rejected before upstream submission.
+
+`ResolveConfigurationUpdates` lowers updates to current request fields and
+removes only those control items. The gateway reapplies administrator effort
+policies to a changed effort before preparation. Format-only updates do not
+repeat a potentially non-idempotent effort mapping. Both BPS transports share
+this conversion. Other history and ciphertext follow the existing rules.
+
+This is a local compatibility conversion, not native append-only configuration
+replay. It does not guarantee prefix-cache or encrypted-reasoning reuse by BPS.
+After explicit compaction, clients must restate changed settings in subsequent
+requests. Compaction triggers return an opaque state window rather than a
+structured final answer, so that window is not checked against `text.format`.
+
 # Structured output compatibility
 
 The adapter accepts Responses requests using text.format.type=json_object or

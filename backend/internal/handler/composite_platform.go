@@ -148,8 +148,26 @@ func applyOpenAIReasoningEffortPolicyForRequest(c *gin.Context, apiKey *service.
 	forced := ""
 	if apiKey != nil && effectiveAPIKeyPlatform(c, apiKey) == service.PlatformOpenAI {
 		forced = apiKey.ReasoningEffort
+		if c != nil && c.Request != nil {
+			c.Request = c.Request.WithContext(service.WithAPIKeyOpenAIReasoningEffortPolicy(c.Request.Context(), forced, maxEffort, mappings, overLimit, requestModel))
+		}
 	}
-	return service.ApplyAPIKeyOpenAIReasoningEffortPolicy(body, forced, maxEffort, mappings, overLimit, requestModel)
+	updated, changed, err := service.ApplyAPIKeyOpenAIReasoningEffortPolicy(body, forced, maxEffort, mappings, overLimit, requestModel)
+	// BPS resolves append-only effort updates after account selection. A stale
+	// initial value must not reject a newer allowed setting before that point.
+	// Preserve the original body and denial: every non-BPS route still rejects.
+	if service.IsReasoningEffortPolicyDenied(err) && c != nil && c.Request != nil &&
+		c.Request.Method == http.MethodPost && effectiveAPIKeyPlatform(c, apiKey) == service.PlatformOpenAI &&
+		gjson.GetBytes(body, "input").IsArray() &&
+		(strings.HasSuffix(c.Request.URL.Path, "/responses") || strings.HasSuffix(c.Request.URL.Path, "/responses/compact")) {
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("type").String() == "configuration_update" {
+				c.Request = c.Request.WithContext(service.WithDeferredExcelBPSReasoningPolicyError(c.Request.Context(), err))
+				return body, false, nil
+			}
+		}
+	}
+	return updated, changed, err
 }
 
 func respondOpenAIReasoningEffortPolicyError(c *gin.Context, err error, write func(*gin.Context, int, string, string)) {

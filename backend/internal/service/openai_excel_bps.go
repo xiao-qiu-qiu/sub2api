@@ -287,6 +287,14 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		}
 		return nil, newExcelBPSRateLimitedFailoverError(retryAfter)
 	}
+	ctx, body, err := prepareExcelBPSConfiguration(ctx, body)
+	if err != nil {
+		if IsReasoningEffortPolicyDenied(err) {
+			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			return fail(http.StatusForbidden, "permission_error", err.Error())
+		}
+		return fail(http.StatusBadRequest, "basispoints_request_invalid", err.Error())
+	}
 	imageSettings, err := s.settingService.GetExcelBPSImageRelaySettings(ctx)
 	if err != nil {
 		if isExcelBPSClientCancellation(c, err) {

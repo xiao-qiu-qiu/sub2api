@@ -168,6 +168,16 @@ English protocol details and client constraints:
 
 ## 能力限制
 
+### 会话中切换思考强度与输出格式
+
+已开启 BPS 的账号自动兼容历史中的 `configuration_update`，HTTP/SSE 与新版 Excel WebSocket 共用此逻辑，无需额外开关。
+
+- 顶层设置作为初始值，按 `input` 顺序应用更新；最后一个非空 `reasoning.effort` 或 `text.format` 分别生效。只更新其中一项不会重置另一项，缺省、`null` 和空配置对象不改变设置。
+- 思考强度更新仍受 API Key 固定档位、分组映射与上限约束，再执行 BPS 的 `max`/`ultra` → `xhigh` 等映射。使用记录区分客户端本次请求的档位与实际发送档位。
+- `text.format` 支持 `text`、`json_object` 和 `json_schema`；切回 `text` 会解除旧的 JSON 校验。JSON 格式沿用提示词与本地终态校验，不等于上游受约束解码。未知配置字段、非法档位或格式明确报错，不静默忽略。
+- 网关把配置事件合并为当前 BPS 请求参数，再移除这些控制项，保留其他历史项的相对顺序与原有密文处理规则。此兼容不证明上游完整复用了历史推理；切换设置仍可能影响前缀缓存和推理复用。
+- 显式压缩返回的是压缩状态，不受最终答案 JSON 格式约束。客户端压缩后应在后续请求重新声明要保留的配置更新；服务端不会从不透明压缩体中猜测档位或格式。
+
 ### 历史中的 `encrypted_content`
 
 如果错误为 `basispoints_request_invalid` 且 `param` 指向 `input[n].content[m]` 或

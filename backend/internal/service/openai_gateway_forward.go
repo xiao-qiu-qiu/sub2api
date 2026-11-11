@@ -207,17 +207,25 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if err := s.checkControlledRoute(ctx, c, account, modelForBPS); err != nil {
 		return nil, err
 	}
-	if account.IsSIWCEnabled() {
+	// Resolve the route once so a concurrent feature-toggle change cannot let
+	// a deferred BPS-only policy check escape through another upstream.
+	useSIWC := account.IsSIWCEnabled()
+	usePrismBrowser := !useSIWC && !account.IsExcelOAuth() && account.IsPrismBrowserEnabledForModel(modelForBPS) && s.prismBrowserGloballyEnabled(ctx)
+	useExcelBPS := !useSIWC && !usePrismBrowser && account.IsExcelBPSEnabledForModel(modelForBPS) && s.excelBPSGloballyEnabled(ctx)
+	if err := guardDeferredExcelBPSReasoningPolicy(ctx, c, useExcelBPS); err != nil {
+		return nil, err
+	}
+	if useSIWC {
 		return s.forwardSIWC(ctx, c, account, body, startTime)
 	}
-	if !account.IsExcelOAuth() && account.IsPrismBrowserEnabledForModel(modelForBPS) && s.prismBrowserGloballyEnabled(ctx) {
+	if usePrismBrowser {
 		return s.forwardPrismBrowser(withOpenAITransportMode(ctx, "prism_browser"), c, account, body, startTime)
 	}
 	if c.GetBool(bpsAccountProbeRequiredContextKey) &&
 		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "") {
 		return nil, errors.New("bps probe path is unavailable")
 	}
-	if account.IsExcelBPSEnabledForModel(modelForBPS) && s.excelBPSGloballyEnabled(ctx) {
+	if useExcelBPS {
 		return s.forwardExcelBPS(withOpenAITransportMode(ctx, "bps"), c, account, body, startTime)
 	}
 
