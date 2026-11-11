@@ -22,6 +22,8 @@ import (
 const codexImportClockSkewSeconds int64 = 120
 
 type CodexSessionImportRequest struct {
+	PreserveCreationConfig  bool           `json:"preserve_creation_config"`
+	GroupRateMultiplier     *float64       `json:"group_rate_multiplier"`
 	InitializeOpenAITwoFA   bool           `json:"initialize_openai_two_fa"`
 	Content                 string         `json:"content"`
 	Contents                []string       `json:"contents"`
@@ -140,6 +142,10 @@ func (h *AccountHandler) ImportCodexSession(c *gin.Context) {
 	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
+		return
+	}
+	if req.GroupRateMultiplier != nil && *req.GroupRateMultiplier < 0 {
+		response.BadRequest(c, "group_rate_multiplier must be >= 0")
 		return
 	}
 	if req.LoadFactor != nil && *req.LoadFactor > 10000 {
@@ -294,14 +300,15 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			mergedCredentials := mergeCodexImportCredentials(existing.Credentials, credentials, item)
 			mergedExtra := mergeCodexImportMap(existing.Extra, extra)
 			updateInput := &service.UpdateAccountInput{
-				Credentials:        mergedCredentials,
-				Extra:              mergedExtra,
-				Concurrency:        req.Concurrency,
-				Priority:           req.Priority,
-				RateMultiplier:     req.RateMultiplier,
-				LoadFactor:         req.LoadFactor,
-				ExpiresAt:          effectiveExpiresAt,
-				AutoPauseOnExpired: autoPauseOnExpired,
+				Credentials:         mergedCredentials,
+				Extra:               mergedExtra,
+				Concurrency:         req.Concurrency,
+				Priority:            req.Priority,
+				RateMultiplier:      req.RateMultiplier,
+				GroupRateMultiplier: req.GroupRateMultiplier,
+				LoadFactor:          req.LoadFactor,
+				ExpiresAt:           effectiveExpiresAt,
+				AutoPauseOnExpired:  autoPauseOnExpired,
 			}
 			if req.ProxyID != nil {
 				updateInput.ProxyID = req.ProxyID
@@ -346,23 +353,25 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 		}
 
 		account, createErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-			InitialOpenAITwoFA:    req.InitializeOpenAITwoFA && !item.IsAgentIdentity,
-			Name:                  accountName,
-			Notes:                 req.Notes,
-			Platform:              service.PlatformOpenAI,
-			Type:                  service.AccountTypeOAuth,
-			Credentials:           credentials,
-			Extra:                 extra,
-			ProxyID:               req.ProxyID,
-			Concurrency:           concurrency,
-			Priority:              priority,
-			RateMultiplier:        req.RateMultiplier,
-			LoadFactor:            req.LoadFactor,
-			GroupIDs:              req.GroupIDs,
-			ExpiresAt:             effectiveExpiresAt,
-			AutoPauseOnExpired:    autoPauseOnExpired,
-			SkipDefaultGroupBind:  skipDefaultGroupBind,
-			SkipMixedChannelCheck: skipMixedChannelCheck,
+			PreserveCreationConfig: req.PreserveCreationConfig,
+			GroupRateMultiplier:    req.GroupRateMultiplier,
+			InitialOpenAITwoFA:     req.InitializeOpenAITwoFA && !item.IsAgentIdentity,
+			Name:                   accountName,
+			Notes:                  req.Notes,
+			Platform:               service.PlatformOpenAI,
+			Type:                   service.AccountTypeOAuth,
+			Credentials:            credentials,
+			Extra:                  extra,
+			ProxyID:                req.ProxyID,
+			Concurrency:            concurrency,
+			Priority:               priority,
+			RateMultiplier:         req.RateMultiplier,
+			LoadFactor:             req.LoadFactor,
+			GroupIDs:               req.GroupIDs,
+			ExpiresAt:              effectiveExpiresAt,
+			AutoPauseOnExpired:     autoPauseOnExpired,
+			SkipDefaultGroupBind:   skipDefaultGroupBind,
+			SkipMixedChannelCheck:  skipMixedChannelCheck,
 		})
 		if createErr != nil {
 			result.Failed++

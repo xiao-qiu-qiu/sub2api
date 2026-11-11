@@ -1,5 +1,23 @@
 export default {
     accounts: {
+      creationPreset: {
+        title: 'OpenAI 添加预设',
+        hint: '保存并发、优先级、负载、倍率、分组、代理、模型映射、BPS 和 Codex 设置。由管理员共用，不包含账号名称或登录凭据。',
+        load: '读取预设', save: '保存为预设',
+        saveHint: '用当前配置覆盖已保存的添加预设',
+        applied: '使用表单配置', priorityHint: '创建时保留当前表单配置；全局自动初始化不覆盖这些字段，质量准入规则仍生效。',
+        empty: '还没有预设，配置好表单后点“保存为预设”。',
+        loaded: '预设已读取，可以继续调整后再添加。',
+        saved: '预设已保存，下次添加时点“读取预设”即可。',
+        changed: '表单已修改，本次未覆盖。需要时可重新读取。',
+        failed: '预设操作失败：', incompatible: '这个预设不适用于 OpenAI OAuth 账号。',
+        unavailableSelection: '预设中的分组或代理已不可用，请更新预设。',
+        enableBPS: '添加后启用 BPS',
+        bpsAuthorizationHint: '普通 OAuth / 2FA 登录后会申请独立 Excel 授权，完成后 BPS 才生效。Excel OAuth 登录直接使用本次授权。',
+        bpsUnavailable: '系统已关闭 BPS，请先开启全局 BPS 或取消账号的 BPS 设置。',
+        unsupportedImport: 'Agent Identity / PAT 账号不支持 BPS，请返回上一步关闭 BPS，或使用普通 OAuth / 2FA 登录。',
+        groupRateMultiplier: '账号分组计费倍率'
+      },
       timer: {
         "open": "定时打开",
         "close": "定时关闭",

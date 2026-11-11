@@ -49,6 +49,16 @@
       @submit.prevent="handleSubmit"
       class="space-y-5"
     >
+      <div v-if="creationPresetAvailable" class="flex flex-wrap items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 dark:bg-dark-800" data-testid="account-creation-preset">
+        <span class="mr-auto text-sm font-medium" :title="t('admin.accounts.creationPreset.hint')">{{ t('admin.accounts.creationPreset.title') }}</span>
+        <span v-if="creationPreset.applied.value" class="text-xs text-primary-600" :title="t('admin.accounts.creationPreset.priorityHint')">{{ t('admin.accounts.creationPreset.applied') }}</span>
+        <div class="ml-auto flex gap-2">
+          <button type="button" class="btn btn-secondary btn-sm" :disabled="creationPreset.busy.value" data-testid="creation-preset-load" @click="creationPreset.load">{{ t('admin.accounts.creationPreset.load') }}</button>
+          <button type="button" class="btn btn-secondary btn-sm" :disabled="creationPreset.busy.value" :title="t('admin.accounts.creationPreset.saveHint')" data-testid="creation-preset-save" @click="creationPreset.save">{{ t('admin.accounts.creationPreset.save') }}</button>
+        </div>
+        <p v-if="creationPreset.status.value" class="w-full text-xs text-gray-600 dark:text-gray-300" role="status">{{ t('admin.accounts.creationPreset.' + creationPreset.status.value) }}</p>
+        <p v-if="creationPreset.error.value" class="w-full text-xs text-red-600" role="alert">{{ t('admin.accounts.creationPreset.failed') }} {{ creationPreset.error.value }}</p>
+      </div>
       <div>
         <label class="input-label">{{ t('admin.accounts.accountName') }}</label>
         <input
@@ -480,12 +490,7 @@
           </button>
         </div>
         <p v-if="isOpenAITwoFA" class="input-hint">{{ t('tokenGuard.twoFA.nameHint') }}</p>
-        <div v-if="isOpenAIBPSOAuth" class="mt-3 space-y-2" data-testid="bps-oauth-models">
-          <p class="input-hint">{{ t('admin.accounts.oauth.openai.excelLoginHint') }}</p>
-          <ExcelBPSTransportSelect v-model="bpsOAuthTransport" prefix="bps-oauth" />
-          <label class="input-label">{{ t('admin.accounts.openai.excelBPSModels') }}</label>
-          <ModelWhitelistSelector v-model="bpsOAuthModels" platform="openai" />
-        </div>
+        <AccountCreationBPSSettings v-if="accountCategory === 'oauth-based'" v-model="bpsCreation" class="mt-3" :groups="groups" :forced="isOpenAIBPSOAuth" :available="globalBpsEnabled" />
       </div>
 
       <!-- Account Type Selection (Grok) -->
@@ -3220,6 +3225,10 @@
           <input v-model.number="form.rate_multiplier" type="number" min="0" step="0.001" class="input" />
           <p class="input-hint">{{ t('admin.accounts.billingRateMultiplierHint') }}</p>
         </div>
+        <div v-if="form.platform === 'openai' && accountCategory === 'oauth-based'">
+          <label class="input-label">{{ t('admin.accounts.creationPreset.groupRateMultiplier') }}</label>
+          <input v-model.number="form.group_rate_multiplier" type="number" min="0" max="1000000" step="0.001" class="input" data-testid="create-group-rate-multiplier" @input="groupRateMultiplierTouched = true" />
+        </div>
         <div>
           <label class="input-label" for="account-cost-multiplier">{{ t('admin.accounts.costMultiplier') }}</label>
           <input
@@ -3906,8 +3915,8 @@
         :show-session-token-option="false"
         :show-access-token-option="false"
         :show-codex-session-import-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
-        :show-agent-identity-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
-        :show-codex-pat-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
+        :show-agent-identity-option="form.platform === 'openai' && !bpsCreationEnabled"
+        :show-codex-pat-option="form.platform === 'openai' && !bpsCreationEnabled"
         :show-sso-option="form.platform === 'grok'"
         :show-email-password-option="false"
         :show-manual-option="true"
@@ -3935,7 +3944,7 @@
         <button
           type="submit"
           form="create-account-form"
-          :disabled="submitting"
+          :disabled="submitting || creationPreset.busy.value"
           class="btn btn-primary"
           data-tour="account-form-submit"
         >
@@ -4306,8 +4315,11 @@ import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import AccountAutoBPSSection from '@/components/account/AccountAutoBPSSection.vue'
-import ExcelBPSTransportSelect from '@/components/account/ExcelBPSTransportSelect.vue'
-import type { ExcelBPSTransport } from '@/utils/excelBPSTransport'
+import AccountCreationBPSSettings from './AccountCreationBPSSettings.vue'
+import { accountCreationBPSExtra, newAccountCreationBPS, readAccountCreationBPS } from '@/utils/accountCreationBPS'
+import { excelBPSDefaultsError } from '@/utils/excelBPSDefaults'
+import { useAccountCreationPreset } from '@/composables/useAccountCreationPreset'
+import type { AccountCreationPreset } from '@/api/admin/accountCreationPreset'
 import QuotaLimitCard from '@/components/account/QuotaLimitCard.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import AccountRpmSettings from '@/components/account/AccountRpmSettings.vue'
@@ -4355,13 +4367,14 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
-import { DEFAULT_EXCEL_BPS_MODELS, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
   OPENAI_WS_MODE_PASSTHROUGH,
   OPENAI_WS_MODE_HTTP_BRIDGE,
   isOpenAIWSModeEnabled,
+  normalizeOpenAIWSMode,
   resolveOpenAIWSModeHintKey,
   type OpenAIWSMode
 } from '@/utils/openaiWsMode'
@@ -4550,15 +4563,14 @@ interface TempUnschedRuleForm {
 const step = ref(1)
 const openaiTwoFA = ref(false)
 const openaiBPSOAuth = ref(false)
-const bpsOAuthModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
-const bpsOAuthTransport = ref<ExcelBPSTransport>('sse')
+const bpsCreation = ref(newAccountCreationBPS())
 const isOpenAIBPSOAuth = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiBPSOAuth.value)
 const twoFABusy = ref(false)
 const isOpenAITwoFA = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiTwoFA.value)
 // 「降智后自动开启 BPS」：OpenAI OAuth / 2FA 添加时可选，账号建好后按这里的设置给每个新账号建一条质量运维规则。
 const autoBPS = useAccountAutoBPS()
 const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
-const autoBPSAvailable = computed(() => globalBpsEnabled.value && form.platform === 'openai' && accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value)
+const autoBPSAvailable = computed(() => globalBpsEnabled.value && form.platform === 'openai' && accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value && !bpsCreation.value.enabled)
 const submitting = ref(false)
 const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
@@ -5227,8 +5239,75 @@ const form = reactive({
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
+  group_rate_multiplier: 1,
   group_ids: [] as number[],
   expires_at: null as number | null
+})
+
+const groupRateMultiplierTouched = ref(false)
+const creationPresetAvailable = computed(() => authStore.isAdmin && form.platform === 'openai' && accountCategory.value === 'oauth-based')
+const bpsCreationEnabled = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && (bpsCreation.value.enabled || isOpenAIBPSOAuth.value))
+const creationPreset = useAccountCreationPreset({
+  context: () => JSON.stringify([props.show, form.platform, accountCategory.value, authStore.user?.id, authStore.isAdmin]),
+  available: () => props.show && creationPresetAvailable.value,
+  capture: captureCreationPreset,
+  apply: applyCreationPreset,
+  snapshot: () => JSON.stringify([form.concurrency, form.priority, form.load_factor, form.rate_multiplier, form.group_rate_multiplier, form.group_ids, form.proxy_id,
+    bpsCreation.value, isOpenAIBPSOAuth.value, costMultiplier.value, autoPauseOnExpired.value, upstreamRequestIdHeader.value,
+    modelRestrictionMode.value, allowedModels.value, modelMappings.value, codexFingerprintMode.value, codexAdvancedSettings.value,
+    openAIRequestTimezone.value, openaiOAuthResponsesWebSocketV2Mode.value, openaiOAuthWSSSEAcceleration.value, rpmLimitEnabled.value, baseRpm.value,
+    openaiPassthroughEnabled.value, openaiFlattenNamespacesEnabled.value, openAILongContextBillingEnabled.value, codexCLIOnlyEnabled.value,
+    codexCLIOnlyAppServerEnabled.value, openAICompactMode.value])
+})
+
+function captureCreationPreset(): AccountCreationPreset {
+  const bpsError = bpsCreationEnabled.value ? excelBPSDefaultsError(bpsCreation.value) : ''
+  if (bpsError) throw new Error(t(bpsError))
+  return {
+    version: 1, platform: 'openai', type: 'oauth', concurrency: form.concurrency, priority: form.priority,
+    load_factor: form.load_factor, rate_multiplier: form.rate_multiplier, group_rate_multiplier: form.group_rate_multiplier,
+    group_ids: [...form.group_ids], proxy_id: form.proxy_id, auto_pause_on_expired: autoPauseOnExpired.value,
+    extra: withAccountExtraSettings(buildOpenAIExtra()),
+    model_mapping: buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value) ?? {}
+  }
+}
+
+function applyCreationPreset(preset: AccountCreationPreset) {
+  if (preset.version !== 1 || preset.platform !== 'openai' || preset.type !== 'oauth') throw new Error(t('admin.accounts.creationPreset.incompatible'))
+  const missingGroup = preset.group_ids.some(id => !props.groups.some(group => group.id === id && group.status === 'active'))
+  const missingProxy = preset.proxy_id != null && !props.proxies.some(proxy => proxy.id === preset.proxy_id && proxy.status === 'active')
+  if (missingGroup || missingProxy) throw new Error(t('admin.accounts.creationPreset.unavailableSelection'))
+  Object.assign(form, { concurrency: preset.concurrency, priority: preset.priority, load_factor: preset.load_factor,
+    rate_multiplier: preset.rate_multiplier, group_rate_multiplier: preset.group_rate_multiplier, group_ids: [...preset.group_ids], proxy_id: preset.proxy_id })
+  const extra = preset.extra
+  groupRateMultiplierTouched.value = true
+  bpsCreation.value = readAccountCreationBPS(extra)
+  codexAdvancedSettings.value = readCodexFingerprintSettings(extra)
+  const fingerprint = extra.codex_fingerprint_mode
+  codexFingerprintMode.value = fingerprint === 'device' || fingerprint === 'session' || fingerprint === 'full' ? fingerprint : 'off'
+  costMultiplier.value = typeof extra.cost_multiplier === 'number' ? extra.cost_multiplier : DEFAULT_ACCOUNT_COST_MULTIPLIER
+  upstreamRequestIdHeader.value = typeof extra.upstream_request_id_header === 'string' ? extra.upstream_request_id_header : ''
+  autoPauseOnExpired.value = preset.auto_pause_on_expired !== false
+  openAIRequestTimezone.value = typeof extra.openai_request_timezone === 'string' ? extra.openai_request_timezone : 'Asia/Singapore'
+  openaiOAuthResponsesWebSocketV2Mode.value = normalizeOpenAIWSMode(extra.openai_oauth_responses_websockets_v2_mode) ?? OPENAI_WS_MODE_OFF
+  openaiOAuthWSSSEAcceleration.value = extra.openai_oauth_ws_sse_acceleration === true
+  rpmLimitEnabled.value = typeof extra.base_rpm === 'number' && extra.base_rpm > 0
+  baseRpm.value = rpmLimitEnabled.value ? extra.base_rpm as number : null
+  openaiPassthroughEnabled.value = extra.openai_passthrough === true
+  openaiFlattenNamespacesEnabled.value = extra.openai_responses_flatten_namespaces === true
+  openAILongContextBillingEnabled.value = extra.openai_long_context_billing_enabled === true
+  openAILongContextBillingTouched.value = true
+  codexCLIOnlyEnabled.value = extra.codex_cli_only === true
+  codexCLIOnlyAppServerEnabled.value = extra.codex_cli_only_allow_app_server === true
+  openAICompactMode.value = extra.openai_compact_mode === 'force_on' || extra.openai_compact_mode === 'force_off' ? extra.openai_compact_mode : 'auto'
+  modelRestrictionMode.value = 'mapping'
+  allowedModels.value = []
+  modelMappings.value = Object.entries(preset.model_mapping).map(([from, to]) => ({ from, to }))
+}
+
+watch(bpsCreationEnabled, enabled => { if (enabled) autoBPS.draft.value.enabled = false })
+watch(() => [form.platform, accountCategory.value], () => {
+  if (form.platform !== 'openai' || accountCategory.value !== 'oauth-based') bpsCreation.value = newAccountCreationBPS()
 })
 
 // Helper to check if current type needs OAuth flow
@@ -5782,17 +5861,24 @@ async function runChannelCreation<T>(kind: string, payload: unknown, operation: 
  return result
 }
 function createAccountWithUpstream(payload: CreateAccountRequest) {
+ if (payload.platform === 'openai' && payload.type === 'oauth') {
+  payload = { ...payload, group_rate_multiplier: form.group_rate_multiplier, ...(creationPreset.applied.value ? { preserve_creation_config: true } : {}) }
+ }
  const selected = initialChannelId.value > 0 ? { upstream_channel_id: initialChannelId.value, confirm_upstream_channel_binding: initialChannelConfirmed.value } : {}
  return runChannelCreation('account', payload, () => adminAPI.accounts.create({ ...payload, ...selected }), a => [a.id], true)
 }
 function importWithUpstream(payload: UpstreamImportRequest) {
+ payload = { ...payload, ...(groupRateMultiplierTouched.value || creationPreset.applied.value ? { group_rate_multiplier: form.group_rate_multiplier } : {}), ...(creationPreset.applied.value ? { preserve_creation_config: true } : {}) }
  return runChannelCreation('import', payload, () => adminAPI.accounts.importCodexSession(payload), result => {
   const ids = (result.items || []).filter(item => item.action === 'created' && item.account_id).map(item => item.account_id!)
   if (initialChannelId.value && ids.length !== result.created) throw new Error(t('upstreamEntities.createReadbackFailed'))
   return ids
  })
 }
-function createPATWithUpstream(payload: UpstreamPATRequest) { return runChannelCreation('pat', payload, () => adminAPI.accounts.createOpenAICodexPAT(payload), a => [a.id]) }
+function createPATWithUpstream(payload: UpstreamPATRequest) {
+ payload = { ...payload, group_rate_multiplier: form.group_rate_multiplier, ...(creationPreset.applied.value ? { preserve_creation_config: true } : {}) }
+ return runChannelCreation('pat', payload, () => adminAPI.accounts.createOpenAICodexPAT(payload), a => [a.id])
+}
 function createGrokWithUpstream(payload: Parameters<typeof adminAPI.grok.createFromSSO>[0]) {
  return runChannelCreation('grok', payload, () => adminAPI.grok.createFromSSO(payload), result => result.created.map(item => {
   const id = (item.account as { id?: number } | undefined)?.id
@@ -5864,8 +5950,8 @@ const resetForm = () => {
   step.value = 1
   openaiTwoFA.value = false
   openaiBPSOAuth.value = false
-  bpsOAuthModels.value = [...DEFAULT_EXCEL_BPS_MODELS]
-  bpsOAuthTransport.value = 'sse'
+  bpsCreation.value = newAccountCreationBPS()
+  creationPreset.reset()
   autoBPS.reset()
   twoFABusy.value = false
   form.name = ''
@@ -5882,6 +5968,8 @@ const resetForm = () => {
   form.priority = 1
   costMultiplier.value = DEFAULT_ACCOUNT_COST_MULTIPLIER
   form.rate_multiplier = 1
+  form.group_rate_multiplier = 1
+  groupRateMultiplierTouched.value = false
   form.group_ids = []
   form.expires_at = null
   accountCategory.value = 'oauth-based'
@@ -6021,11 +6109,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     extra.extra_image_models = parseExtraImageModels(extraImageModels.value)
     extra.extra_image_model_prefixes = parseExtraImageModels(extraImageModelPrefixes.value)
   }
-  if (isOpenAIBPSOAuth.value) {
-    extra.openai_excel_bps = true
-    if (bpsOAuthTransport.value === 'ws') extra.openai_excel_bps_transport = 'ws'
-    extra.openai_excel_bps_models = [...new Set(bpsOAuthModels.value.map(m => m.trim()).filter(Boolean))]
-  }
+  if (accountCategory.value === 'oauth-based') Object.assign(extra, accountCreationBPSExtra(bpsCreation.value, isOpenAIBPSOAuth.value))
   if (accountCategory.value === 'oauth-based') {
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)
@@ -6259,6 +6343,7 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (creationPreset.busy.value) return
   if (!isAccountPriority(form.priority)) {
     appStore.showError(t('admin.accounts.priorityInvalid'))
     return
@@ -6270,9 +6355,9 @@ const handleSubmit = async () => {
       return
     }
   }
-  if (isOpenAIBPSOAuth.value && !bpsOAuthModels.value.some(model => model.trim())) {
-    appStore.showError(t('admin.accounts.oauth.openai.excelModelsRequired'))
-    return
+  if (bpsCreationEnabled.value) {
+    const bpsError = globalBpsEnabled.value ? excelBPSDefaultsError(bpsCreation.value) : 'admin.accounts.creationPreset.bpsUnavailable'
+    if (bpsError) { appStore.showError(t(bpsError)); return }
   }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
@@ -7185,6 +7270,10 @@ const handleOpenAIImportCodexSession = async (content: string) => {
     oauthClient.error.value = t('admin.accounts.oauth.openai.agentIdentityInvalid')
     return
   }
+  if (bpsCreationEnabled.value && isAgentIdentityImportContent(trimmed)) {
+    oauthClient.error.value = t('admin.accounts.creationPreset.unsupportedImport')
+    return
+  }
 
   const credentialExtras = buildOpenAICodexImportCredentialExtras()
   if (credentialExtras === null) {
@@ -7262,6 +7351,10 @@ const handleOpenAIImportCodexSession = async (content: string) => {
 
 const handleOpenAIImportCodexPAT = async (accessToken: string) => {
   const oauthClient = openaiOAuth
+  if (bpsCreationEnabled.value) {
+    oauthClient.error.value = t('admin.accounts.creationPreset.unsupportedImport')
+    return
+  }
   const trimmed = accessToken.trim()
   if (!trimmed) {
     oauthClient.error.value = t('admin.accounts.oauth.openai.codexPatEmpty')

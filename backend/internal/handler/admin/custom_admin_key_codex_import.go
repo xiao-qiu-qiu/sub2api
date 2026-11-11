@@ -32,6 +32,9 @@ func validateScopedCodexRequest(req scopedCodexSessionImportRequest) error {
 			return err
 		}
 	}
+	if req.GroupRateMultiplier != nil && *req.GroupRateMultiplier < 0 {
+		return infraerrors.BadRequest("SCOPED_CODEX_INPUT", "group_rate_multiplier must be >= 0")
+	}
 	if (req.Concurrency != nil && *req.Concurrency < 0) || (req.LoadFactor != nil && (*req.LoadFactor < 1 || *req.LoadFactor > 10000)) || (req.RateMultiplier != nil && *req.RateMultiplier < 0) {
 		return infraerrors.BadRequest("SCOPED_CODEX_INPUT", "导入参数无效")
 	}
@@ -146,7 +149,7 @@ func (h *AccountHandler) importScopedCodexSessions(ctx context.Context, api serv
 		}
 		if updateExisting && existing != nil {
 			action = "updated"
-			input := &service.UpdateAccountInput{ProxyMode: proxyMode, Credentials: credentials, Extra: extra, ProxyID: req.ProxyID, Concurrency: req.Concurrency, Priority: req.Priority, RateMultiplier: req.RateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause}
+			input := &service.UpdateAccountInput{ProxyMode: proxyMode, Credentials: credentials, Extra: extra, ProxyID: req.ProxyID, Concurrency: req.Concurrency, Priority: req.Priority, RateMultiplier: req.RateMultiplier, GroupRateMultiplier: req.GroupRateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause}
 			if len(req.GroupIDs) > 0 {
 				input.GroupIDs = &req.GroupIDs
 			}
@@ -172,7 +175,7 @@ func (h *AccountHandler) importScopedCodexSessions(ctx context.Context, api serv
 			if req.Priority != nil {
 				priority = *req.Priority
 			}
-			account, err = api.ScopedAdminCreateCodex(ctx, &service.CreateAccountInput{ProxyMode: proxyMode, Name: name, Notes: req.Notes, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials, Extra: extra, GroupIDs: req.GroupIDs, ProxyID: req.ProxyID, Concurrency: concurrency, Priority: priority, RateMultiplier: req.RateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause, SkipDefaultGroupBind: true})
+			account, err = api.ScopedAdminCreateCodex(ctx, &service.CreateAccountInput{PreserveCreationConfig: req.PreserveCreationConfig, InitialOpenAITwoFA: req.InitializeOpenAITwoFA && !item.IsAgentIdentity, ProxyMode: proxyMode, Name: name, Notes: req.Notes, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials, Extra: extra, GroupIDs: req.GroupIDs, ProxyID: req.ProxyID, Concurrency: concurrency, Priority: priority, RateMultiplier: req.RateMultiplier, GroupRateMultiplier: req.GroupRateMultiplier, LoadFactor: req.LoadFactor, ExpiresAt: expires, AutoPauseOnExpired: autoPause, SkipDefaultGroupBind: true})
 		}
 		if err != nil {
 			fail(entry.Index, err)

@@ -29,7 +29,7 @@ func TestAutoConfigModelBillingLegacySaveAndClear(t *testing.T) {
 	repo := &opsHandlerWritableSettings{raw: string(raw)}
 	cfg := &config.Config{}
 	cfg.Runtime.Role = config.RuntimeRoleGateway
-	svc := service.ProvideAccountOpsService(repo, opsHandlerQueue{}, nil, nil, modelBillingHandlerGroups{}, cfg, nil, nil, nil, nil, nil)
+	svc := service.ProvideAccountOpsService(repo, opsHandlerQueue{}, nil, nil, modelBillingHandlerGroups{}, cfg, nil, nil, nil, nil, nil, nil)
 	svc.Stop() // No background work participates in this offline handler fixture.
 	handler := NewAccountOpsHandler(svc, nil)
 	router := gin.New()

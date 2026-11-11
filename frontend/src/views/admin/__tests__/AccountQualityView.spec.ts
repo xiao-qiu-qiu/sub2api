@@ -9,6 +9,7 @@ import { useAccountQualityStore } from '@/stores/accountQuality'
 import { useAuthStore } from '@/stores/auth'
 import type { ScheduledTestPlan } from '@/types'
 import { defaultQualityBPS } from '@/utils/qualityRulePatch'
+import { CANDY_PROMPT } from '@/utils/intelligenceTest'
 vi.mock('@/components/admin/operations/SmartOpsNav.vue', () => ({ default: { template: '<nav />' } }))
 vi.mock('@/components/admin/operations/QualityTabs.vue', () => ({ default: { template: '<nav />' } }))
 vi.mock('@/stores/auth', async () => {
@@ -1953,6 +1954,113 @@ describe('quality operations', () => {
     }
     expect(JSON.stringify(selected)).toBe(before)
     expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens the BPS candy shortcut as a complete observation draft without creating anything', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="quality-create-bps-candy"]').trigger('click'); await flushPromises()
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-model"]').element.value).toBe('gpt-6-astra')
+    expect(vm.form.pelican_config).toMatchObject({ rule_name: 'qualityOps.bpsCandy', question_kind: 'candy',
+      test_channel: 'bps', prompt: CANDY_PROMPT, model_ids: [],
+      quality: { action_on: 'failed', action: 'observe_only', expected_answer: '21', auto_restore: false, recovery_probe_enabled: false } })
+    expect(wrapper.text()).toContain('qualityOps.bpsModelsHint')
+    for (const id of ['quality-action-on', 'quality-action-enable-bps', 'quality-action-observe-only', 'quality-auto-restore', 'quality-bps-settings']) {
+      expect(wrapper.find('[data-testid="' + id + '"]').exists()).toBe(false)
+    }
+    expect(scheduledTests.create).not.toHaveBeenCalled()
+    expect(createQualityTemplate).not.toHaveBeenCalled()
+    expect(runQualityPlan).not.toHaveBeenCalled()
+    vm.closeForm(); await flushPromises()
+    expect(vm.discardPrompt).toBe(false)
+    expect(vm.showForm).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('creates, reopens and runs the BPS candy rule with the selected models and existing history', async () => {
+    let saved: ScheduledTestPlan | undefined
+    vi.mocked(listQualityPlans).mockImplementation(async () => saved ? [saved] : [])
+    vi.mocked(scheduledTests.create).mockImplementation(async body => {
+      saved = { ...rules()[0], ...body, id: 81, account_name: 'BPS account' } as ScheduledTestPlan
+      return saved
+    })
+    vi.mocked(runQualityPlan).mockResolvedValue(undefined)
+    const result = () => ({ id: 91, plan_id: 81, status: 'success', pelican_config: saved!.pelican_config,
+      response_text: 'BPS candy answer: 21', quality_judgment: { verdict: 'correct', reason: 'Answer matches 21' }, quality_action: 'no_change' })
+    vi.mocked(scheduledTests.listResults).mockImplementation(async () => [result()] as any)
+    vi.mocked(scheduledTests.getResult).mockImplementation(async () => result() as any)
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="quality-create-bps-candy"]').trigger('click'); await flushPromises()
+    vm.accountScope = 'manual'; vm.selectedAccounts = [1]
+    await wrapper.get('[data-testid="quality-model"]').setValue(' bps-alias ')
+    await wrapper.get('[data-testid="quality-add-model"]').trigger('click')
+    await wrapper.get('[data-testid="quality-extra-model"]').setValue('gpt-6.1-sol')
+    vm.form.pelican_config.quality.judge = { group_id: 21, model_id: 'judge', prompt: 'Grade the answer' }
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.create).toHaveBeenCalledWith(expect.objectContaining({ account_id: 1, model_id: 'bps-alias', auto_recover: false,
+      pelican_config: expect.objectContaining({ question_kind: 'candy', test_channel: 'bps', model_ids: ['bps-alias', 'gpt-6.1-sol'],
+        quality: expect.objectContaining({ action: 'observe_only', expected_answer: '21', auto_restore: false, remove_group_ids: [] }) }) }))
+    expect(saved!.pelican_config!.quality).not.toHaveProperty('bps')
+    expect(wrapper.get('[data-plan-id="81"] [data-testid="quality-bps-channel-tag"]').text()).toBe('qualityOps.bpsChannelShort')
+    await wrapper.get('[data-plan-id="81"] .rule-actions button:nth-child(2)').trigger('click'); await flushPromises()
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-model"]').element.value).toBe('bps-alias')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="quality-extra-model"]').element.value).toBe('gpt-6.1-sol')
+    expect(vm.form.pelican_config.test_channel).toBe('bps')
+    vm.closeForm(); await flushPromises()
+    await wrapper.get('[data-plan-id="81"] .rule-actions button:nth-child(3)').trigger('click'); await flushPromises()
+    expect(runQualityPlan).toHaveBeenCalledWith(81)
+    await wrapper.get('[data-plan-id="81"] .rule-actions button:first-child').trigger('click'); await flushPromises()
+    expect(scheduledTests.listResults).toHaveBeenCalledWith(81, 100, false)
+    expect(wrapper.text()).toContain('BPS candy answer: 21')
+    wrapper.unmount()
+  })
+
+  it('uses the BPS candy shortcut for a matching-account template with explicit model IDs', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="quality-create-bps-candy"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="quality-model"]').setValue('gpt-6.1-sol')
+    vm.form.pelican_config.quality.judge = { kind: 'jev', prompt: 'Grade the answer' }
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(createQualityTemplate).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'gpt-6.1-sol',
+      pelican_config: expect.objectContaining({ question_kind: 'candy', test_channel: 'bps', model_ids: ['gpt-6.1-sol'],
+        quality: expect.objectContaining({ action: 'observe_only', auto_restore: false }) }) }))
+    expect(scheduledTests.create).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('forces BPS observation on selection and submission even after a recovery draft', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newRecoveryPlan(); vm.accountScope = 'manual'; await flushPromises(); vm.selectedAccounts = [1]
+    await wrapper.get('[data-testid="quality-question-kind"]').setValue('candy')
+    await wrapper.get('[data-testid="quality-test-channel"]').setValue('bps')
+    expect(vm.isRecovery).toBe(false)
+    expect(vm.form.pelican_config.quality).toMatchObject({ action_on: 'failed', action: 'observe_only', auto_restore: false, recovery_probe_enabled: false })
+    Object.assign(vm.form.pelican_config.quality, { action: 'enable_bps', auto_restore: true, recovery_probe_enabled: true,
+      remove_group_ids: [21], move_group_ids: [21], judge: { group_id: 21, model_id: 'judge', prompt: 'Grade the answer' } })
+    vm.form.auto_recover = true
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    const body = vi.mocked(scheduledTests.create).mock.calls[0][0]
+    expect(body.auto_recover).toBe(false)
+    expect(body.pelican_config!.quality).toMatchObject({ action: 'observe_only', auto_restore: false, remove_group_ids: [] })
+    for (const field of ['action_on', 'bps', 'move_group_ids', 'recovery_probe_enabled', 'recovery_probe_interval_minutes', 'recovery_confirmation_minutes']) {
+      expect(body.pelican_config!.quality).not.toHaveProperty(field)
+    }
+    wrapper.unmount()
+  })
+
+  it('keeps ordinary candy and the native state probe available beside the BPS shortcut', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="quality-create-bps-candy"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="quality-test-channel"]').setValue('account')
+    expect(wrapper.find('[data-testid="quality-action-on"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-action-observe-only"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="quality-question-kind"]').setValue('state_probe')
+    expect(vm.form.pelican_config.test_channel).toBe('account')
+    expect(wrapper.find('[data-testid="quality-test-channel"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-action-enable-bps"]').exists()).toBe(true)
+    vm.showForm = false
+    await wrapper.get('[data-testid="quality-create-rule"]').trigger('click'); await flushPromises()
+    expect(vm.form.pelican_config).toMatchObject({ question_kind: 'candy', test_channel: 'account', quality: { action: 'remove_groups' } })
     wrapper.unmount()
   })
 

@@ -928,6 +928,7 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.GET("/priority-scheduling/sticky-bindings", h.Admin.Account.PrioritySchedulingStickyBindings)
 	admin.POST("/priority-scheduling/sticky-bindings/clear", h.Admin.Account.ClearPrioritySchedulingStickyBindings)
 	admin.GET("/account-ops/auto-config", h.Admin.AccountOps.GetAutoConfig)
+	registerAccountCreationPresetRoutes(admin, h)
 	admin.PUT("/account-ops/auto-config", h.Admin.AccountOps.SaveAutoConfig)
 	admin.GET("/account-ops/auto-config/events", h.Admin.AccountOps.ListAutoConfigEvents)
 	admin.GET("/account-ops/config", h.Admin.AccountOps.GetConfig)

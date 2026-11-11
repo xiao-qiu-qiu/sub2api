@@ -180,6 +180,8 @@ type OpenAIRefreshTokenRequest struct {
 }
 
 type OpenAICodexPATCreateRequest struct {
+	PreserveCreationConfig  bool           `json:"preserve_creation_config"`
+	GroupRateMultiplier     *float64       `json:"group_rate_multiplier"`
 	AccessToken             string         `json:"access_token" binding:"required"`
 	Name                    string         `json:"name"`
 	Notes                   *string        `json:"notes"`
@@ -306,15 +308,21 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 // POST /api/v1/admin/openai/create-from-oauth
 func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 	var req struct {
-		SessionID   string  `json:"session_id" binding:"required"`
-		Code        string  `json:"code" binding:"required"`
-		State       string  `json:"state" binding:"required"`
-		RedirectURI string  `json:"redirect_uri"`
-		ProxyID     *int64  `json:"proxy_id"`
-		Name        string  `json:"name"`
-		Concurrency int     `json:"concurrency"`
-		Priority    int     `json:"priority"`
-		GroupIDs    []int64 `json:"group_ids"`
+		PreserveCreationConfig bool           `json:"preserve_creation_config"`
+		RateMultiplier         *float64       `json:"rate_multiplier"`
+		GroupRateMultiplier    *float64       `json:"group_rate_multiplier"`
+		LoadFactor             *int           `json:"load_factor"`
+		Extra                  map[string]any `json:"extra"`
+		AutoPauseOnExpired     *bool          `json:"auto_pause_on_expired"`
+		SessionID              string         `json:"session_id" binding:"required"`
+		Code                   string         `json:"code" binding:"required"`
+		State                  string         `json:"state" binding:"required"`
+		RedirectURI            string         `json:"redirect_uri"`
+		ProxyID                *int64         `json:"proxy_id"`
+		Name                   string         `json:"name"`
+		Concurrency            int            `json:"concurrency"`
+		Priority               int            `json:"priority"`
+		GroupIDs               []int64        `json:"group_ids"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -354,15 +362,20 @@ func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 
 	// Create account
 	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
-		Name:        name,
-		Platform:    platform,
-		Type:        "oauth",
-		Credentials: credentials,
-		Extra:       nil,
-		ProxyID:     req.ProxyID,
-		Concurrency: req.Concurrency,
-		Priority:    req.Priority,
-		GroupIDs:    req.GroupIDs,
+		PreserveCreationConfig: req.PreserveCreationConfig,
+		RateMultiplier:         req.RateMultiplier,
+		GroupRateMultiplier:    req.GroupRateMultiplier,
+		LoadFactor:             req.LoadFactor,
+		AutoPauseOnExpired:     req.AutoPauseOnExpired,
+		Name:                   name,
+		Platform:               platform,
+		Type:                   "oauth",
+		Credentials:            credentials,
+		Extra:                  req.Extra,
+		ProxyID:                req.ProxyID,
+		Concurrency:            req.Concurrency,
+		Priority:               req.Priority,
+		GroupIDs:               req.GroupIDs,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -384,6 +397,10 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	if req.Extra["openai_excel_bps"] == true {
+		response.BadRequest(c, "Excel BPS is unavailable for Codex personal access token accounts")
+		return
+	}
 	if req.Concurrency != nil && *req.Concurrency < 0 {
 		response.BadRequest(c, "concurrency must be >= 0")
 		return
@@ -396,6 +413,10 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
+		return
+	}
+	if req.GroupRateMultiplier != nil && *req.GroupRateMultiplier < 0 {
+		response.BadRequest(c, "group_rate_multiplier must be >= 0")
 		return
 	}
 	if req.LoadFactor != nil && *req.LoadFactor > 10000 {
@@ -446,22 +467,24 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 	}
 
 	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
-		Name:                  buildOpenAICodexPATAccountName(req.Name, tokenInfo),
-		Notes:                 req.Notes,
-		Platform:              service.PlatformOpenAI,
-		Type:                  service.AccountTypeOAuth,
-		Credentials:           credentials,
-		Extra:                 extra,
-		ProxyID:               req.ProxyID,
-		Concurrency:           concurrency,
-		Priority:              priority,
-		RateMultiplier:        req.RateMultiplier,
-		LoadFactor:            req.LoadFactor,
-		GroupIDs:              req.GroupIDs,
-		ExpiresAt:             req.ExpiresAt,
-		AutoPauseOnExpired:    req.AutoPauseOnExpired,
-		SkipDefaultGroupBind:  skipDefaultGroupBind,
-		SkipMixedChannelCheck: req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk,
+		Name:                   buildOpenAICodexPATAccountName(req.Name, tokenInfo),
+		PreserveCreationConfig: req.PreserveCreationConfig,
+		GroupRateMultiplier:    req.GroupRateMultiplier,
+		Notes:                  req.Notes,
+		Platform:               service.PlatformOpenAI,
+		Type:                   service.AccountTypeOAuth,
+		Credentials:            credentials,
+		Extra:                  extra,
+		ProxyID:                req.ProxyID,
+		Concurrency:            concurrency,
+		Priority:               priority,
+		RateMultiplier:         req.RateMultiplier,
+		LoadFactor:             req.LoadFactor,
+		GroupIDs:               req.GroupIDs,
+		ExpiresAt:              req.ExpiresAt,
+		AutoPauseOnExpired:     req.AutoPauseOnExpired,
+		SkipDefaultGroupBind:   skipDefaultGroupBind,
+		SkipMixedChannelCheck:  req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

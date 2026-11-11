@@ -4,7 +4,7 @@
       <QualityTabs />
       <div class="workspace-heading">
         <div><p class="workspace-eyebrow">{{ t('qualityOps.workspaceLabel') }}</p><h2>{{ t('qualityOps.workspaceTitle') }}</h2><p class="workspace-subtitle">{{ t('qualityOps.workspaceHint') }}</p></div>
-        <div class="heading-actions"><span class="updated-label" aria-live="polite">{{ store.updatedAt ? t('qualityOps.updatedAt', { time: clock(store.updatedAt) }) : t('qualityOps.loading') }}</span><button class="btn btn-secondary" :disabled="refreshing" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': refreshing }" />{{ t('qualityOps.refresh') }}</button><button class="btn btn-secondary" data-testid="quality-create-recovery" @click="newRecoveryPlan"><Icon name="sync" size="sm" />{{ t('qualityOps.recoveryQuickSetup') }}</button><button class="btn btn-primary" data-testid="quality-create-rule" @click="newPlan"><Icon name="plus" size="sm" />{{ t('qualityOps.create') }}</button></div>
+        <div class="heading-actions"><span class="updated-label" aria-live="polite">{{ store.updatedAt ? t('qualityOps.updatedAt', { time: clock(store.updatedAt) }) : t('qualityOps.loading') }}</span><button class="btn btn-secondary" :disabled="refreshing" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': refreshing }" />{{ t('qualityOps.refresh') }}</button><button class="btn btn-secondary" data-testid="quality-create-bps-candy" @click="newBPSCandyPlan"><Icon name="play" size="sm" />{{ t('qualityOps.bpsCandy') }}</button><button class="btn btn-secondary" data-testid="quality-create-recovery" @click="newRecoveryPlan"><Icon name="sync" size="sm" />{{ t('qualityOps.recoveryQuickSetup') }}</button><button class="btn btn-primary" data-testid="quality-create-rule" @click="newPlan"><Icon name="plus" size="sm" />{{ t('qualityOps.create') }}</button></div>
       </div>
       <div v-if="error || notice" class="workspace-message" :class="error ? 'message-error' : 'message-success'" :role="error ? 'alert' : 'status'">{{ error || notice }}<button :aria-label="t('qualityOps.dismiss')" @click="error = ''; notice = ''"><Icon name="x" size="sm" /></button></div>
       <div class="workspace-summary">
@@ -35,7 +35,7 @@
               <p class="template-section-title">{{ t('qualityOps.templateSection') }}<span>{{ t('qualityOps.templateSectionHint') }}</span></p>
               <article v-for="tpl in templates" :key="tpl.id" class="template-card" :data-template-id="tpl.id">
                 <div class="rule-card-top"><span class="account-avatar template-avatar"><Icon name="users" size="sm" /></span><span class="min-w-0 flex-1"><strong :title="templateFilterSummary(tpl)" data-testid="quality-template-filter">{{ templateFilterSummary(tpl) }}</strong><span class="rule-meta">{{ t('qualityOps.templateTag', { id: tpl.id }) }}<span>·</span>{{ t('qualityOps.templateCovered', { count: templateScopeCount(tpl) }) }}</span></span><button class="state-toggle" :class="tpl.enabled ? 'state-enabled' : 'state-paused'" :disabled="busy || !!templatePending[tpl.id]" :title="t('qualityOps.templatePauseHint')" data-testid="quality-template-toggle" @click="toggleTemplate(tpl)"><span />{{ t(tpl.enabled ? 'qualityOps.activeShort' : 'qualityOps.paused') }}</button></div>
-                <div class="rule-model"><span v-if="tpl.pelican_config?.quality?.action_on === 'passed'" class="probe-tag">{{ t('qualityOps.recoveryProbe') }}</span><code v-for="model in ruleModels(tpl)" :key="model">{{ model }}</code><span v-if="tpl.pelican_config?.question_kind === STATE_PROBE_QUESTION" class="probe-tag">{{ t('qualityOps.probeTag') }}</span></div>
+                <div class="rule-model"><span v-if="tpl.pelican_config?.quality?.action_on === 'passed'" class="probe-tag">{{ t('qualityOps.recoveryProbe') }}</span><span v-if="tpl.pelican_config?.test_channel === 'bps'" class="probe-tag" data-testid="quality-bps-channel-tag">{{ t('qualityOps.bpsChannelShort') }}</span><code v-for="model in ruleModels(tpl)" :key="model">{{ model }}</code><span v-if="tpl.pelican_config?.question_kind === STATE_PROBE_QUESTION" class="probe-tag">{{ t('qualityOps.probeTag') }}</span></div>
                 <div class="rule-target" :title="policyTarget(tpl.pelican_config?.quality)"><Icon name="shield" size="xs" /><span>{{ policyTarget(tpl.pelican_config?.quality) }}</span></div>
                 <footer class="rule-actions"><button :disabled="busy || !!templatePending[tpl.id]" data-testid="quality-template-edit" @click="editTemplate(tpl)">{{ t('qualityOps.editShort') }}</button></footer>
               </article>
@@ -43,7 +43,7 @@
             <article v-for="plan in filteredPlans" :key="plan.id" class="rule-card" :class="{ selected: store.selectedPlanId === plan.id, checked: selectedRuleIds.includes(plan.id) }" :data-plan-id="plan.id">
               <div class="rule-card-top"><label class="rule-checkbox"><input v-model="selectedRuleIds" type="checkbox" :value="plan.id" :disabled="busy || !!pending[plan.id] || plan.pelican_config?.quality?.action === 'openai_two_fa_admission'" :aria-label="t('qualityOps.selectRule', { account: name(plan), id: plan.id })" /></label><button class="rule-select" :aria-pressed="store.selectedPlanId === plan.id" @click="store.selectedPlanId = plan.id"><span class="account-avatar">{{ name(plan).slice(0, 1) }}</span><span class="min-w-0"><strong :title="name(plan)">{{ name(plan) }}</strong><span class="rule-meta">#{{ plan.account_id }}<span>·</span>{{ t('qualityOps.rule') }} {{ plan.id }}</span></span></button><button class="state-toggle" :class="plan.enabled && !plan.scope_suspended ? 'state-enabled' : 'state-paused'" :disabled="busy || !!pending[plan.id] || plan.pelican_config?.quality?.action === 'openai_two_fa_admission'" :title="t(plan.enabled ? 'qualityOps.pause' : 'qualityOps.enable')" @click="toggle(plan)"><span />{{ t(plan.scope_suspended ? 'qualityOps.scopeSuspended' : plan.enabled ? 'qualityOps.activeShort' : 'qualityOps.paused') }}</button></div>
               <p v-if="plan.pelican_config?.rule_name" class="rule-target" :title="plan.pelican_config.rule_name" data-testid="quality-rule-name">{{ plan.pelican_config.rule_name }}</p>
-              <div class="rule-model"><span v-if="plan.pelican_config?.quality?.action_on === 'passed'" class="probe-tag">{{ t('qualityOps.recoveryProbe') }}</span><code v-for="model in ruleModels(plan)" :key="model">{{ model }}</code><span v-if="isProbePlan(plan)" class="probe-tag" data-testid="quality-probe-tag">{{ t('qualityOps.probeTag') }}</span><span v-if="planTemplate[plan.id]" class="template-tag" data-testid="quality-template-tag">{{ t('qualityOps.templateTag', { id: planTemplate[plan.id] }) }}</span><span v-if="running(plan)" class="running-label">{{ t('qualityOps.running') }}</span></div>
+              <div class="rule-model"><span v-if="plan.pelican_config?.quality?.action_on === 'passed'" class="probe-tag">{{ t('qualityOps.recoveryProbe') }}</span><span v-if="plan.pelican_config?.test_channel === 'bps'" class="probe-tag" data-testid="quality-bps-channel-tag">{{ t('qualityOps.bpsChannelShort') }}</span><code v-for="model in ruleModels(plan)" :key="model">{{ model }}</code><span v-if="isProbePlan(plan)" class="probe-tag" data-testid="quality-probe-tag">{{ t('qualityOps.probeTag') }}</span><span v-if="planTemplate[plan.id]" class="template-tag" data-testid="quality-template-tag">{{ t('qualityOps.templateTag', { id: planTemplate[plan.id] }) }}</span><span v-if="running(plan)" class="running-label">{{ t('qualityOps.running') }}</span></div>
               <div class="rule-target" :title="planGroups(plan)"><Icon name="users" size="xs" /><span>{{ planGroups(plan) }}</span></div>
               <div class="rule-schedule"><span>{{ t('qualityOps.nextRun') }}</span><time :datetime="plan.next_run_at || undefined">{{ plan.enabled && !plan.scope_suspended ? date(plan.next_run_at) : '—' }}</time></div>
               <div v-if="!isProbePlan(plan) && !plan.pelican_config?.quality?.judge" class="rule-warning">{{ t('qualityOps.configureJudge') }}</div>
@@ -123,7 +123,7 @@
         <label v-if="!bulkEditing && !savingPreset" class="block space-y-1"><span>{{ t('qualityOps.ruleName') }}</span><input v-model.trim="form.pelican_config.rule_name" maxlength="100" class="input" data-testid="quality-rule-name-input" /></label>
         <p v-if="editingTemplate" class="template-hint" data-testid="quality-template-edit-hint">{{ t('qualityOps.templateEditHint', { count: editingTemplateRecord?.plan_ids.length ?? 0 }) }}</p>
         <p v-else-if="editing && planTemplate[editing]" class="template-hint" data-testid="quality-plan-template-hint">{{ t('qualityOps.planFromTemplate', { id: planTemplate[editing] }) }}</p>
-        <label v-if="editsField('action')" class="block space-y-1"><span>{{ t('qualityOps.actionCondition') }}</span><select v-model="form.pelican_config.quality.action_on" class="input" data-testid="quality-action-on" @change="selectActionCondition"><option value="failed">{{ t('qualityOps.actionOnFailed') }}</option><option value="passed">{{ t('qualityOps.actionOnPassed') }}</option></select></label>
+        <label v-if="editsField('action') && !isBPSObservation" class="block space-y-1"><span>{{ t('qualityOps.actionCondition') }}</span><select v-model="form.pelican_config.quality.action_on" class="input" data-testid="quality-action-on" @change="selectActionCondition"><option value="failed">{{ t('qualityOps.actionOnFailed') }}</option><option value="passed">{{ t('qualityOps.actionOnPassed') }}</option></select></label>
         <QualityAccountSelector v-if="!editing && !savingPreset" v-model="pickerAccountIds" v-model:search="search" v-model:group="accountGroup" v-model:type="accountType" data-testid="quality-account-picker"
           v-model:statuses="accountStatuses" v-model:scope="accountScope"
           :accounts="accounts" :groups="groups" :accounts-loading="accountsLoading" :selecting-accounts="selectingAccounts" :accounts-error="accountsError"
@@ -138,14 +138,14 @@
         </div>
         <div class="grid gap-4 sm:grid-cols-2">
           <div v-if="editsField('model')" class="space-y-2 sm:col-span-2">
-            <label class="block space-y-1"><span>{{ t(isProbe ? 'qualityOps.model' : 'qualityOps.models') }}</span><input v-model.trim="form.model_id" required maxlength="100" class="input" placeholder="gpt-6-astra" /></label>
+            <label class="block space-y-1"><span>{{ t(isProbe ? 'qualityOps.model' : 'qualityOps.models') }}</span><input v-model.trim="form.model_id" required maxlength="100" class="input" data-testid="quality-model" placeholder="gpt-6-astra" /></label>
             <template v-if="!isProbe"><div v-for="(_, index) in form.pelican_config.model_ids" :key="index" class="flex gap-2">
               <input v-model.trim="form.pelican_config.model_ids[index]" required maxlength="100" class="input flex-1" data-testid="quality-extra-model" :aria-label="t('qualityOps.modelNumber', { n: index + 2 })" placeholder="gpt-6-sol" />
               <button type="button" class="btn btn-secondary" :aria-label="t('qualityOps.removeModelNumber', { n: index + 2 })" @click="form.pelican_config.model_ids.splice(index, 1)"><Icon name="x" size="sm" /></button>
             </div></template>
             <button v-if="!isProbe" type="button" class="btn btn-secondary btn-sm" data-testid="quality-add-model" :disabled="form.pelican_config.model_ids.length >= 49" @click="form.pelican_config.model_ids.push('')"><Icon name="plus" size="xs" />{{ t('qualityOps.addModel') }}</button>
             <QualityModelShortcuts :selected-models="selectedTestModels" :user-id="auth.user?.id" :disabled="!isProbe && !canAddTestModel" @select="addTestModel" />
-            <p class="text-sm text-gray-500">{{ t(isProbe ? 'qualityOps.probeSingleModel' : 'qualityOps.modelsHint') }}</p>
+            <p class="text-sm text-gray-500">{{ t(isProbe ? 'qualityOps.probeSingleModel' : isBPSObservation ? 'qualityOps.bpsModelsHint' : 'qualityOps.modelsHint') }}</p>
           </div>
           <template v-if="editsField('schedule') && !isRecovery">
             <QualityProbeSchedule v-if="isProbe" v-model="form.cron_expression" />
@@ -677,6 +677,7 @@ function updateRemoveModelsInput(event: Event) {
 }
 const isRecovery = computed(() => form.value.pelican_config.quality.action_on === 'passed')
 const isProbe = computed(() => form.value.pelican_config.question_kind === STATE_PROBE_QUESTION)
+const isBPSObservation = computed(() => form.value.pelican_config.test_channel === 'bps')
 const selectedTestModels = computed(() => [form.value.model_id, ...(isProbe.value ? [] : form.value.pelican_config.model_ids)].map(model => model.trim()).filter(Boolean))
 const canAddTestModel = computed(() => !form.value.model_id.trim() || form.value.pelican_config.model_ids.some(model => !model.trim()) || form.value.pelican_config.model_ids.length < 49)
 function addTestModel(model: string) {
@@ -755,6 +756,14 @@ function newPlan() {
   accountStatuses.value = ['active']; accountScope.value = 'all'
   showForm.value = true; initialForm.value = formSnapshot(); void searchAccounts()
   if (!groups.value.length) void store.refreshGroups()
+}
+function newBPSCandyPlan() {
+  if (busy.value) return
+  newPlan()
+  form.value.pelican_config.rule_name = t('qualityOps.bpsCandy')
+  form.value.pelican_config.test_channel = 'bps'
+  selectTestChannel()
+  initialForm.value = formSnapshot()
 }
 function selectActionCondition() {
   const q = form.value.pelican_config.quality
@@ -940,8 +949,11 @@ function selectQuestionKind() {
 }
 function selectTestChannel() {
   if (form.value.pelican_config.test_channel !== 'bps') return
+  form.value.pelican_config.quality.action_on = 'failed'
   form.value.pelican_config.quality.action = 'observe_only'
   form.value.pelican_config.quality.auto_restore = false
+  form.value.pelican_config.quality.recovery_probe_enabled = false
+  form.value.auto_recover = false
   if (bulkEditing.value) bulkFields.value = [...new Set<QualityRuleField>([...bulkFields.value, 'action', 'restore'])]
 }
 // 探针规则不发题目、不走判题模型：提交前去掉题目、参考答案和判题配置，并行固定为 1。
@@ -984,6 +996,7 @@ async function save() {
   if (busy.value || ownershipWorking.value || selectingAccounts.value) return
   if ((copying.value || savingPreset.value) && !canCopyRules.value) { error.value = t(savingPreset.value ? 'qualityOps.reusePermission' : 'qualityOps.copyPermission'); return }
   if (editing.value && ownershipBlocked.value) { error.value = t('qualityOps.scopeConflictHelp'); return }
+  if (!bulkEditing.value) selectTestChannel()
   if (bulkEditing.value) { await saveBulkRules(); return }
   busy.value = true; error.value = ''; notice.value = ''
   const scope = identity()

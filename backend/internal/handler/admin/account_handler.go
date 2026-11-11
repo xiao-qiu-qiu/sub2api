@@ -140,6 +140,7 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
+	PreserveCreationConfig  bool           `json:"preserve_creation_config"`
 	UpstreamChannelID       int64          `json:"upstream_channel_id"`
 	ConfirmUpstreamChannel  bool           `json:"confirm_upstream_channel_binding"`
 	Name                    string         `json:"name" binding:"required"`
@@ -1159,23 +1160,24 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			ctx = service.WithInitialUpstreamChannel(ctx, req.UpstreamChannelID)
 		}
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-			Name:                  req.Name,
-			Notes:                 req.Notes,
-			Platform:              req.Platform,
-			Type:                  req.Type,
-			Credentials:           req.Credentials,
-			Extra:                 req.Extra,
-			ProxyID:               req.ProxyID,
-			Concurrency:           req.Concurrency,
-			Priority:              req.Priority,
-			RateMultiplier:        req.RateMultiplier,
-			GroupRateMultiplier:   req.GroupRateMultiplier,
-			LoadFactor:            req.LoadFactor,
-			GroupIDs:              req.GroupIDs,
-			ExpiresAt:             req.ExpiresAt,
-			AutoPauseOnExpired:    req.AutoPauseOnExpired,
-			ProbeEnabled:          req.ProbeEnabled,
-			SkipMixedChannelCheck: skipCheck,
+			PreserveCreationConfig: req.PreserveCreationConfig,
+			Name:                   req.Name,
+			Notes:                  req.Notes,
+			Platform:               req.Platform,
+			Type:                   req.Type,
+			Credentials:            req.Credentials,
+			Extra:                  req.Extra,
+			ProxyID:                req.ProxyID,
+			Concurrency:            req.Concurrency,
+			Priority:               req.Priority,
+			RateMultiplier:         req.RateMultiplier,
+			GroupRateMultiplier:    req.GroupRateMultiplier,
+			LoadFactor:             req.LoadFactor,
+			GroupIDs:               req.GroupIDs,
+			ExpiresAt:              req.ExpiresAt,
+			AutoPauseOnExpired:     req.AutoPauseOnExpired,
+			ProbeEnabled:           req.ProbeEnabled,
+			SkipMixedChannelCheck:  skipCheck,
 		})
 		if execErr != nil {
 			return nil, execErr
@@ -2331,21 +2333,23 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 			skipCheck := item.ConfirmMixedChannelRisk != nil && *item.ConfirmMixedChannelRisk
 
 			account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-				Name:                  item.Name,
-				Notes:                 item.Notes,
-				Platform:              item.Platform,
-				Type:                  item.Type,
-				Credentials:           item.Credentials,
-				Extra:                 item.Extra,
-				ProxyID:               item.ProxyID,
-				Concurrency:           item.Concurrency,
-				Priority:              item.Priority,
-				RateMultiplier:        item.RateMultiplier,
-				GroupRateMultiplier:   item.GroupRateMultiplier,
-				GroupIDs:              item.GroupIDs,
-				ExpiresAt:             item.ExpiresAt,
-				AutoPauseOnExpired:    item.AutoPauseOnExpired,
-				SkipMixedChannelCheck: skipCheck,
+				PreserveCreationConfig: item.PreserveCreationConfig,
+				LoadFactor:             item.LoadFactor,
+				Name:                   item.Name,
+				Notes:                  item.Notes,
+				Platform:               item.Platform,
+				Type:                   item.Type,
+				Credentials:            item.Credentials,
+				Extra:                  item.Extra,
+				ProxyID:                item.ProxyID,
+				Concurrency:            item.Concurrency,
+				Priority:               item.Priority,
+				RateMultiplier:         item.RateMultiplier,
+				GroupRateMultiplier:    item.GroupRateMultiplier,
+				GroupIDs:               item.GroupIDs,
+				ExpiresAt:              item.ExpiresAt,
+				AutoPauseOnExpired:     item.AutoPauseOnExpired,
+				SkipMixedChannelCheck:  skipCheck,
 			})
 			if err != nil {
 				failed++

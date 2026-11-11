@@ -1,5 +1,22 @@
 export default {
     accounts: {
+      creationPreset: {
+        title: 'OpenAI creation preset',
+        hint: 'Save concurrency, priority, load, multipliers, groups, proxy, model mappings, BPS and Codex settings. Shared by administrators; excludes account names and credentials.',
+        load: 'Load preset', save: 'Save as preset', saveHint: 'Replace the saved creation preset with these settings',
+        applied: 'Using form settings', priorityHint: 'Keep the current form settings during creation. Global initialization will not replace them; quality admission still applies.',
+        empty: 'No preset saved yet. Configure the form and choose Save as preset.',
+        loaded: 'Preset loaded. You can adjust the settings before adding accounts.',
+        saved: 'Preset saved. Choose Load preset next time.',
+        changed: 'The form changed while loading, so it was not replaced. Load again if needed.',
+        failed: 'Preset operation failed:', incompatible: 'This preset is not compatible with OpenAI OAuth accounts.',
+        unavailableSelection: 'A preset group or proxy is unavailable. Update the preset.',
+        enableBPS: 'Enable BPS after creation',
+        bpsAuthorizationHint: 'Standard OAuth and 2FA accounts need a separate Excel authorization before BPS becomes active. Excel OAuth uses the authorization from this login.',
+        bpsUnavailable: 'BPS is disabled globally. Enable it in system settings or turn off BPS for this account.',
+        unsupportedImport: 'Agent Identity and PAT accounts do not support BPS. Go back and turn BPS off, or use standard OAuth / 2FA.',
+        groupRateMultiplier: 'Account group billing multiplier'
+      },
       timer: {
         "open": "Timed on",
         "close": "Timed off",

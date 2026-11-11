@@ -143,6 +143,11 @@ func (s *adminServiceImpl) ApplyOAuthAutoConfig(ctx context.Context, input *Crea
 	input.Extra = maps.Clone(input.Extra)
 	delete(input.Extra, "auto_config_initial_revision")
 	delete(input.Extra, OpenAITwoFAAdmissionExtraKey)
+	preserve := input.PreserveCreationConfig && input.Platform == PlatformOpenAI && input.Type == AccountTypeOAuth
+	if preserve {
+		// An explicitly selected empty group list must remain ungrouped.
+		input.SkipDefaultGroupBind = true
+	}
 	// Global initialization is an administrator policy. Observers explicitly
 	// choose their own groups and must not inherit global groups or field overrides.
 	if _, observer := ObserverGroupIDs(ctx); observer {
@@ -156,6 +161,16 @@ func (s *adminServiceImpl) ApplyOAuthAutoConfig(ctx context.Context, input *Crea
 		return fmt.Errorf("read automatic configuration: %w", err)
 	}
 	if !c.Enabled || c.Platform != input.Platform {
+		return nil
+	}
+	if preserve {
+		// Quality initialization and 2FA admission are policies, not form defaults.
+		// Admission still runs independently after this function in CreateAccount.
+		plan, err := c.QualityRule.plan(c.Platform)
+		if err != nil {
+			return err
+		}
+		input.InitialQualityPlan = plan
 		return nil
 	}
 	if err := ValidateObserverGroupBindings(ctx, c.GroupIDs); err != nil {

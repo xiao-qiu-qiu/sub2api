@@ -111,6 +111,9 @@ func (s *adminServiceImpl) ScopedAdminCreateCodex(ctx context.Context, input *Cr
 	if input.RateMultiplier != nil && *input.RateMultiplier != 1 {
 		return nil, infraerrors.Forbidden("SCOPED_CODEX_RATE", "受限导入不能修改计费倍率")
 	}
+	if input.GroupRateMultiplier != nil && *input.GroupRateMultiplier != 1 {
+		return nil, infraerrors.Forbidden("SCOPED_CODEX_RATE", "受限导入不能修改分组计费倍率")
+	}
 	safe := *input
 	safe.SkipDefaultGroupBind = true
 	return s.scopedAdminCreateTransaction(ctx, &safe)
@@ -151,6 +154,10 @@ func (s *adminServiceImpl) ScopedAdminUpdateCodex(ctx context.Context, id int64,
 			return nil, infraerrors.Forbidden("SCOPED_CODEX_RATE", "受限导入不能修改计费倍率")
 		}
 		safe.RateMultiplier = nil
+		if safe.GroupRateMultiplier != nil && *safe.GroupRateMultiplier != current.UserGroupRateMultiplier() {
+			return nil, infraerrors.Forbidden("SCOPED_CODEX_RATE", "受限导入不能修改分组计费倍率")
+		}
+		safe.GroupRateMultiplier = nil
 		if err := prepare(current, &safe); err != nil {
 			return nil, err
 		}

@@ -79,7 +79,7 @@ func TestGatewayAccountOpsRefreshSkipsGlobalGroupsButKeepsConfigAndEvents(t *tes
 	accounts := &accountOpsRoleAccounts{}
 	events := &accountOpsRoleEvents{refreshed: make(chan AccountOpsConfig, 8), recorded: make(chan AccountOpsEvent, 8)}
 	cfg := &config.Config{Runtime: config.RuntimeConfig{Role: config.RuntimeRoleGateway}}
-	svc := ProvideAccountOpsService(settings, events, nil, accounts, nil, cfg, nil, nil, nil, nil, nil)
+	svc := ProvideAccountOpsService(settings, events, nil, accounts, nil, cfg, nil, nil, nil, nil, nil, nil)
 	defer svc.Stop()
 	select {
 	case <-events.refreshed:
@@ -126,7 +126,7 @@ func TestFullAccountOpsStartupKeepsSharedGroupReconciliation(t *testing.T) {
 			}}}
 			events := &accountOpsRoleEvents{refreshed: make(chan AccountOpsConfig, 8), recorded: make(chan AccountOpsEvent, 8)}
 			cfg := &config.Config{Runtime: config.RuntimeConfig{Role: role}}
-			svc := ProvideAccountOpsService(settings, events, nil, accounts, nil, cfg, nil, nil, nil, nil, nil)
+			svc := ProvideAccountOpsService(settings, events, nil, accounts, nil, cfg, nil, nil, nil, nil, nil, nil)
 			defer svc.Stop()
 			require.Eventually(t, func() bool { return svc.currentConfig().GroupsInitialized }, time.Second, time.Millisecond)
 			require.EqualValues(t, 2, accounts.scans.Load(), "initial group persistence requires a fresh account snapshot")

@@ -1770,6 +1770,7 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  preserve_creation_config?: boolean
   upstream_channel_id?: number
   confirm_upstream_channel_binding?: boolean
   name: string
@@ -1933,6 +1934,8 @@ export interface AdminDataImportResult {
 }
 
 export interface CodexSessionImportRequest {
+  preserve_creation_config?: boolean
+  group_rate_multiplier?: number
   initialize_openai_two_fa?: boolean
   /** Skip matching accounts without replacing their credentials or settings. */
   skip_existing?: boolean
@@ -1956,6 +1959,8 @@ export interface CodexSessionImportRequest {
 }
 
 export interface OpenAICodexPATCreateRequest {
+  preserve_creation_config?: boolean
+  group_rate_multiplier?: number
   access_token: string
   name?: string
   notes?: string | null
