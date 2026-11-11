@@ -430,10 +430,12 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 	}
 	var upstreamBody []byte
 	var bridge *basispoints.Bridge
+	skipProtocolInstructions, _ := ctx.Value(bpsTestSkipProtocolInstructionsKey{}).(bool)
+	prepareOptions := basispoints.PrepareOptions{SkipProtocolInstructions: skipProtocolInstructions}
 	if images != nil {
-		upstreamBody, bridge, err = images.PrepareWithCatalog(scope, replay, catalog)
+		upstreamBody, bridge, err = images.PrepareWithCatalog(scope, replay, catalog, prepareOptions)
 	} else {
-		upstreamBody, bridge, err = basispoints.PrepareWithCatalog(body, scope, replay, catalog)
+		upstreamBody, bridge, err = basispoints.PrepareWithCatalog(body, scope, replay, catalog, prepareOptions)
 	}
 	if err != nil {
 		if errors.Is(err, basispoints.ErrStateUnavailable) {

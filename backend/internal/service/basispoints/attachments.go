@@ -312,10 +312,10 @@ func (c *AttachmentCache) get(ctx context.Context, scope string, img InlineAttac
 
 // PrepareWithCatalog permits only the tool screenshots validated by this native
 // request plan. Ordinary Prepare calls keep rejecting inline images.
-func (p *NativeImages) PrepareWithCatalog(scope string, replay *ReplayCache, cache *CatalogCache) ([]byte, *Bridge, error) {
+func (p *NativeImages) PrepareWithCatalog(scope string, replay *ReplayCache, cache *CatalogCache, opts ...PrepareOptions) ([]byte, *Bridge, error) {
 	raw, err := p.Body()
 	if err != nil {
 		return nil, nil, err
 	}
-	return prepareWithCatalog(raw, scope, replay, cache, p.toolImages)
+	return prepareWithCatalog(raw, scope, replay, cache, p.toolImages, opts...)
 }

@@ -237,24 +237,35 @@ describe('AccountTestModal', () => {
     })
   })
 
-  it('OpenAI 常规文本测试默认发送 false，点击真实开关后发送 true 且开始测试不重置选择', async () => {
+  it.each([
+    { label: 'Codex OAuth', type: 'oauth', extra: {} },
+    { label: 'Responses API Key', type: 'apikey', extra: {} },
+    { label: '强制 Responses API Key', type: 'apikey', extra: { openai_responses_mode: 'force_responses', openai_responses_supported: false } },
+    { label: 'BPS OAuth', type: 'oauth', extra: { openai_excel_bps: true } }
+  ])('OpenAI $label 常规文本测试默认发送 false，真实开关切换后发送 true / false 且测试不重置选择', async ({ label, type, extra }) => {
     getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
     global.fetch = vi.fn().mockImplementation(async () =>
       createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
     ) as any
     const wrapper = mountModal({
-      id: 42, name: 'OpenAI OAuth', platform: 'openai', type: 'oauth', status: 'active'
+      id: 42, name: label, platform: 'openai', type, status: 'active', extra
     })
     await wrapper.setProps({ show: true })
     await flushPromises()
 
     const toggle = wrapper.get('#account-test-inject-default-instructions[role="switch"]')
     expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('#account-test-inject-default-instructions-label').text()).toBe('admin.accounts.injectDefaultInstructions')
+    expect(wrapper.get('#account-test-inject-default-instructions-hint').text()).toBe(
+      extra.openai_excel_bps === true
+        ? 'admin.accounts.injectBpsDefaultInstructionsHint'
+        : 'admin.accounts.injectDefaultInstructionsHint'
+    )
     const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
     await start.trigger('click')
     await flushPromises()
-    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toMatchObject({
-      model_id: 'gpt-5.4', mode: 'default', inject_default_instructions: false
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toEqual({
+      model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default', inject_default_instructions: false
     })
 
     await toggle.trigger('click')
@@ -263,21 +274,36 @@ describe('AccountTestModal', () => {
     await retry.trigger('click')
     await flushPromises()
     expect(global.fetch).toHaveBeenCalledTimes(2)
-    expect(JSON.parse((global.fetch as any).mock.calls[1][1].body)).toMatchObject({
-      model_id: 'gpt-5.4', mode: 'default', inject_default_instructions: true
+    expect(JSON.parse((global.fetch as any).mock.calls[1][1].body)).toEqual({
+      model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default', inject_default_instructions: true
     })
     expect(toggle.attributes('aria-checked')).toBe('true')
+
+    await toggle.trigger('click')
+    await retry.trigger('click')
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledTimes(3)
+    expect(JSON.parse((global.fetch as any).mock.calls[2][1].body)).toEqual({
+      model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default', inject_default_instructions: false
+    })
+    expect(toggle.attributes('aria-checked')).toBe('false')
     wrapper.unmount()
   })
 
-  it('OpenAI SIWC OAuth 测试隐藏内置提示词开关且不携带开关值', async () => {
+  it.each([
+    { label: 'SIWC OAuth', type: 'oauth', extra: { openai_siwc: true } },
+    { label: 'Prism OAuth', type: 'oauth', extra: { openai_prism_browser: true } },
+    { label: 'BPS + SIWC OAuth', type: 'oauth', extra: { openai_excel_bps: true, openai_siwc: true } },
+    { label: 'BPS + Prism OAuth', type: 'oauth', extra: { openai_excel_bps: true, openai_prism_browser: true } },
+    { label: 'Chat Completions API Key', type: 'apikey', extra: { openai_responses_mode: 'force_chat_completions' } },
+    { label: '不支持 Responses 的 API Key', type: 'apikey', extra: { openai_responses_supported: false } }
+  ])('OpenAI $label 测试隐藏内置提示词开关且不携带开关值', async ({ label, type, extra }) => {
     getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
     global.fetch = vi.fn().mockResolvedValue(
       createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
     ) as any
     const wrapper = mountModal({
-      id: 42, name: 'OpenAI SIWC OAuth', platform: 'openai', type: 'oauth', status: 'active',
-      extra: { openai_siwc: true }
+      id: 42, name: label, platform: 'openai', type, status: 'active', extra
     })
     await wrapper.setProps({ show: true })
     await flushPromises()
@@ -295,10 +321,16 @@ describe('AccountTestModal', () => {
     wrapper.unmount()
   })
 
-  it('OpenAI 内置提示词开关在重新打开或更换账号后恢复关闭', async () => {
+  it.each([
+    { label: 'Codex', extra: {} },
+    { label: 'BPS', extra: { openai_excel_bps: true } }
+  ])('OpenAI $label 内置提示词开关在重新打开或更换账号后恢复关闭并发送 false', async ({ label, extra }) => {
     getAvailableModels.mockResolvedValue([{ id: 'gpt-5.4', display_name: 'GPT-5.4' }])
+    global.fetch = vi.fn().mockImplementation(async () =>
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
     const account = {
-      id: 42, name: 'OpenAI OAuth', platform: 'openai', type: 'oauth', status: 'active'
+      id: 42, name: label, platform: 'openai', type: 'oauth', status: 'active', extra
     }
     const wrapper = mountModal(account)
     await wrapper.setProps({ show: true })
@@ -310,19 +342,35 @@ describe('AccountTestModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
     expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('false')
+    const start = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+    await start.trigger('click')
+    await flushPromises()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toEqual({
+      model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default', inject_default_instructions: false
+    })
 
     await wrapper.get('#account-test-inject-default-instructions').trigger('click')
     expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('true')
     await wrapper.setProps({ account: { ...account, id: 43, name: 'Another OpenAI Account' } } as any)
     await flushPromises()
     expect(wrapper.get('#account-test-inject-default-instructions').attributes('aria-checked')).toBe('false')
+    const nextStart = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.startTest'))!
+    await nextStart.trigger('click')
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect((global.fetch as any).mock.calls[1][0]).toMatch(/\/admin\/accounts\/43\/test$/)
+    expect(JSON.parse((global.fetch as any).mock.calls[1][1].body)).toEqual({
+      model_id: 'gpt-5.4', prompt: 'ciallo', mode: 'default', inject_default_instructions: false
+    })
     wrapper.unmount()
   })
 
   it.each([
-    { label: 'Compact', mode: 'compact', model: 'gpt-5.4', prompt: 'ciallo' },
-    { label: '图片', mode: 'default', model: 'gpt-image-1', prompt: 'draw a tiny orange cat astronaut' }
-  ])('OpenAI $label 测试隐藏内置提示词开关且不携带开关值', async ({ mode, model, prompt }) => {
+    { label: 'Codex Compact', mode: 'compact', model: 'gpt-5.4', prompt: 'ciallo', extra: {} },
+    { label: 'Codex 图片', mode: 'default', model: 'gpt-image-1', prompt: 'draw a tiny orange cat astronaut', extra: {} },
+    { label: 'BPS Compact', mode: 'compact', model: 'gpt-5.4', prompt: 'ciallo', extra: { openai_excel_bps: true } },
+    { label: 'BPS 图片', mode: 'default', model: 'gpt-image-1', prompt: 'draw a tiny orange cat astronaut', extra: { openai_excel_bps: true } }
+  ])('OpenAI $label 测试隐藏内置提示词开关且不携带开关值', async ({ mode, model, prompt, extra }) => {
     getAvailableModels.mockResolvedValue([
       { id: 'gpt-5.4', display_name: 'GPT-5.4' },
       { id: 'gpt-image-1', display_name: 'GPT Image 1' }
@@ -338,7 +386,8 @@ describe('AccountTestModal', () => {
       name: 'OpenAI OAuth',
       platform: 'openai',
       type: 'oauth',
-      status: 'active'
+      status: 'active',
+      extra
     })
     await wrapper.setProps({ show: true })
     await flushPromises()

@@ -2018,6 +2018,7 @@ export default {
       textTestPromptHint: 'Click the prompt below to edit it. Leave empty to use ciallo.',
       injectDefaultInstructions: 'Inject built-in instructions',
       injectDefaultInstructionsHint: 'When enabled, appends built-in coding assistant instructions, which may affect the response style.',
+      injectBpsDefaultInstructionsHint: 'Adds BPS protocol instructions or Codex agent instructions, depending on the test route.',
       pelicanTest: {
         question: 'Question',
         candyQuestion: 'Candy logic test',

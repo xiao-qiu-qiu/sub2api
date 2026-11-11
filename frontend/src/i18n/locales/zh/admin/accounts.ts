@@ -2105,6 +2105,7 @@ export default {
       textTestPromptHint: '可点击下方提示词编辑；留空时使用 ciallo。',
       injectDefaultInstructions: '注入内置提示词',
       injectDefaultInstructionsHint: '开启后附加内置编程助手提示词，可能影响回复风格。',
+      injectBpsDefaultInstructionsHint: '开启后按实际测试渠道附加 BPS 协议提示词或 Codex 编程助手提示词。',
       pelicanTest: {
         question: '题目',
         candyQuestion: '糖果逻辑测试',

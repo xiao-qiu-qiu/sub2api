@@ -106,7 +106,11 @@
             {{ t('admin.accounts.injectDefaultInstructions') }}
           </label>
           <p id="account-test-inject-default-instructions-hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            {{ t('admin.accounts.injectDefaultInstructionsHint') }}
+            {{
+              t(account?.extra?.openai_excel_bps === true
+                ? 'admin.accounts.injectBpsDefaultInstructionsHint'
+                : 'admin.accounts.injectDefaultInstructionsHint')
+            }}
           </p>
         </div>
         <Toggle
@@ -595,7 +599,7 @@ const supportsTextTestPrompt = computed(
 const supportsDefaultInstructions = computed(() => {
   if (!isOpenAIAccount.value || testMode.value !== 'default' || !supportsTextTestPrompt.value) return false
   const extra = props.account?.extra
-  if (extra?.openai_excel_bps === true || extra?.openai_prism_browser === true || extra?.openai_siwc === true) return false
+  if (extra?.openai_prism_browser === true || extra?.openai_siwc === true) return false
   if (props.account?.type !== 'apikey') return true
   if (extra?.openai_responses_mode === 'force_chat_completions') return false
   return extra?.openai_responses_mode === 'force_responses' || extra?.openai_responses_supported !== false

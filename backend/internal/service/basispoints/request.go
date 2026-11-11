@@ -22,7 +22,14 @@ const ImagesEditsURL = "https://bps.openai.com/basispoints/api/images/edits"
 
 type object = map[string]any
 
+// PrepareOptions contains internal conversion settings, never client request fields.
+// The zero value preserves the ordinary BPS protocol instructions.
+type PrepareOptions struct {
+	SkipProtocolInstructions bool
+}
+
 type Bridge struct {
+	prepareOptions       PrepareOptions
 	nativeToolImages     map[string]bool
 	RequestedEffort      string
 	Effort               string
@@ -88,11 +95,11 @@ func Prepare(raw []byte, scope string, replay *ReplayCache) ([]byte, *Bridge, er
 	return prepare(raw, scope, replay, nil)
 }
 
-func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool) ([]byte, *Bridge, error) {
-	return prepareWithInheritedCatalog(raw, scope, replay, nativeToolImages, false)
+func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, opts ...PrepareOptions) ([]byte, *Bridge, error) {
+	return prepareWithInheritedCatalog(raw, scope, replay, nativeToolImages, false, opts...)
 }
 
-func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, inherited bool) ([]byte, *Bridge, error) {
+func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, inherited bool, opts ...PrepareOptions) ([]byte, *Bridge, error) {
 	var source object
 	if err := decode(raw, &source); err != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
@@ -138,6 +145,9 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 		}
 	}
 	b := &Bridge{nativeToolImages: nativeToolImages, RequestedEffort: requested, Effort: effort, tools: make(map[string]tool), unsupportedTools: make(map[string]bool), structured: structured, replay: replay, scope: scope}
+	if len(opts) > 0 {
+		b.prepareOptions = opts[0]
+	}
 	b.clientStream, _ = source["stream"].(bool)
 	choice := source["tool_choice"]
 	if choice != nil && text(choice) != "auto" && text(choice) != "none" {
@@ -222,7 +232,9 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	if structured != nil {
 		protocol += "\n" + structured.instructions()
 	}
-	prologue = append(prologue, message("developer", protocol))
+	if !b.prepareOptions.SkipProtocolInstructions {
+		prologue = append(prologue, message("developer", protocol))
+	}
 	cacheKey := text(source["prompt_cache_key"])
 	conversation := cacheKey
 	if conversation == "" && len(input) > 0 {

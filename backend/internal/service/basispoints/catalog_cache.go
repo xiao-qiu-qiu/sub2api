@@ -107,20 +107,20 @@ func (c *CatalogCache) commit(scope string, expected uint64, raw []byte) bool {
 	return true
 }
 
-func PrepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *CatalogCache) ([]byte, *Bridge, error) {
-	return prepareWithCatalog(raw, scope, replay, cache, nil)
+func PrepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *CatalogCache, opts ...PrepareOptions) ([]byte, *Bridge, error) {
+	return prepareWithCatalog(raw, scope, replay, cache, nil, opts...)
 }
 
-func prepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *CatalogCache, nativeToolImages map[string]bool) ([]byte, *Bridge, error) {
+func prepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *CatalogCache, nativeToolImages map[string]bool, opts ...PrepareOptions) ([]byte, *Bridge, error) {
 	if cache == nil || scope == "" {
-		return prepare(raw, scope, replay, nativeToolImages)
+		return prepare(raw, scope, replay, nativeToolImages, opts...)
 	}
 	var source object
 	if decode(raw, &source) != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
 	}
 	if text(source["tool_choice"]) == "none" {
-		return prepare(raw, scope, replay, nativeToolImages)
+		return prepare(raw, scope, replay, nativeToolImages, opts...)
 	}
 	_, explicit := source["tools"]
 	for attempt := 0; attempt < 8; attempt++ {
@@ -143,7 +143,7 @@ func prepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *Ca
 		if err != nil {
 			return nil, nil, err
 		}
-		body, b, err := prepareWithInheritedCatalog(encoded, scope, replay, nativeToolImages, !explicit && previous != nil)
+		body, b, err := prepareWithInheritedCatalog(encoded, scope, replay, nativeToolImages, !explicit && previous != nil, opts...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -212,5 +212,5 @@ func (b *Bridge) Reprepare(raw []byte) ([]byte, *Bridge, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return prepare(encoded, b.scope, b.replay, b.nativeToolImages)
+	return prepare(encoded, b.scope, b.replay, b.nativeToolImages, b.prepareOptions)
 }

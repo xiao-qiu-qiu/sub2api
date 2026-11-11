@@ -29,8 +29,8 @@ func TestAccountTestService_TextPromptReachesUpstream(t *testing.T) {
 		{"openai api key", PlatformOpenAI, AccountTypeAPIKey, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, nil, ""},
 		{"openai oauth instructions disabled", PlatformOpenAI, AccountTypeOAuth, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: false}}, ""},
 		{"openai api key instructions disabled", PlatformOpenAI, AccountTypeAPIKey, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: false}}, ""},
-		{"openai oauth instructions enabled", PlatformOpenAI, AccountTypeOAuth, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: true}}, openai.DefaultInstructions},
-		{"openai api key instructions enabled", PlatformOpenAI, AccountTypeAPIKey, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: true}}, openai.DefaultInstructions},
+		{"openai oauth instructions enabled", PlatformOpenAI, AccountTypeOAuth, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: true}}, openai.AccountTestInstructions},
+		{"openai api key instructions enabled", PlatformOpenAI, AccountTypeAPIKey, "gpt-6-astra", "input.0.content.0.text", adaptiveCNResponsesTestResponse, []AccountTestOptions{{InjectDefaultInstructions: true}}, openai.AccountTestInstructions},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			account := &Account{

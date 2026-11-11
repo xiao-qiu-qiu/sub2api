@@ -76,7 +76,8 @@ type TestEvent struct {
 type AccountTestOptions struct {
 	ImageDataURL string
 	AudioDataURL string
-	// InjectDefaultInstructions opts OpenAI text tests into the default Codex prompt.
+	// InjectDefaultInstructions enables the full Codex prompt for native text
+	// tests, or the existing short BPS developer protocol for BPS text tests.
 	InjectDefaultInstructions bool
 }
 
@@ -443,7 +444,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		case APIProtocolAdaptive:
 			return s.testCNProviderAdaptiveConnection(c, account, modelID, prompt)
 		case APIProtocolResponses:
-			return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode), testOpts)
+			return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode), opts...)
 		case APIProtocolChatCompletions:
 			return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
 		case APIProtocolAnthropic:
@@ -458,7 +459,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 			}
 			return s.testPrismBrowserConnection(c, account, modelID, prompt)
 		}
-		return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode), testOpts)
+		return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode), opts...)
 	}
 
 	if account.IsGemini() {
@@ -951,9 +952,23 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 	// Image models use the image test below, which applies the gateway's BPS
 	// image routing; the text BPS test would send them to /responses.
-	if account.IsExcelBPSEnabled() && s.openaiGatewayService != nil && s.openaiGatewayService.excelBPSGloballyEnabled(ctx) && !isOpenAIImageModel(account.GetMappedModel(strings.TrimSpace(modelID))) {
+	bpsEnabled := account.IsExcelBPSEnabled()
+	bpsTestModel := strings.TrimSpace(modelID)
+	var bpsOpts []AccountTestOptions
+	if mode == AccountTestModeDefault && len(opts) > 0 {
+		bpsOpts = opts
+		if bpsTestModel == "" {
+			bpsTestModel = openai.DefaultTestModel
+		}
+		// This helper applies account mapping before selecting the BPS protocol.
+		// Explicit native tests must use the ordinary Codex test payload instead
+		// of the gateway's default instructions. Background/compact tests keep
+		// their existing account-wide gateway routing and protocol instructions.
+		bpsEnabled = account.IsExcelBPSEnabledForModel(bpsTestModel)
+	}
+	if bpsEnabled && s.openaiGatewayService != nil && s.openaiGatewayService.excelBPSGloballyEnabled(ctx) && !isOpenAIImageModel(account.GetMappedModel(bpsTestModel)) {
 		recordQualityBatchRoute(c, account, modelID, "openai:bps")
-		return s.testExcelBPSAccountConnection(c, account, modelID, prompt)
+		return s.testExcelBPSAccountConnection(c, account, modelID, prompt, bpsOpts...)
 	}
 
 	// Default to openai.DefaultTestModel for OpenAI testing
@@ -1161,11 +1176,15 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	return s.processOpenAIStream(accountTestResponseContext(c, resp), resp.Body)
 }
 
-func (s *AccountTestService) testExcelBPSAccountConnection(c *gin.Context, account *Account, modelID, prompt string) error {
-	return s.testResponsesGatewayAccountConnection(c, account, modelID, prompt)
+// Only explicit connectivity-test options may disable the BPS protocol prologue.
+// Keep this internal to the test context; it is not a Responses request field.
+type bpsTestSkipProtocolInstructionsKey struct{}
+
+func (s *AccountTestService) testExcelBPSAccountConnection(c *gin.Context, account *Account, modelID, prompt string, opts ...AccountTestOptions) error {
+	return s.testResponsesGatewayAccountConnection(c, account, modelID, prompt, opts...)
 }
 
-func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Context, account *Account, modelID, prompt string, opts ...AccountTestOptions) error {
 	model := strings.TrimSpace(modelID)
 	if model == "" {
 		model = openai.DefaultTestModel
@@ -1181,7 +1200,11 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 
 	probe := httptest.NewRecorder()
 	probeCtx, _ := gin.CreateTestContext(probe)
-	probeCtx.Request = c.Request.Clone(s.withBPSTestEvidence(c.Request.Context(), c))
+	probeRequestCtx := s.withBPSTestEvidence(c.Request.Context(), c)
+	if len(opts) > 0 {
+		probeRequestCtx = context.WithValue(probeRequestCtx, bpsTestSkipProtocolInstructionsKey{}, !opts[0].InjectDefaultInstructions)
+	}
+	probeCtx.Request = c.Request.Clone(probeRequestCtx)
 	if probeCtx.Request.Header == nil {
 		probeCtx.Request.Header = make(http.Header)
 	}
@@ -3146,7 +3169,7 @@ func createOpenAITestPayload(modelID string, isOAuth bool, prompt string, opts .
 	// The default Codex prompt is injected only when explicitly requested.
 	payload["instructions"] = ""
 	if firstAccountTestOptions(opts).InjectDefaultInstructions {
-		payload["instructions"] = openai.DefaultInstructions
+		payload["instructions"] = openai.AccountTestInstructions
 	}
 
 	return payload
