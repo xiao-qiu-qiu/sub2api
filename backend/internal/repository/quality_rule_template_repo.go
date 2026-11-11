@@ -406,9 +406,10 @@ func (r *qualityRuleTemplateRepository) ReincludeAccount(ctx context.Context, t 
 		return result, closeErr
 	}
 	var lockedSnapshot string
-	// NO KEY UPDATE still fences account edits, but permits FK KEY SHARE checks
-	// by concurrent plan inserts before they reach the unique scope constraint.
-	err = tx.QueryRowContext(ctx, `SELECT `+qualityTemplateAccountConfigSnapshot+` FROM accounts a WHERE a.id=$1 AND a.deleted_at IS NULL FOR NO KEY UPDATE`, accountID).Scan(&lockedSnapshot)
+	// Admission triggers also require FOR UPDATE. Take it before inserting the
+	// replacement plan, so another insert cannot retain an FK KEY SHARE while
+	// both transactions attempt to upgrade their account locks.
+	err = tx.QueryRowContext(ctx, `SELECT `+qualityTemplateAccountConfigSnapshot+` FROM accounts a WHERE a.id=$1 AND a.deleted_at IS NULL FOR UPDATE`, accountID).Scan(&lockedSnapshot)
 	if errors.Is(err, sql.ErrNoRows) {
 		result.Reason = "not_matching"
 		return result, nil
