@@ -220,6 +220,11 @@ func newExcelBPSRequestTo(ctx context.Context, targetURL, accept string, body []
 // BPS deliberately bypasses Codex ticket/cookie injection and OAuth plugins:
 // only the selected account's bearer and ChatGPT account ID belong on this host.
 func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time) (forwardResult *OpenAIForwardResult, forwardErr error) {
+	return s.forwardExcelBPSWithChat(ctx, c, account, body, start, nil)
+}
+
+// Chat ingress shares the BPS lifecycle; only its downstream wire format differs.
+func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time, chat *excelBPSChatResponse) (forwardResult *OpenAIForwardResult, forwardErr error) {
 	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
 	defer func() {
@@ -247,7 +252,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		// finish a single JSON response so the handler cannot append another error.
 		committed := StopOpenAICompactSSEKeepaliveCommitted(c)
 		MarkResponseCommitted(c)
-		if committed {
+		if committed && chat != nil {
+			_ = chat.writeFailure(c, code, message)
+		} else if committed {
 			failureParam := ""
 			if len(param) > 0 {
 				failureParam = param[0]
@@ -268,6 +275,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	}
 	originalModel := gjson.GetBytes(body, "model").String()
 	model := account.GetMappedModel(originalModel)
+	if chat != nil {
+		originalModel, model = chat.originalModel, chat.upstreamModel
+	}
 	stream := gjson.GetBytes(body, "stream").Bool()
 	clientCanceled := func() (*OpenAIForwardResult, error) {
 		StopOpenAICompactSSEKeepaliveCommitted(c)
@@ -852,6 +862,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	var bridgeFailure *basispoints.BridgeFailure
 	terminal := ""
 	terminalSuccessful := false
+	chatTruncated := false
 	cacheCreationAsInput := account.IsExcelBPSCacheCreationAsInputEnabled()
 	for scanner.Next(ctx, 0, heartbeat.C, keepalive) {
 		line := scanner.Text()
@@ -876,10 +887,11 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			switch kind {
 			case "response.completed", "response.failed", "response.cancelled", "response.incomplete", "error":
 				bridgeFailure = basispoints.ParseBridgeFailure(payload)
-				if kind != "response.completed" && bridgeFailure == nil {
+				chatTruncated = chat != nil && isExcelBPSChatTruncation(payload)
+				if kind != "response.completed" && !chatTruncated && bridgeFailure == nil {
 					s.rateLimitService.observeQualityStatus(ctx, account, openAIStreamFailureStatus(payload, extractOpenAISSEErrorMessage(payload)))
 				}
-				if kind == "response.completed" && lease != nil {
+				if (kind == "response.completed" || chatTruncated) && lease != nil {
 					lease.ReportSuccess()
 				}
 				terminal = kind
@@ -919,7 +931,12 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			}
 		}
 		if stream {
-			if _, err = c.Writer.WriteString(line + "\n"); err != nil {
+			if chat != nil {
+				err = chat.writeLine(c, line)
+			} else {
+				_, err = c.Writer.WriteString(line + "\n")
+			}
+			if err != nil {
 				result.ClientDisconnect = true
 				if isExcelBPSClientCancellation(c, c.Request.Context().Err()) {
 					MarkOpsClientCancellation(c, stream)
@@ -955,14 +972,18 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		s.rateLimitService.observeQualityStatus(ctx, account, http.StatusBadGateway)
 		MarkResponseCommitted(c)
 		if stream {
-			_, _ = c.Writer.WriteString("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"basispoints_stream_incomplete\",\"message\":\"Upstream stream ended before completion\"}}}\n\n")
+			if chat != nil {
+				_ = chat.writeFailure(c, "basispoints_stream_incomplete", "Upstream stream ended before completion")
+			} else {
+				_, _ = c.Writer.WriteString("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"basispoints_stream_incomplete\",\"message\":\"Upstream stream ended before completion\"}}}\n\n")
+			}
 			c.Writer.Flush()
 		} else {
 			c.JSON(502, gin.H{"error": gin.H{"type": "server_error", "code": "basispoints_stream_incomplete", "message": "Excel BPS stream ended before completion"}})
 		}
 		return result, fmt.Errorf("excel BPS stream incomplete")
 	}
-	if terminal != "response.completed" {
+	if terminal != "response.completed" && !chatTruncated {
 		MarkResponseCommitted(c)
 	}
 	if !stream {
@@ -972,7 +993,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			} else {
 				c.JSON(upstreamFailure.Status, gin.H{"error": upstreamFailure.Details()})
 			}
-		} else if terminal != "response.completed" {
+		} else if terminal != "response.completed" && !chatTruncated {
 			message := "Excel BPS did not complete the response"
 			detail := map[string]any{"code": "basispoints_protocol_error", "message": message}
 			if bridgeFailure != nil {
@@ -984,11 +1005,15 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			} else {
 				c.JSON(http.StatusBadGateway, gin.H{"error": detail})
 			}
+		} else if chat != nil {
+			if err = chat.writeResponse(c, completed); err != nil {
+				return fail(http.StatusBadGateway, "basispoints_response_invalid", "Excel BPS response could not be converted")
+			}
 		} else {
 			c.Data(200, "application/json", completed)
 		}
 	}
-	if terminal != "response.completed" {
+	if terminal != "response.completed" && !chatTruncated {
 		return result, fmt.Errorf("excel BPS terminal: %s", terminal)
 	}
 	imagePolicy.finish(ctx, imagePolicy.compact || len(compactOutput) > 0 || (imagePolicy.history != nil && imagePolicy.history.Count < imageSettings.Limits.MaxImages-imageSettings.WarningRemaining))

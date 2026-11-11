@@ -80,7 +80,7 @@
         {{ t('admin.accounts.status.rateLimitedUntil', { time: formatDateTime(account.rate_limit_reset_at) }) }}
       </HelpTooltip>
 
-      <!-- Model Status Indicators (普通限流 / 超量请求中) -->
+      <!-- Model Status Indicators (模型冷却 / 普通限流 / 超量请求中) -->
       <div
         v-if="activeModelStatuses.length > 0"
         :class="[
@@ -111,19 +111,31 @@
               {{ formatScopeName(item.model) }}
               <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
             </span>
-            <!-- 普通模型限流 -->
+            <!-- 模型冷却 / 普通模型限流 -->
             <span
               v-else
               class="inline-flex items-center gap-1 rounded bg-purple-100 px-1.5 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
             >
               <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
               {{ formatScopeName(item.model) }}
-              <span class="text-[10px] opacity-70">{{ item.kind === 'quality_hold' ? t('qualityOps.waitingForRecovery') : formatCountdown(item.reset_at) }}</span>
+              <span class="text-[10px] opacity-70">{{
+                item.kind === 'quality_hold'
+                  ? t('qualityOps.waitingForRecovery')
+                  : item.kind === 'permission_cooldown'
+                    ? t('admin.accounts.status.modelPermissionCooldown', { time: formatCountdown(item.reset_at) })
+                    : item.kind === 'model_unavailable'
+                      ? t('admin.accounts.status.modelUnavailableCooldown', { time: formatCountdown(item.reset_at) })
+                      : formatCountdown(item.reset_at)
+              }}</span>
             </span>
           </template>
           {{
             item.kind === 'quality_hold'
               ? t('qualityOps.cooldownRecoveryHint')
+              : item.kind === 'permission_cooldown'
+                ? t('admin.accounts.status.modelPermissionCooldownUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
+              : item.kind === 'model_unavailable'
+                ? t('admin.accounts.status.modelUnavailableUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
               : item.kind === 'credits_exhausted'
               ? t('admin.accounts.status.creditsExhaustedUntil', { time: formatDateTimeToMinute(item.reset_at) })
               : item.kind === 'credits_active'
@@ -193,12 +205,20 @@ const isRateLimited = computed(() => {
 })
 
 type AccountModelStatusItem = {
-  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active' | 'quality_hold'
+  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active' | 'quality_hold' | 'model_unavailable' | 'permission_cooldown'
   model: string
   reset_at: string
 }
 
-// Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中)
+// Only classify reasons written by the backend's model availability handlers.
+const modelAvailabilityKinds = new Map<string, 'model_unavailable' | 'permission_cooldown'>([
+  ['upstream_400_codex_plan_gated_model', 'permission_cooldown'],
+  ['upstream_404_model_not_found', 'model_unavailable'],
+  ['upstream_401_model_not_found', 'model_unavailable'],
+  ['openai_image_capability_lost', 'model_unavailable']
+])
+
+// Computed: active model statuses (模型冷却 + 普通模型限流 + 积分耗尽 + 走积分中)
 const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   const modelLimits = extra?.model_rate_limits as
@@ -220,10 +240,14 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
       continue
     }
     if (new Date(info.rate_limit_reset_at) <= now) continue
+    const availabilityKind = modelAvailabilityKinds.get(info.reason || '')
 
     if (model === 'AICredits') {
       // AICredits key → 积分已用尽
       items.push({ kind: 'credits_exhausted', model, reset_at: info.rate_limit_reset_at })
+    } else if (availabilityKind) {
+      // 模型不可用时不能通过积分超额使用绕过权限或能力限制。
+      items.push({ kind: availabilityKind, model, reset_at: info.rate_limit_reset_at })
     } else if (allowOverages && !hasActiveAICredits) {
       // 普通模型限流 + overages 启用 + 积分可用 → 正在走积分
       items.push({ kind: 'credits_active', model, reset_at: info.rate_limit_reset_at })

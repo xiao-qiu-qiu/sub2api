@@ -4,7 +4,11 @@
 
 `credentials.plan_type` 为 `free` 的账号禁止开启 BPS（忽略大小写与首尾空格）。创建、编辑和批量编辑会拒绝保存开启配置；质量规则和 403 自动恢复也会跳过 free 账号。旧数据即使保留 BPS 开关，运行时也不会走 BPS，可通过编辑或批量编辑关闭旧开关。套餐未知的账号沿用原有规则；该限制不代表原生 Codex 通道支持相同模型。
 
-本入口面向 HTTP `/v1/responses` 和 `/v1/responses/compact`。上游默认 HTTP/SSE，也可按账号选择 WebSocket；BPS 传输独立于账号原生 Codex 的 WS mode、自动透传和 ticket 配置。保持原始模型名或显式账号映射，不因模型权限不足偷偷切换模型。现有调度、分组授权和并发额度继续生效；开关不会重新启用已停用的账号。
+本入口支持 HTTP `/v1/responses`、`/v1/responses/compact` 和 `/v1/chat/completions`。Chat 请求在账号开启 BPS、映射后的模型命中 BPS 范围且全局 BPS 开启时，也走 BPS；流式与非流式响应仍返回 Chat Completions 格式，保留工具调用及用量。未开启或模型未命中时沿用原路径，SIWC / Prism 的既有优先级保持。
+
+上游默认 HTTP/SSE，也可按账号选择 WebSocket；Chat 和 Responses 共用该账号的 BPS 传输设置。BPS 传输独立于原生 Codex 的 WS mode、自动透传和 ticket 配置。保持原始模型名或显式账号映射，不因模型权限不足切换模型。现有调度、分组授权和并发额度继续生效；开关不会重新启用已停用的账号。
+
+Chat 的正常长度截断或内容过滤保留对应 `finish_reason` 和用量，不作为协议错误重放。BPS 不发送 `service_tier`，Chat 请求里的 `priority` / `ultrafast` 不会引入该档位的加价。
 
 ## 新版 Excel WebSocket
 

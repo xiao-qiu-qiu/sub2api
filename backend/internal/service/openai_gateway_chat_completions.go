@@ -210,7 +210,17 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 2. Resolve model mapping early so compat prompt_cache_key injection can
 	// derive a stable seed from the final upstream model family.
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
-	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+	upstreamModel := billingModel
+	// Select BPS before Codex-only transforms, using the final mapped model.
+	// Match Responses route precedence and resolve feature flags only once.
+	usePrismBrowser := !account.IsSIWCEnabled() && !account.IsExcelOAuth() && account.IsPrismBrowserEnabledForModel(originalModel) && s.prismBrowserGloballyEnabled(ctx)
+	useExcelBPS := !account.IsSIWCEnabled() && !usePrismBrowser && account.isExcelBPSUpstreamModelEnabled(upstreamModel) && s.excelBPSGloballyEnabled(ctx)
+	if !useExcelBPS {
+		upstreamModel = normalizeOpenAIModelForUpstream(account, billingModel)
+	}
+	if err := guardDeferredExcelBPSReasoningPolicy(ctx, c, useExcelBPS); err != nil {
+		return nil, err
+	}
 	if err := validateGPT61SolCompatRequest(body, upstreamModel); err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
@@ -305,7 +315,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 	logger.L().Debug("openai chat_completions: model mapping applied", logFields...)
 
-	if account.UsesOpenAICodexProtocol() {
+	if account.UsesOpenAICodexProtocol() && !useExcelBPS {
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
@@ -375,6 +385,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	responsesReq.ServiceTier = normalizedOpenAIServiceTierValue(gjson.GetBytes(responsesBody, "service_tier").String())
 	if err := s.checkAPIKeyLongContextBeforeSend(ctx, c, responsesBody, upstreamModel); err != nil {
 		return nil, err
+	}
+	if useExcelBPS {
+		if err := s.checkControlledRoute(ctx, c, account, originalModel); err != nil {
+			return nil, err
+		}
+		return s.forwardChatCompletionsViaExcelBPS(ctx, c, account, responsesBody, promptCacheKey, originalModel, billingModel, upstreamModel, clientStream, startTime)
 	}
 
 	// 5. Get access token
