@@ -33,7 +33,7 @@ func Open(ctx context.Context, client *http.Client, req *http.Request, idleTimeo
 	if ctx == nil || client == nil || req == nil || req.URL == nil || req.Body == nil || req.Method != http.MethodPost {
 		return nil, errors.New("invalid BPS WebSocket request")
 	}
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	if err := ctx.Err(); err != nil {
 		return nil, safeError(ctx, err, "BPS WebSocket request cancelled")
 	}

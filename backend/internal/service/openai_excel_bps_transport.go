@@ -218,7 +218,7 @@ func (s *OpenAIGatewayService) doExcelBPSRequestTo(ctx context.Context, c *gin.C
 		if account.ExcelBPSTransport() == ExcelBPSTransportWS && upstreamURL == basispoints.ResponsesURL {
 			// WS parses the prepared POST body locally. Only the GET
 			// handshake's network trace can indicate a submission.
-			tracedRequest = evidence.Trace.Request(req)
+			tracedRequest = evidence.Request(req)
 		} else {
 			tracedRequest = evidence.request(req)
 		}

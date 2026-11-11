@@ -2,7 +2,6 @@ package bpsws
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -22,7 +21,7 @@ func TestCancellationClosesDetachedCONNECTAndTLSSockets(t *testing.T) {
 			ctx, cancel := context.WithCancel(deadline)
 			defer cancel()
 			clientConn, peer := net.Pipe()
-			defer peer.Close()
+			defer func() { _ = peer.Close() }()
 			started, closed := make(chan struct{}), make(chan struct{})
 			go func() {
 				// Read real CONNECT headers or a real TLS ClientHello, then wait for
@@ -34,8 +33,7 @@ func TestCancellationClosesDetachedCONNECTAndTLSSockets(t *testing.T) {
 				close(closed)
 			}()
 			transport := &http.Transport{
-				DialContext:     func(context.Context, string, string) (net.Conn, error) { return clientConn, nil },
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // local pipe only
+				DialContext: func(context.Context, string, string) (net.Conn, error) { return clientConn, nil },
 			}
 			if phase == "CONNECT" {
 				proxy, err := url.Parse("http://proxy-user:proxy-secret@proxy.invalid:8080")
@@ -73,7 +71,7 @@ func TestStreamCancellationAndCloseReleaseSocketImmediately(t *testing.T) {
 			closed := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				c, _ := acceptCreate(t, w, r)
-				defer c.CloseNow()
+				defer func() { _ = c.CloseNow() }()
 				_, _, _ = c.Read(deadline)
 				close(closed)
 			}))
@@ -85,7 +83,7 @@ func TestStreamCancellationAndCloseReleaseSocketImmediately(t *testing.T) {
 			}
 			response, err := Open(ctx, server.Client(), preparedRequest(t, ctx, server.URL), 0)
 			require.NoError(t, err)
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			reading := operation == "cancel-read" || operation == "close-read" || operation == "deadline-read"
 			readResult := make(chan error, 1)
 			if reading {

@@ -21,8 +21,16 @@ func qualityAdmissionTestAccount(required time.Time) *Account {
 	}
 }
 
+func qualityAdmissionTestState(account *Account) map[string]any {
+	state, ok := account.Extra[QualityProbeAdmissionKey].(map[string]any)
+	if !ok || state == nil {
+		panic("quality admission test fixture must contain an admission state map")
+	}
+	return state
+}
+
 func qualityAdmissionTestChecked(account *Account, started, finished time.Time) {
-	state := account.Extra[QualityProbeAdmissionKey].(map[string]any)
+	state := qualityAdmissionTestState(account)
 	state["checked_started_at"] = started.Format(time.RFC3339Nano)
 	state["checked_finished_at"] = finished.Format(time.RFC3339Nano)
 }
@@ -38,8 +46,8 @@ func TestQualityProbeAdmissionPendingEvidence(t *testing.T) {
 	}{
 		{"no admission configuration", func(a *Account) { a.Extra = nil }, false},
 		{"empty admission configuration", func(a *Account) { a.Extra[QualityProbeAdmissionKey] = map[string]any{} }, false},
-		{"explicitly disabled", func(a *Account) { a.Extra[QualityProbeAdmissionKey].(map[string]any)["enabled"] = false }, false},
-		{"enabled without any recovery boundary", func(a *Account) { delete(a.Extra[QualityProbeAdmissionKey].(map[string]any), "required_after") }, false},
+		{"explicitly disabled", func(a *Account) { qualityAdmissionTestState(a)["enabled"] = false }, false},
+		{"enabled without any recovery boundary", func(a *Account) { delete(qualityAdmissionTestState(a), "required_after") }, false},
 		{"required but never checked", func(*Account) {}, true},
 		{"completed before recovery", func(a *Account) {
 			qualityAdmissionTestChecked(a, boundary.Add(-time.Minute), boundary.Add(-time.Second))
@@ -52,22 +60,22 @@ func TestQualityProbeAdmissionPendingEvidence(t *testing.T) {
 		{"finish precedes start", func(a *Account) { qualityAdmissionTestChecked(a, boundary.Add(time.Second), boundary) }, true},
 		{"finish is in the future", func(a *Account) { qualityAdmissionTestChecked(a, boundary, now.Add(time.Nanosecond)) }, true},
 		{"missing start", func(a *Account) {
-			a.Extra[QualityProbeAdmissionKey].(map[string]any)["checked_finished_at"] = now.Format(time.RFC3339Nano)
+			qualityAdmissionTestState(a)["checked_finished_at"] = now.Format(time.RFC3339Nano)
 		}, true},
 		{"missing finish", func(a *Account) {
-			a.Extra[QualityProbeAdmissionKey].(map[string]any)["checked_started_at"] = boundary.Format(time.RFC3339Nano)
+			qualityAdmissionTestState(a)["checked_started_at"] = boundary.Format(time.RFC3339Nano)
 		}, true},
 		{"invalid start", func(a *Account) {
 			qualityAdmissionTestChecked(a, boundary, now)
-			a.Extra[QualityProbeAdmissionKey].(map[string]any)["checked_started_at"] = "invalid"
+			qualityAdmissionTestState(a)["checked_started_at"] = "invalid"
 		}, true},
 		{"invalid finish", func(a *Account) {
 			qualityAdmissionTestChecked(a, boundary, now)
-			a.Extra[QualityProbeAdmissionKey].(map[string]any)["checked_finished_at"] = "invalid"
+			qualityAdmissionTestState(a)["checked_finished_at"] = "invalid"
 		}, true},
 		{"new recovery invalidates previous check", func(a *Account) {
 			qualityAdmissionTestChecked(a, boundary, boundary.Add(time.Second))
-			a.Extra[QualityProbeAdmissionKey].(map[string]any)["required_after"] = boundary.Add(2 * time.Second).Format(time.RFC3339Nano)
+			qualityAdmissionTestState(a)["required_after"] = boundary.Add(2 * time.Second).Format(time.RFC3339Nano)
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,7 +205,7 @@ func TestQualityProbeAdmissionPendingAccountBudgetReset(t *testing.T) {
 			require.True(t, account.QualityProbeAdmissionPending(now))
 			qualityAdmissionTestChecked(account, tc.reset, now)
 			require.False(t, account.QualityProbeAdmissionPending(now))
-			delete(account.Extra[QualityProbeAdmissionKey].(map[string]any), "checked_started_at")
+			delete(qualityAdmissionTestState(account), "checked_started_at")
 			account.Extra["quota_"+tc.window+"_used"] = 9.0
 			require.False(t, account.QualityProbeAdmissionPending(now), "unexhausted budgets must not establish a reset boundary")
 		})

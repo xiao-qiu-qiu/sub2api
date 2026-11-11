@@ -50,6 +50,7 @@ func TestExcelBPSConfigurationDeferredContextIsLocal(t *testing.T) {
 	require.Same(t, denied, DeferredExcelBPSReasoningPolicyError(marked))
 	require.Same(t, denied, DeferredExcelBPSReasoningPolicyError(ctx))
 	require.Nil(t, DeferredExcelBPSReasoningPolicyError(base))
+	//nolint:staticcheck // Verifies that reading a nil context returns no policy marker.
 	require.Nil(t, DeferredExcelBPSReasoningPolicyError(nil))
 	require.Equal(t, "high", *RequestedReasoningEffortFromContext(base))
 	for _, err := range []error{nil, errors.New("ordinary request error")} {
@@ -57,6 +58,7 @@ func TestExcelBPSConfigurationDeferredContextIsLocal(t *testing.T) {
 		require.Same(t, base, got, "only policy denials may create a deferred marker")
 		require.Nil(t, DeferredExcelBPSReasoningPolicyError(got))
 	}
+	//nolint:staticcheck // Verifies the defensive nil-context fallback.
 	nilBase := WithDeferredExcelBPSReasoningPolicyError(nil, denied)
 	require.NotNil(t, nilBase)
 	require.Same(t, denied, DeferredExcelBPSReasoningPolicyError(nilBase))

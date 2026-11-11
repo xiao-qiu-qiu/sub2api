@@ -35,6 +35,7 @@ func TestWithHTTPUpstreamProfile_LongStream(t *testing.T) {
 }
 
 func TestWithHTTPUpstreamProfile_ExcelBPSWebSocket(t *testing.T) {
+	//nolint:staticcheck // Verifies the defensive nil-context fallback.
 	ctx := WithHTTPUpstreamProfile(nil, HTTPUpstreamProfileExcelBPSWebSocket)
 	if got := HTTPUpstreamProfileFromContext(ctx); got != HTTPUpstreamProfileExcelBPSWebSocket {
 		t.Fatalf("expected profile %q, got %q", HTTPUpstreamProfileExcelBPSWebSocket, got)

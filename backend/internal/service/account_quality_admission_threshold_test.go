@@ -30,7 +30,7 @@ func qualityThresholdContext(five, seven float64) context.Context {
 }
 
 func qualityThresholdChecked(account *Account, started, finished time.Time) {
-	state := account.Extra[QualityProbeAdmissionKey].(map[string]any)
+	state := qualityAdmissionTestState(account)
 	state["checked_started_at"] = started.Format(time.RFC3339Nano)
 	state["checked_finished_at"] = finished.Format(time.RFC3339Nano)
 }

@@ -74,7 +74,7 @@ func readEvent(t *testing.T, reader *bufio.Reader) string {
 	for {
 		line, err := reader.ReadString('\n')
 		require.NoError(t, err)
-		result.WriteString(line)
+		_, _ = result.WriteString(line)
 		if line == "\n" {
 			return result.String()
 		}
@@ -138,7 +138,7 @@ func TestOpenHandshakeProfileAndStreaming(t *testing.T) {
 				w.Header().Set("X-Request-Id", "handshake-request-id")
 				w.Header().Set("X-Ratelimit-Remaining-Requests", "7")
 				c, frame := acceptCreate(t, w, r)
-				defer c.CloseNow()
+				defer func() { _ = c.CloseNow() }()
 				var id, resume string
 				require.NoError(t, json.Unmarshal(frame["basispoints_request_id"], &id))
 				parsedID, err := uuid.Parse(id)
@@ -194,7 +194,7 @@ func TestOpenHandshakeProfileAndStreaming(t *testing.T) {
 			req.Header.Set("Sec-WebSocket-Protocol", "old-ticket")
 			response, err := Open(ctx, client, req, time.Second)
 			require.NoError(t, err)
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			require.Equal(t, http.StatusOK, response.StatusCode)
 			require.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
 			require.Equal(t, "handshake-request-id", response.Header.Get("X-Request-Id"))
@@ -258,7 +258,7 @@ func TestOpenNon101ReturnsStatusHeadersAndBoundedBody(t *testing.T) {
 			response, err := Open(ctx, server.Client(), preparedRequest(t, ctx, server.URL), 0)
 			require.NoError(t, err)
 			require.NotNil(t, response)
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			require.Equal(t, status, response.StatusCode)
 			require.Equal(t, "45", response.Header.Get("Retry-After"))
 			require.Equal(t, "rejection-id", response.Header.Get("X-Request-Id"))

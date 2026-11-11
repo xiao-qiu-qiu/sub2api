@@ -46,6 +46,7 @@ func TestSanitizedNetworkErrorsKeepClassificationAndOnlySafeCauses(t *testing.T)
 					// The standard deadline sentinel is itself a timeout/temporary
 					// net.Error, even when the outer custom error's flags are false.
 					require.Equal(t, timeout || cause == context.DeadlineExceeded, network.Timeout())
+					//nolint:staticcheck // Verifies compatibility with legacy net.Error callers.
 					require.Equal(t, !timeout || cause == context.DeadlineExceeded, network.Temporary())
 					if cause != nil {
 						require.ErrorIs(t, err, cause)

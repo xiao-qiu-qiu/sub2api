@@ -117,14 +117,13 @@ func (b *eventBody) Read(p []byte) (int, error) {
 }
 
 func (b *eventBody) setEvent(eventType string, data []byte) {
-	var framed bytes.Buffer
-	framed.Grow(len(eventType) + len(data) + 16)
-	framed.WriteString("event: ")
-	framed.WriteString(eventType)
-	framed.WriteString("\ndata: ")
-	framed.Write(data)
-	framed.WriteString("\n\n")
-	b.pending.Reset(framed.Bytes())
+	framed := make([]byte, 0, len(eventType)+len(data)+16)
+	framed = append(framed, "event: "...)
+	framed = append(framed, eventType...)
+	framed = append(framed, "\ndata: "...)
+	framed = append(framed, data...)
+	framed = append(framed, '\n', '\n')
+	b.pending.Reset(framed)
 }
 
 func (b *eventBody) fail(code, message string) {
@@ -147,7 +146,7 @@ func responseEvent(name string) (terminal, known bool) {
 		return false, false
 	}
 	for _, c := range name {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '.' && c != '_' {
 			return false, false
 		}
 	}

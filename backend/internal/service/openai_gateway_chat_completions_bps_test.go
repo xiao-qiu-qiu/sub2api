@@ -80,7 +80,7 @@ func TestForwardAsChatCompletions_BPSResponseConversion(t *testing.T) {
 					var usage gjson.Result
 					for _, chunk := range chunks {
 						require.Equal(t, "chat.completion.chunk", chunk.Get("object").String())
-						text.WriteString(chunk.Get("choices.0.delta.content").String())
+						_, _ = text.WriteString(chunk.Get("choices.0.delta.content").String())
 						if chunk.Get("choices.0.finish_reason").String() == "stop" {
 							finishes++
 						}
@@ -164,8 +164,8 @@ func TestForwardAsChatCompletions_BPSToolCallConversion(t *testing.T) {
 						if call.Get("id").Exists() {
 							require.Equal(t, "call_chat_tool", call.Get("id").String())
 						}
-						name.WriteString(call.Get("function.name").String())
-						arguments.WriteString(call.Get("function.arguments").String())
+						_, _ = name.WriteString(call.Get("function.name").String())
+						_, _ = arguments.WriteString(call.Get("function.arguments").String())
 					}
 					if chunk.Get("choices.0.finish_reason").String() == "tool_calls" {
 						finishes++
@@ -262,7 +262,7 @@ func TestForwardAsChatCompletions_BPSErrorsDoNotReplayOrAppendResponse(t *testin
 					var errors int
 					var text strings.Builder
 					for _, chunk := range chatBPSChunks(t, rec.Body.String()) {
-						text.WriteString(chunk.Get("choices.0.delta.content").String())
+						_, _ = text.WriteString(chunk.Get("choices.0.delta.content").String())
 						if chunk.Get("error").Exists() {
 							errors++
 							require.Equal(t, "invalid_value", chunk.Get("error.code").String())
@@ -298,7 +298,7 @@ func TestForwardAsChatCompletions_BPSNormalIncomplete(t *testing.T) {
 			_, bridge, err := basispoints.Prepare([]byte(`{"model":"gpt-6-astra","input":"hello","stream":true}`), "", nil)
 			require.NoError(t, err)
 			converted := bridge.StreamWithRepairs(t.Context(), io.NopCloser(strings.NewReader(chatBPSIncompleteWire(tc.reason))), nil, nil)
-			defer converted.Close()
+			defer func() { _ = converted.Close() }()
 			wire, err := io.ReadAll(converted)
 			require.NoError(t, err)
 			var terminal gjson.Result
@@ -346,7 +346,7 @@ func TestForwardAsChatCompletions_BPSNormalIncomplete(t *testing.T) {
 						var usage gjson.Result
 						for _, chunk := range chatBPSChunks(t, rec.Body.String()) {
 							require.False(t, chunk.Get("error").Exists(), chunk.Raw)
-							text.WriteString(chunk.Get("choices.0.delta.content").String())
+							_, _ = text.WriteString(chunk.Get("choices.0.delta.content").String())
 							if chunk.Get("choices.0.finish_reason").String() == tc.finish {
 								finishes++
 							}

@@ -62,7 +62,7 @@ func TestBPSWebSocketHTTP1CONNECTAndBodyLifecycle(t *testing.T) {
 			serverErr <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, _, err = conn.ReadMessage() // Exercises the upgraded body's Write method.
 		if err != nil {
@@ -90,12 +90,17 @@ func TestBPSWebSocketHTTP1CONNECTAndBodyLifecycle(t *testing.T) {
 			http.Error(w, "local target unavailable", http.StatusBadGateway)
 			return
 		}
-		defer target.Close()
-		client, rw, err := w.(http.Hijacker).Hijack()
+		defer func() { _ = target.Close() }()
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("test proxy requires HTTP hijacking")
+			return
+		}
+		client, rw, err := hijacker.Hijack()
 		if err != nil {
 			return
 		}
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		proxyTarget <- r.Host
 		_, _ = io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		go func() { _, _ = io.Copy(target, rw); _ = target.Close() }()
@@ -105,7 +110,8 @@ func TestBPSWebSocketHTTP1CONNECTAndBodyLifecycle(t *testing.T) {
 
 	s := bpsWebSocketService(t)
 	entry := bpsWebSocketEntry(t, s, proxy.URL, 9971001, 2)
-	transport := entry.client.Transport.(*http.Transport)
+	transport, ok := entry.client.Transport.(*http.Transport)
+	require.True(t, ok, "BPS WebSocket entry must use an HTTP transport")
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
 	transport.TLSClientConfig = &tls.Config{RootCAs: roots}
@@ -120,7 +126,7 @@ func TestBPSWebSocketHTTP1CONNECTAndBodyLifecycle(t *testing.T) {
 	req.Header.Set("Cookie", "session=synthetic-request-cookie")
 	resp, err := s.DoBPSWebSocket(req, proxy.URL, 9971001, 2, time.Second)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
 	require.EqualValues(t, 1, atomic.LoadInt64(&entry.inFlight))
@@ -167,7 +173,7 @@ func TestBPSWebSocketHTTPRefusalAndRedirectRetainPool(t *testing.T) {
 			entry := bpsWebSocketEntry(t, s, "", 9971002, 1)
 			resp, err := s.DoBPSWebSocket(bpsWebSocketRequest(t, t.Context(), server.URL), "", 9971002, 1, time.Second)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			require.Equal(t, status, resp.StatusCode)
 			require.Equal(t, "local-refusal", resp.Header.Get("X-Request-ID"))
 			body, err := io.ReadAll(resp.Body)
@@ -195,7 +201,12 @@ func TestBPSWebSocketHandshakeFailureAndCancellationReleasePool(t *testing.T) {
 				calls.Add(1)
 				close(started)
 				if mode == "disconnect" {
-					conn, _, err := w.(http.Hijacker).Hijack()
+					hijacker, ok := w.(http.Hijacker)
+					if !ok {
+						t.Error("disconnect fixture requires HTTP hijacking")
+						return
+					}
+					conn, _, err := hijacker.Hijack()
 					if err == nil {
 						_ = conn.Close()
 					}
@@ -219,17 +230,19 @@ func TestBPSWebSocketHandshakeFailureAndCancellationReleasePool(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("handshake did not reach the server")
 			}
-			if mode == "cancel" {
+			switch mode {
+			case "cancel":
 				cancel()
-			} else if mode == "quality" {
+			case "quality":
 				require.Positive(t, accountrequest.Default.Cancel(id, time.Now()))
 			}
 			select {
 			case err := <-done:
 				require.Error(t, err)
-				if mode == "quality" {
+				switch mode {
+				case "quality":
 					require.ErrorIs(t, err, accountrequest.ErrQualityDegraded)
-				} else if mode == "cancel" {
+				case "cancel":
 					require.ErrorIs(t, err, context.Canceled)
 				}
 			case <-time.After(3 * time.Second):
@@ -254,7 +267,7 @@ func TestBPSWebSocketStreamCancellationReleasesOnClose(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 				if _, _, err = conn.ReadMessage(); err != nil {
 					return
@@ -270,7 +283,7 @@ func TestBPSWebSocketStreamCancellationReleasesOnClose(t *testing.T) {
 			defer cancel()
 			resp, err := s.DoBPSWebSocket(bpsWebSocketRequest(t, ctx, server.URL), "", id, 1, time.Second)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			reader := bufio.NewReader(resp.Body)
 			_, err = reader.ReadString('\n')
 			require.NoError(t, err)
@@ -321,7 +334,8 @@ func TestBPSWebSocketPoolIsolationAndBudgets(t *testing.T) {
 			require.NotSame(t, ws, sseH1)
 			require.Same(t, ws, bpsWebSocketEntry(t, s, proxy, 1, 3))
 			require.Equal(t, upstreamProtocolModeBPSWebSocketH1, ws.protocolMode)
-			tr := ws.client.Transport.(*http.Transport)
+			tr, ok := ws.client.Transport.(*http.Transport)
+			require.True(t, ok, "BPS WebSocket entry must use an HTTP transport")
 			require.False(t, tr.ForceAttemptHTTP2)
 			require.NotNil(t, tr.TLSNextProto)
 			require.Empty(t, tr.TLSNextProto)
@@ -346,7 +360,7 @@ func TestBPSWebSocketSharedBudgetWaitCancelAndResume(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 				_, _, _ = conn.ReadMessage()
 				_, _, _ = conn.ReadMessage()
@@ -359,7 +373,7 @@ func TestBPSWebSocketSharedBudgetWaitCancelAndResume(t *testing.T) {
 			require.Equal(t, 1, cap(entry.bpsWebSocketSlots))
 			first, err := s.DoBPSWebSocket(bpsWebSocketRequest(t, t.Context(), server.URL), "", id, 1, time.Second)
 			require.NoError(t, err)
-			defer first.Body.Close()
+			defer func() { _ = first.Body.Close() }()
 			otherID := id
 			if isolation == config.ConnectionPoolIsolationProxy {
 				otherID++ // Two accounts share the same proxy budget.
@@ -427,7 +441,10 @@ func TestBPSWebSocketRoutesStayOnSelectedProxy(t *testing.T) {
 	require.EqualValues(t, 1, direct.Load())
 	require.EqualValues(t, 1, explicit.Load())
 	require.Zero(t, regional.Load())
-	s := up.(*astraRoutingUpstream).delegate.(*httpUpstreamService)
+	router, ok := up.(*astraRoutingUpstream)
+	require.True(t, ok, "configured upstream must preserve the Astra routing wrapper")
+	s, ok := router.delegate.(*httpUpstreamService)
+	require.True(t, ok, "Astra routing wrapper must delegate to the HTTP upstream")
 	require.False(t, s.useRegionalEgress("", 9971006, service.HTTPUpstreamProfileExcelBPSWebSocket))
 	requireNoUpstreamInFlight(t, s)
 

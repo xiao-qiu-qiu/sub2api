@@ -40,7 +40,7 @@ func TestStreamProtocolFailuresAreTerminalAndNeverReplay(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				attempts.Add(1)
 				c, _ := acceptCreate(t, w, r)
-				defer c.CloseNow()
+				defer func() { _ = c.CloseNow() }()
 				defer close(closed)
 				if tc.name == "disconnect" {
 					_ = c.Close(websocket.StatusPolicyViolation, "server echoed "+testBearer)
@@ -75,7 +75,7 @@ func TestStreamTerminalEventsAndFutureResponseEvents(t *testing.T) {
 			closed := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				c, _ := acceptCreate(t, w, r)
-				defer c.CloseNow()
+				defer func() { _ = c.CloseNow() }()
 				sendJSON(t, ctx, c, `{"type":"response.future_event.delta","delta":"future"}`)
 				sendJSON(t, ctx, c, `{"type":"`+terminal+`","response":{"status":"test"},"basispoints_replay_cursor":"private-cursor"}`)
 				_, _, _ = c.Read(ctx)
@@ -104,7 +104,7 @@ func TestStreamIdleTimeout(t *testing.T) {
 			finish := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				c, _ := acceptCreate(t, w, r)
-				defer c.CloseNow()
+				defer func() { _ = c.CloseNow() }()
 				if idle > 0 {
 					_, _, _ = c.Read(ctx)
 					return
@@ -118,7 +118,7 @@ func TestStreamIdleTimeout(t *testing.T) {
 			defer server.Close()
 			response, err := Open(ctx, server.Client(), preparedRequest(t, ctx, server.URL), idle)
 			require.NoError(t, err)
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			result := make(chan string, 1)
 			go func() {
 				data, err := io.ReadAll(response.Body)
@@ -151,7 +151,7 @@ func TestControlFramesResetIdleDeadline(t *testing.T) {
 	ctx := testContext(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := acceptCreate(t, w, r)
-		defer c.CloseNow()
+		defer func() { _ = c.CloseNow() }()
 		for i := 0; i < 4; i++ {
 			select {
 			case <-time.After(30 * time.Millisecond):
@@ -165,7 +165,7 @@ func TestControlFramesResetIdleDeadline(t *testing.T) {
 	defer server.Close()
 	response, err := Open(ctx, server.Client(), preparedRequest(t, ctx, server.URL), 90*time.Millisecond)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Contains(t, string(data), "event: response.completed")
@@ -177,14 +177,14 @@ func TestStreamReadLimit(t *testing.T) {
 	ctx := testContext(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := acceptCreate(t, w, r)
-		defer c.CloseNow()
+		defer func() { _ = c.CloseNow() }()
 		// Deliberately larger than 16 MiB minus the SSE framing allowance.
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"response.output_text.delta","delta":"`+strings.Repeat("x", maxWSMessage)+`"}`))
 	}))
 	defer server.Close()
 	response, err := Open(ctx, server.Client(), preparedRequest(t, ctx, server.URL), 0)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Contains(t, string(data), "event: response.failed")

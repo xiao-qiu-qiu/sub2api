@@ -33,10 +33,11 @@ func SetQualityProbeFinishedAt(plan *ScheduledTestPlan, results []*ScheduledTest
 			started := result.StartedAt
 			plan.QualityProbeStartedAt = &started
 		}
-		if result.QualityJudgment == nil ||
-			!(result.Status == "success" && result.QualityJudgment.Verdict == "correct" ||
+		validJudgment := result.QualityJudgment != nil &&
+			(result.Status == "success" && result.QualityJudgment.Verdict == "correct" ||
 				result.Status == "failed" && result.QualityJudgment.Verdict == "incorrect" &&
-					(result.ErrorMessage == "answer_mismatch" || result.ErrorMessage == openAICodexStateDegradedError)) {
+					(result.ErrorMessage == "answer_mismatch" || result.ErrorMessage == openAICodexStateDegradedError))
+		if !validJudgment {
 			plan.QualityProbeAdmissionChecked = false
 		}
 		if plan.PelicanConfig != nil && plan.PelicanConfig.QuestionKind == QualityRandomQuestionKind {

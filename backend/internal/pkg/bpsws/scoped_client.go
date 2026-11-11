@@ -24,9 +24,11 @@ func scopedClient(ctx context.Context, original *http.Client) (*http.Client, con
 	closeIdle := func() {}
 	if base, ok := client.Transport.(*http.Transport); ok {
 		transport := base.Clone()
-		transport.DialContext = scopedDial(scope, base.DialContext, base.Dial)
-		if base.DialTLSContext != nil || base.DialTLS != nil {
-			transport.DialTLSContext = scopedDial(scope, base.DialTLSContext, base.DialTLS)
+		//nolint:staticcheck // Honor legacy dial callbacks supplied by the caller; context-aware callbacks still take precedence.
+		legacyDial, legacyTLSDial := base.Dial, base.DialTLS
+		transport.DialContext = scopedDial(scope, base.DialContext, legacyDial)
+		if base.DialTLSContext != nil || legacyTLSDial != nil {
+			transport.DialTLSContext = scopedDial(scope, base.DialTLSContext, legacyTLSDial)
 		}
 		client.Transport = transport
 		closeIdle = transport.CloseIdleConnections

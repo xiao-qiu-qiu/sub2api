@@ -109,7 +109,7 @@ func TestExcelBPSWebSocketTransportSelection(t *testing.T) {
 			require.NoError(t, err)
 			resp, err := svc.doExcelBPSUpstream(req, "http://proxy.example:8080", account)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			require.Equal(t, 403, resp.StatusCode, "HTTP rejections retain existing handling")
 			require.Equal(t, "http://proxy.example:8080", u.lastProxyURL)
 			require.Len(t, u.requests, 1)

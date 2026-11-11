@@ -35,6 +35,7 @@ func safeError(ctx context.Context, err error, message string) error {
 		if network, ok := node.(net.Error); ok {
 			isNetwork = true
 			timeout = timeout || network.Timeout()
+			//nolint:staticcheck // Preserve legacy net.Error classification while removing sensitive error text.
 			temporary = temporary || network.Temporary()
 		}
 	}

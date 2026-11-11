@@ -77,6 +77,7 @@ func TestExcelBPSConfigurationNoUpdatePreservesBodyAndContext(t *testing.T) {
 
 func TestExcelBPSConfigurationUnboundPolicyPreservesUpdatedClientEffort(t *testing.T) {
 	body := excelBPSConfigurationPolicyBody(t, excelBPSConfigurationEffortUpdate("max"))
+	//nolint:staticcheck // Verifies that an unbound nil context preserves the client's effort.
 	ctx, resolved, err := prepareExcelBPSConfiguration(nil, body)
 	require.NoError(t, err)
 	require.Equal(t, "max", gjson.GetBytes(resolved, "reasoning.effort").String())
