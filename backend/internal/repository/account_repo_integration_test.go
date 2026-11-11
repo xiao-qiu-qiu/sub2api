@@ -1566,6 +1566,14 @@ func (s *AccountRepoSuite) TestUpdateExtra_NilExtra() {
 }
 
 func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFreshSnapshot() {
+	// Other tests can commit outbox events to the shared database. Keep one
+	// unrelated event present so this assertion cannot rely on an empty table.
+	unrelated := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-extra-neutral-unrelated"})
+	_, err := s.repo.sql.ExecContext(s.ctx,
+		"INSERT INTO scheduler_outbox (event_type, account_id) VALUES ($1, $2)",
+		service.SchedulerOutboxEventAccountChanged, unrelated.ID)
+	s.Require().NoError(err)
+
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-extra-neutral",
 		Platform: service.PlatformOpenAI,
@@ -1599,8 +1607,13 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 	s.Require().Equal(0.42, got.Extra["session_window_utilization"])
 
 	var outboxCount int
-	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql, "SELECT COUNT(*) FROM scheduler_outbox", nil, &outboxCount))
+	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql,
+		"SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1", []any{account.ID}, &outboxCount))
 	s.Require().Zero(outboxCount)
+	var unrelatedCount int
+	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql,
+		"SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1", []any{unrelated.ID}, &unrelatedCount))
+	s.Require().Equal(1, unrelatedCount, "neutral updates must preserve other accounts' events")
 	s.Require().Len(cacheRecorder.setAccounts, 1)
 	s.Require().NotNil(cacheRecorder.accounts[account.ID])
 	s.Require().Equal(service.StatusActive, cacheRecorder.accounts[account.ID].Status)
