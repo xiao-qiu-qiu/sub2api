@@ -2737,13 +2737,13 @@ export interface TotpLogin2FARequest {
 // ==================== Scheduled Test Types ====================
 
 export interface QualityJudgeConfig {
-  kind?: 'llm' | 'jev'
+  kind?: 'llm' | 'jev' | 'exact'
   group_id: number
   model_id: string
   prompt: string
 }
 export interface QualityJudgment {
-  kind?: 'llm' | 'jev'
+  kind?: 'llm' | 'jev' | 'exact'
   rules_version?: string
   latency_ms?: number
   verdict: 'correct' | 'incorrect' | 'unknown'
@@ -2843,6 +2843,7 @@ export interface PelicanTestConfig {
 export interface ScheduledTestPlan {
   scope_suspended?: boolean
   quality_template_id?: number
+  source_template_id?: number
   account_name?: string
   pelican_config?: PelicanTestConfig
   running_until?: string | null

@@ -282,7 +282,7 @@ func (h *ScheduledTestHandler) ListPelicanHistory(c *gin.Context) {
 }
 
 func (h *ScheduledTestHandler) ListQualityPlans(c *gin.Context) {
-	plans, err := h.scheduledTestSvc.ListQualityPlans(c.Request.Context())
+	plans, err := h.scheduledTestSvc.ListQualityPlansWithSources(c.Request.Context())
 	if err != nil {
 		response.InternalError(c, "Failed to load quality plans")
 		return
@@ -311,7 +311,44 @@ func (h *ScheduledTestHandler) ListQualityHistory(c *gin.Context) {
 		response.BadRequest(c, "invalid before_id")
 		return
 	}
-	page, err := h.scheduledTestSvc.ListQualityHistory(c.Request.Context(), beforeID)
+	filter := service.QualityHistoryFilter{}
+	params := c.Request.URL.Query()
+	for _, entry := range []struct {
+		name   string
+		target *int64
+	}{
+		{"template_id", &filter.TemplateID}, {"plan_id", &filter.PlanID},
+	} {
+		if values, present := params[entry.name]; present {
+			if len(values) != 1 {
+				response.BadRequest(c, "invalid "+entry.name)
+				return
+			}
+			value, parseErr := strconv.ParseInt(values[0], 10, 64)
+			if parseErr != nil || value <= 0 {
+				response.BadRequest(c, "invalid "+entry.name)
+				return
+			}
+			*entry.target = value
+		}
+	}
+	if values, present := params["unassigned"]; present {
+		if len(values) != 1 {
+			response.BadRequest(c, "invalid unassigned")
+			return
+		}
+		value, parseErr := strconv.ParseBool(values[0])
+		if parseErr != nil {
+			response.BadRequest(c, "invalid unassigned")
+			return
+		}
+		filter.Unassigned = value
+	}
+	if filter.TemplateID != 0 && filter.Unassigned {
+		response.BadRequest(c, "template_id and unassigned cannot be combined")
+		return
+	}
+	page, err := h.scheduledTestSvc.ListFilteredQualityHistory(c.Request.Context(), beforeID, filter)
 	if err != nil {
 		response.InternalError(c, "Failed to load quality operation history")
 		return

@@ -26,11 +26,21 @@ const legacyOwnedRecoverySQL = `(COALESCE(pelican_config->'quality'->>'action_on
  AND NOT EXISTS (SELECT 1 FROM scheduled_test_plans recovery
  WHERE recovery.account_id=scheduled_test_plans.account_id AND recovery.enabled
  AND recovery.pelican_config->'quality'->>'action_on'='passed'
- AND NOT EXISTS (SELECT 1 FROM quality_rule_template_accounts binding WHERE binding.plan_id=recovery.id)))`
+ AND NOT EXISTS (SELECT 1 FROM quality_rule_template_accounts binding WHERE binding.plan_id=recovery.id))
+ AND NOT EXISTS (SELECT 1 FROM quality_rule_template_accounts l JOIN quality_rule_templates t
+ ON t.id=l.template_id WHERE l.plan_id=scheduled_test_plans.id AND NOT t.enabled))`
 
 func legacyQualityRecoveryTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, state *qualityState) (bool, error) {
 	q := plan.PelicanConfig.Quality
 	if q == nil || q.RunsOnPassed() || !q.AutoRestore || !qualityRecoveryProbeOwns(state) {
+		return false, nil
+	}
+	var paused bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM quality_rule_template_accounts l
+ JOIN quality_rule_templates t ON t.id=l.template_id WHERE l.plan_id=$1 AND NOT t.enabled)`, plan.ID).Scan(&paused); err != nil {
+		return false, err
+	}
+	if paused {
 		return false, nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM scheduled_test_plans WHERE account_id=$1 AND enabled
@@ -68,13 +78,17 @@ func legacyQualityRecoveryTx(ctx context.Context, tx *sql.Tx, plan *service.Sche
 // predicates, on this transaction, instead of trusting an earlier sync snapshot.
 func qualityTemplatePlanMatchesTx(ctx context.Context, tx *sql.Tx, planID, accountID int64) (bool, error) {
 	var raw []byte
-	err := tx.QueryRowContext(ctx, `SELECT t.account_filter FROM quality_rule_template_accounts l
- JOIN quality_rule_templates t ON t.id=l.template_id WHERE l.plan_id=$1 AND l.account_id=$2`, planID, accountID).Scan(&raw)
+	var enabled bool
+	err := tx.QueryRowContext(ctx, `SELECT t.account_filter,t.enabled FROM quality_rule_template_accounts l
+ JOIN quality_rule_templates t ON t.id=l.template_id WHERE l.plan_id=$1 AND l.account_id=$2`, planID, accountID).Scan(&raw, &enabled)
 	if err == sql.ErrNoRows {
 		return true, nil // Standalone or explicitly detached plan.
 	}
 	if err != nil {
 		return false, err
+	}
+	if !enabled {
+		return false, nil
 	}
 	var filter service.QualityRuleAccountFilter
 	if err = json.Unmarshal(raw, &filter); err != nil {

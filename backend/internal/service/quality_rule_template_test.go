@@ -21,7 +21,8 @@ func newTemplatePlanRepo() *templatePlanRepo {
 func (r *templatePlanRepo) add(plan *ScheduledTestPlan) (*ScheduledTestPlan, bool) {
 	scope := qualityRuleScope(plan.PelicanConfig)
 	for _, existing := range r.plans {
-		if existing.AccountID == plan.AccountID && qualityRuleScope(existing.PelicanConfig) == scope {
+		if existing.AccountID == plan.AccountID && existing.SourceTemplateID == plan.SourceTemplateID &&
+			(plan.SourceTemplateID != 0 || qualityRuleScope(existing.PelicanConfig) == scope) {
 			return nil, false
 		}
 	}
@@ -228,7 +229,7 @@ func TestProvideScheduledTestServiceWiresTemplateRepository(t *testing.T) {
 
 func TestQualityTemplateCoversMatchingAndLaterAccounts(t *testing.T) {
 	plans := newTemplatePlanRepo()
-	// Account 2 already has a quarantine rule; 3 is not an OpenAI OAuth account; 4 is a UI test account.
+	// Account 2 has a manual rule that can coexist with this template; 3 is not an OpenAI OAuth account; 4 is a UI test account.
 	_, _ = plans.add(&ScheduledTestPlan{AccountID: 2, PelicanConfig: &PelicanTestConfig{Quality: &QualityPolicy{Action: "remove_groups"}}})
 	templates := newFakeTemplateRepo(plans,
 		openAIOAuthAccount(1), openAIOAuthAccount(2),
@@ -239,9 +240,9 @@ func TestQualityTemplateCoversMatchingAndLaterAccounts(t *testing.T) {
 
 	template, created, err := svc.CreateQualityTemplate(context.Background(), probeTemplate())
 	require.NoError(t, err)
-	require.Equal(t, 1, created)
+	require.Equal(t, 2, created)
 	require.Equal(t, QualityRuleAccountFilter{Group: "7", Statuses: []string{"active"}}, templates.filters[0])
-	require.Len(t, template.PlanIDs, 1)
+	require.Len(t, template.PlanIDs, 2)
 	require.NotNil(t, template.LastSyncedAt)
 	first := plansByAccount(plans)[1]
 	require.NotNil(t, first)
@@ -324,7 +325,7 @@ func TestQualityTemplateSyncSkipsStaleTemplateVersion(t *testing.T) {
 	_, err = templates.Update(context.Background(), template)
 	require.NoError(t, err)
 	templates.accounts = []QualityTemplateAccount{openAIOAuthAccount(1)}
-	created, err := svc.syncQualityTemplate(context.Background(), &stale, nil)
+	created, err := svc.syncQualityTemplate(context.Background(), &stale)
 	require.NoError(t, err)
 	require.Zero(t, created)
 	require.Empty(t, plans.plans)
@@ -380,4 +381,18 @@ func TestQualityTemplateGroupID(t *testing.T) {
 	require.Equal(t, int64(0), QualityTemplateGroupID(QualityRuleAccountFilter{}))
 	require.Equal(t, int64(AccountListGroupUngrouped), QualityTemplateGroupID(QualityRuleAccountFilter{Group: "ungrouped"}))
 	require.Equal(t, int64(12), QualityTemplateGroupID(QualityRuleAccountFilter{Group: "12"}))
+}
+
+func (r *fakeTemplateRepo) TemplateDiagnostics(_ context.Context, t *QualityRuleTemplate) (*QualityTemplateDiagnostics, error) {
+	var plans []*ScheduledTestPlan
+	copy := *t
+	copy.ExcludedAccountIDs = nil
+	for accountID, planID := range r.links[t.ID] {
+		if p, ok := r.plans.plans[planID]; ok {
+			plans = append(plans, p)
+		} else {
+			copy.ExcludedAccountIDs = append(copy.ExcludedAccountIDs, accountID)
+		}
+	}
+	return DescribeQualityTemplate(&copy, r.accounts, plans), nil
 }

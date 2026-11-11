@@ -58,10 +58,13 @@ func NewQualityJudgeService(accounts AccountRepository, groups GroupRepository, 
 
 func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cfg *PelicanTestConfig, answer string) *QualityJudgment {
 	result := &QualityJudgment{Verdict: "unknown", Reason: "judge_not_configured"}
-	if cfg.Quality == nil || cfg.Quality.Judge == nil {
+	if cfg == nil || cfg.Quality == nil || cfg.Quality.Judge == nil {
 		return result
 	}
 	judge := cfg.Quality.Judge
+	if judge.Kind == "exact" {
+		return judgeQualityExact(cfg, answer)
+	}
 	if judge.Kind == "jev" {
 		// Jev must never fall through to business account selection.
 		return s.judgeJev(ctx, cfg, answer)

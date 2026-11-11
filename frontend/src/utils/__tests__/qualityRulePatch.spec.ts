@@ -109,6 +109,58 @@ describe('quality rule copy inputs', () => {
   })
 })
 
+describe('local exact-answer judge configuration', () => {
+  it('accepts exact by kind alone while retaining external judge validation', () => {
+    expect(qualityJudgeConfigured({ kind: 'exact' } as any)).toBe(true)
+    expect(qualityJudgeConfigured({ kind: 'exact', group_id: 0, model_id: '', prompt: '' })).toBe(true)
+    expect(qualityJudgeConfigured()).toBe(false)
+    expect(qualityJudgeConfigured({ kind: 'jev', group_id: 0, model_id: '', prompt: '' })).toBe(false)
+    expect(qualityJudgeConfigured({ kind: 'llm', group_id: 21, model_id: 'judge', prompt: '' })).toBe(false)
+  })
+
+  it('copies exact without retaining external judge fields or mutating the source', () => {
+    const source = draft().pelican_config
+    source.quality.judge = { kind: 'exact', group_id: 21, model_id: 'stale-judge', prompt: 'Stale external instructions' }
+    Object.assign(source.quality.judge, { api_key: 'synthetic-secret', base_url: 'https://example.com' })
+    const before = JSON.stringify(source), copied = copyQualityRuleConfig(source)
+    expect(copied.quality.judge).toEqual({ kind: 'exact', group_id: 0, model_id: '', prompt: '' })
+    expect(copied.quality.expected_answer).toBe('42')
+    expect(JSON.stringify(source)).toBe(before)
+    expect(JSON.stringify(copied)).not.toContain('synthetic-secret')
+    copied.quality.judge!.prompt = 'Changed'
+    expect(JSON.stringify(source)).toBe(before)
+  })
+
+  it('bulk applies exact across different targets while preserving each action and owning independent configs', () => {
+    const source = draft(), first = plan(), second = plan()
+    source.pelican_config.quality.judge = { kind: 'exact' } as any
+    second.pelican_config!.quality!.remove_group_ids = [100]
+    const before = JSON.stringify([source, first, second])
+    const results = [first, second].map(target => buildQualityRulePatch(target, source, ['test']).pelican_config!)
+    for (const [index, result] of results.entries()) {
+      expect(result.quality!.judge).toEqual({ kind: 'exact', group_id: 0, model_id: '', prompt: '' })
+      expect(result.quality!.expected_answer).toBe('42')
+      expect(result.quality!.remove_group_ids).toEqual(index === 0 ? [99] : [100])
+    }
+    results[0].quality!.judge!.prompt = 'Changed'
+    expect(results[1].quality!.judge!.prompt).toBe('')
+    expect(JSON.stringify([source, first, second])).toBe(before)
+    source.pelican_config.quality.expected_answer = ''
+    expect(() => buildQualityRulePatch(first, source, ['test'])).toThrow('qualityOps.questionRequired')
+  })
+
+  it('normalizes a target exact judge during action-only patches without importing the draft judge', () => {
+    const target = plan()
+    target.pelican_config!.quality!.judge = { kind: 'exact', group_id: 21, model_id: 'stale', prompt: 'stale' }
+    Object.assign(target.pelican_config!.quality!.judge, { api_key: 'synthetic-secret' })
+    const result = buildQualityRulePatch(target, draft(), ['action']).pelican_config!
+    expect(result.quality!.judge).toEqual({ kind: 'exact', group_id: 0, model_id: '', prompt: '' })
+    expect(result.quality!.expected_answer).toBe('7')
+    expect(JSON.stringify(result)).not.toContain('synthetic-secret')
+    expect(target.pelican_config!.quality!.judge.model_id).toBe('stale')
+  })
+})
+
 describe('quality rule partial updates', () => {
   it('bulk switches to generated questions without requiring fixed inputs or changing the judge', () => {
     const input = draft()

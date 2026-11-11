@@ -171,7 +171,7 @@ func TestQualityTemplateReincludePostgresExcludedListOnlyLiveNullBindings(t *tes
 }
 
 func TestQualityTemplateReincludePostgresFailuresPreserveTombstone(t *testing.T) {
-	for _, reason := range []string{"not_matching", "unsupported_account", "template_disabled", "rule_exists", "other_template"} {
+	for _, reason := range []string{"not_matching", "unsupported_account", "template_disabled", "rule_exists", "other_template", "manual_rule"} {
 		t.Run(reason, func(t *testing.T) {
 			f := newQualityReincludeFixture(t)
 			switch reason {
@@ -183,7 +183,7 @@ func TestQualityTemplateReincludePostgresFailuresPreserveTombstone(t *testing.T)
 				require.NoError(t, err)
 			case "template_disabled":
 				f.tpl.Enabled = false
-			case "rule_exists", "other_template":
+			case "rule_exists", "other_template", "manual_rule":
 				plan, _ := f.prepare(f.ctx, service.QualityTemplateAccount{ID: f.account})
 				if reason == "other_template" {
 					other := *f.tpl
@@ -193,6 +193,9 @@ func TestQualityTemplateReincludePostgresFailuresPreserveTombstone(t *testing.T)
 					_, err = f.repo.CreateLinkedPlan(f.ctx, saved, plan)
 					require.NoError(t, err)
 				} else {
+					if reason == "rule_exists" {
+						plan.SourceTemplateID = f.tpl.ID
+					}
 					_, err := f.plans.Create(f.ctx, plan)
 					require.NoError(t, err)
 				}
@@ -200,10 +203,14 @@ func TestQualityTemplateReincludePostgresFailuresPreserveTombstone(t *testing.T)
 			before := f.countPlans()
 			result, err := f.svc.UpdateQualityTemplate(f.ctx, f.tpl, f.account)
 			require.NoError(t, err)
-			expected := reason
-			if expected == "other_template" {
-				expected = "rule_exists"
+			if reason == "other_template" || reason == "manual_rule" {
+				require.Equal(t, []service.QualityTemplateReincludeResult{{AccountID: f.account, Status: "created"}}, result.ReincludeResults)
+				require.Equal(t, 1, result.Created)
+				require.True(t, f.binding().Valid)
+				require.Equal(t, before+1, f.countPlans())
+				return
 			}
+			expected := reason
 			require.Equal(t, []service.QualityTemplateReincludeResult{{AccountID: f.account, Status: "failed", Reason: expected}}, result.ReincludeResults)
 			require.Zero(t, result.Created)
 			require.Zero(t, result.Failed)

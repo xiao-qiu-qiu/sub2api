@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { useAuthStore } from './auth'
-import { listQualityPlans, listQualityOperations, listQualityTemplates, listQualityPresets, type QualityOperation, type QualityRuleTemplate, type QualityRulePreset } from '@/api/admin/accountQuality'
+import { listQualityPlans, listQualityOperations, listQualityTemplates, listQualityPresets, type QualityOperation, type QualityOperationFilter, type QualityRuleTemplate, type QualityRulePreset } from '@/api/admin/accountQuality'
 import { getAllIncludingInactive } from '@/api/admin/groups'
 import type { AdminGroup, ScheduledTestPlan } from '@/types'
 
@@ -16,6 +16,8 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
   const rulesError = ref(''), operationsError = ref(''), groupsError = ref('')
   const updatedAt = ref(0)
   const search = ref(''), selectedPlanId = ref<number | null>(null), operationFilter = ref('all')
+  const selectedTemplateId = ref<number | null>(null), unassignedOnly = ref(false)
+  let changingScope = false
   let ruleVersion = 0, operationVersion = 0, groupVersion = 0, presetVersion = 0
   let rulesFlight: Promise<void> | null = null, groupsFlight: Promise<void> | null = null
   const errorText = (e: unknown) => e instanceof Error ? e.message : 'qualityOps.error'
@@ -27,7 +29,11 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     rulesLoaded.value = operationsLoaded.value = false
     rulesLoading.value = operationsLoading.value = moreLoading.value = false
     rulesError.value = operationsError.value = groupsError.value = ''
-    search.value = ''; selectedPlanId.value = null; operationFilter.value = 'all'; updatedAt.value = 0
+    changingScope = true
+    try {
+      search.value = ''; selectedPlanId.value = null; selectedTemplateId.value = null; unassignedOnly.value = false
+      operationFilter.value = 'all'; updatedAt.value = 0
+    } finally { changingScope = false }
     rulesFlight = groupsFlight = null
   }
   async function refreshPresets() {
@@ -40,6 +46,34 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     finally { if (version === presetVersion) presetsLoading.value = false }
   }
   watch(() => auth.user ? `${auth.user.id}:${auth.user.role}` : '', reset, { flush: 'sync' })
+  watch(selectedPlanId, () => {
+    if (changingScope) return
+    clearOperations()
+    void refreshOperations()
+  }, { flush: 'sync' })
+
+  function clearOperations() {
+    operationVersion++
+    operations.value = []; cursor.value = 0; operationsLoaded.value = false
+    operationsLoading.value = moreLoading.value = false; operationsError.value = ''
+  }
+  async function selectProbe(templateId: number | null, unassigned = false) {
+    changingScope = true
+    try {
+      selectedTemplateId.value = templateId; unassignedOnly.value = templateId === null && unassigned
+      selectedPlanId.value = null; search.value = ''; operationFilter.value = 'all'
+      clearOperations()
+    } finally { changingScope = false }
+    await refreshOperations()
+  }
+
+  function operationScope(): QualityOperationFilter {
+    const filter: QualityOperationFilter = {}
+    if (selectedTemplateId.value !== null) filter.template_id = selectedTemplateId.value
+    else if (unassignedOnly.value) filter.unassigned = true
+    if (selectedPlanId.value !== null) filter.plan_id = selectedPlanId.value
+    return filter
+  }
 
   function refreshRules(force = false): Promise<void> {
     if (rulesFlight && !force) return rulesFlight
@@ -50,9 +84,23 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
         // 分组规则和它建出的账号规则一起刷新，卡片上的覆盖数和规则列表不会对不上。
         const [data, groupRules] = await Promise.all([listQualityPlans(), listQualityTemplates()])
         if (version !== ruleVersion) return
+        const firstLoad = !rulesLoaded.value
         plans.value = data; templates.value = groupRules; rulesLoaded.value = true
-        if (selectedPlanId.value && !data.some(p => p.id === selectedPlanId.value)) selectedPlanId.value = null
         updatedAt.value = Date.now()
+        if ((firstLoad && selectedTemplateId.value === null && !unassignedOnly.value && groupRules.length > 0) ||
+          (selectedTemplateId.value !== null && !groupRules.some(t => t.id === selectedTemplateId.value))) {
+          await selectProbe(groupRules[0]?.id ?? null, groupRules.length === 0)
+        } else if (selectedPlanId.value !== null) {
+          const selected = data.find(p => p.id === selectedPlanId.value)
+          const template = groupRules.find(t => t.id === selectedTemplateId.value)
+          if (!selected || (selectedTemplateId.value !== null &&
+            (!template?.plan_ids.includes(selected.id) || (selected.source_template_id && selected.source_template_id !== selectedTemplateId.value)))) {
+            changingScope = true
+            try { selectedPlanId.value = null; clearOperations() }
+            finally { changingScope = false }
+            await refreshOperations()
+          }
+        }
       } catch (e) { if (version === ruleVersion) rulesError.value = errorText(e) }
       finally { if (version === ruleVersion) { rulesLoading.value = false; rulesFlight = null } }
     })()
@@ -78,7 +126,8 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     else { operationsLoading.value = true; moreLoading.value = false }
     operationsError.value = ''
     try {
-      const page = await listQualityOperations(append ? cursor.value : 0)
+      const filter = operationScope(), beforeId = append ? cursor.value : 0
+      const page = await (Object.keys(filter).length ? listQualityOperations(beforeId, filter) : listQualityOperations(beforeId))
       if (version !== operationVersion) return
       const unique = new Map<number, QualityOperation>()
       for (const item of [...(append ? operations.value : []), ...page.items]) unique.set(item.id, item)
@@ -88,10 +137,16 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     finally { if (version === operationVersion) operationsLoading.value = moreLoading.value = false }
   }
   async function refresh() {
-    await Promise.all([refreshRules(), refreshGroups(), refreshOperations(), refreshPresets()])
+    const version = operationVersion
+    const refreshRecords = async () => {
+      await refreshRules()
+      // Scope reconciliation already refreshes its records; avoid a second fetch.
+      if (version === operationVersion) await refreshOperations()
+    }
+    await Promise.all([refreshRecords(), refreshGroups(), refreshPresets()])
   }
   return { plans, groups, templates, operations, cursor, rulesLoaded, operationsLoaded, rulesLoading, operationsLoading, moreLoading,
-    rulesError, operationsError, groupsError, updatedAt, search, selectedPlanId, operationFilter,
+    rulesError, operationsError, groupsError, updatedAt, search, selectedPlanId, selectedTemplateId, unassignedOnly, operationFilter,
     presets, presetsLoading, presetsError, refreshPresets,
-    refresh, refreshRules, refreshGroups, refreshOperations, reset }
+    refresh, refreshRules, refreshGroups, refreshOperations, selectProbe, reset }
 })

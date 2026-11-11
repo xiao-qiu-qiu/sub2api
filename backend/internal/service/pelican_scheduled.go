@@ -420,7 +420,11 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 	started := time.Now()
 	failure := func(message string) *ScheduledTestResult {
 		finished := time.Now()
-		return &ScheduledTestResult{Status: "failed", ErrorMessage: message, StartedAt: started, FinishedAt: finished, LatencyMs: finished.Sub(started).Milliseconds(), PelicanConfig: plan.PelicanConfig}
+		failed := &ScheduledTestResult{Status: "failed", ErrorMessage: message, StartedAt: started, FinishedAt: finished, LatencyMs: finished.Sub(started).Milliseconds(), PelicanConfig: plan.PelicanConfig}
+		if qualityExactJudgeConfigured(plan.PelicanConfig) && !isOpenAICodexStateProbePlan(plan.PelicanConfig) {
+			failed.QualityJudgment = qualityExactUnknown("judge_exact_incomplete_answer")
+		}
+		return failed
 	}
 	defer func() {
 		if recover() != nil {
@@ -443,6 +447,14 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 		return failure("scheduled_test_empty_result: background sample returned no result")
 	}
 	result.PelicanConfig = plan.PelicanConfig
+	if qualityExactJudgeConfigured(plan.PelicanConfig) && !isOpenAICodexStateProbePlan(plan.PelicanConfig) && result.Status != "skipped" &&
+		(result.Status != "success" || result.ErrorMessage != "") {
+		// Never compare text from a failed HTTP request or incomplete stream,
+		// even when its partial body happens to match the reference.
+		result.QualityJudgment = qualityExactUnknown("judge_exact_incomplete_answer")
+		result.Status = "failed"
+		return result
+	}
 	// 探针题型的结果自带 correct/incorrect/unknown 判定，不经过判题模型。
 	if plan.PelicanConfig.Quality != nil && result.Status == "success" && !isOpenAICodexStateProbePlan(plan.PelicanConfig) {
 		var judgment *QualityJudgment
@@ -451,6 +463,8 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 			if strings.TrimSpace(result.ResponseText) == "21" {
 				judgment.Verdict = "correct"
 			}
+		} else if qualityExactJudgeConfigured(plan.PelicanConfig) {
+			judgment = judgeQualityExact(plan.PelicanConfig, result.ResponseText)
 		} else if plan.TriggerSource == quality5xxSource && isBuiltinCandyPlan(plan.PelicanConfig) {
 			judgment = &QualityJudgment{Verdict: "incorrect", Reason: "builtin_candy", AccountID: plan.AccountID}
 			if CandyAnswerCorrect(result.ResponseText) {
@@ -515,6 +529,9 @@ func isBuiltinCandyPlan(cfg *PelicanTestConfig) bool {
 
 // Missing kind preserves HTML validation for saved plans from older versions.
 func intelligenceTestPrompt(cfg *PelicanTestConfig) string {
+	if qualityExactJudgeConfigured(cfg) {
+		return cfg.Prompt + "\n\n" + qualityExactAnswerContract
+	}
 	if cfg.Quality != nil {
 		return cfg.Prompt + "\n\n只输出最终答案，不要解释。"
 	}
@@ -530,7 +547,7 @@ func intelligenceTestPrompt(cfg *PelicanTestConfig) string {
 }
 func intelligenceTestOutputError(cfg *PelicanTestConfig, output string) string {
 	if cfg.Quality != nil {
-		// Completed answers are graded by the configured model in the runner.
+		// The runner grades completed answers with the configured judge.
 		if strings.TrimSpace(output) == "" {
 			return pelicanErrEmptyOutput
 		}

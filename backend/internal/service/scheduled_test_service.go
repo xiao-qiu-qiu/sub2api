@@ -228,3 +228,62 @@ func (s *ScheduledTestService) ListPelicanHistory(ctx context.Context, beforeID 
 	}
 	return page, nil
 }
+
+func (s *ScheduledTestService) ListFilteredQualityHistory(ctx context.Context, beforeID int64, filter QualityHistoryFilter) (*QualityHistoryPage, error) {
+	if beforeID < 0 || filter.TemplateID < 0 || filter.PlanID < 0 || (filter.TemplateID != 0 && filter.Unassigned) {
+		return nil, fmt.Errorf("invalid quality history filter")
+	}
+	repo, ok := s.resultRepo.(FilteredQualityHistoryRepository)
+	if !ok {
+		if filter == (QualityHistoryFilter{}) {
+			return s.ListQualityHistory(ctx, beforeID)
+		}
+		return nil, fmt.Errorf("quality history filtering is unavailable")
+	}
+	items, err := repo.ListFilteredQualityHistory(ctx, beforeID, 101, filter)
+	if err != nil {
+		return nil, err
+	}
+	// Results are persisted individually after all model requests have ended.
+	// During those writes (or after a failed write), never label a partial round
+	// as passing simply because its first saved sample passed.
+	for _, item := range items {
+		expected := item.TotalCount
+		if cfg := item.PelicanConfig; cfg != nil && len(cfg.ModelIDs) > 1 {
+			if planned := len(cfg.ModelIDs) * cfg.ParallelCount; planned > expected {
+				expected = planned
+			}
+		}
+		item.TotalCount = expected - item.SkippedCount
+		if item.TotalCount <= 0 {
+			item.TotalCount = 0
+			item.Status = "skipped"
+		} else if item.PassedCount == item.TotalCount {
+			item.Status = "success"
+		} else {
+			item.Status = "failed"
+		}
+	}
+	page := &QualityHistoryPage{Items: items}
+	if len(items) > 100 {
+		page.Items = items[:100]
+		page.NextCursor = items[99].ID
+	}
+	return page, nil
+}
+
+// ListQualityPlansWithSources retains immutable origins even after template detachment.
+func (s *ScheduledTestService) ListQualityPlansWithSources(ctx context.Context) ([]*ScheduledTestPlan, error) {
+	plans, err := s.planRepo.ListQualityPlans(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if repo, ok := s.planRepo.(interface {
+		PopulatePlanSources(context.Context, []*ScheduledTestPlan) error
+	}); ok {
+		if err := repo.PopulatePlanSources(ctx, plans); err != nil {
+			return nil, err
+		}
+	}
+	return plans, nil
+}

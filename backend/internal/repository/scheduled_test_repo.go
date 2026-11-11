@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 // --- Plan Repository ---
@@ -33,24 +34,24 @@ func insertScheduledTestPlan(ctx context.Context, q planRowQuerier, plan *servic
 		return nil, err
 	}
 	row := q.QueryRowContext(ctx, `
-		INSERT INTO scheduled_test_plans (account_id, model_id, cron_expression, enabled, max_results, auto_recover, next_run_at, created_at, updated_at, pelican_config)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8)
-		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
-	`, plan.AccountID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt, marshalPelicanConfig(plan.PelicanConfig))
-	return scanPlan(row)
+		INSERT INTO scheduled_test_plans (account_id, model_id, cron_expression, enabled, max_results, auto_recover, next_run_at, created_at, updated_at, pelican_config, source_template_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, NULLIF($9,0))
+		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0), COALESCE(source_template_id,0)
+	`, plan.AccountID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt, marshalPelicanConfig(plan.PelicanConfig), plan.SourceTemplateID)
+	return scanPlan(row, false, true)
 }
 
 func (r *scheduledTestPlanRepository) GetByID(ctx context.Context, id int64) (*service.ScheduledTestPlan, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0), COALESCE(source_template_id,0)
 		FROM scheduled_test_plans WHERE id = $1
 	`, id)
-	return scanPlan(row)
+	return scanPlan(row, false, true)
 }
 
 func (r *scheduledTestPlanRepository) ListByAccountID(ctx context.Context, accountID int64) ([]*service.ScheduledTestPlan, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0), COALESCE(source_template_id,0)
 		FROM scheduled_test_plans WHERE account_id = $1
 		ORDER BY created_at DESC, id DESC
 	`, accountID)
@@ -58,29 +59,35 @@ func (r *scheduledTestPlanRepository) ListByAccountID(ctx context.Context, accou
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	return scanPlans(rows)
+	return scanPlans(rows, false, true)
 }
 
 func (r *scheduledTestPlanRepository) ListDue(ctx context.Context, now time.Time) ([]*service.ScheduledTestPlan, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
+		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0), COALESCE(source_template_id,0)
 		FROM scheduled_test_plans
-		WHERE enabled = true AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`) AND next_run_at <= $1
+		WHERE enabled = true AND NOT EXISTS (SELECT 1 FROM quality_rule_template_accounts l
+ JOIN quality_rule_templates t ON t.id=l.template_id WHERE l.plan_id=scheduled_test_plans.id AND NOT t.enabled)
+ AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`) AND next_run_at <= $1
 		ORDER BY next_run_at ASC
 	`, now)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	return scanPlans(rows)
+	return scanPlans(rows, false, true)
 }
 
 func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.ScheduledTestPlan) (*service.ScheduledTestPlan, error) {
+	return r.updateWithTemplate(ctx, plan, nil)
+}
+
+func (r *scheduledTestPlanRepository) updateWithTemplate(ctx context.Context, plan *service.ScheduledTestPlan, expected *service.QualityRuleTemplate) (*service.ScheduledTestPlan, error) {
 	const query = `
 		UPDATE scheduled_test_plans
 		SET model_id = $2, cron_expression = $3, enabled = $4, max_results = $5, auto_recover = $6, next_run_at = $7, updated_at = NOW(), pelican_config = $8
 		WHERE id = $1 AND COALESCE(pelican_config->'quality'->>'action','') <> 'openai_two_fa_admission'
-		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0)
+		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until, scope_suspended, COALESCE((SELECT template_id FROM quality_rule_template_accounts WHERE plan_id=scheduled_test_plans.id LIMIT 1),0), COALESCE(source_template_id,0)
 	`
 	args := []any{plan.ID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt, marshalPelicanConfig(plan.PelicanConfig)}
 
@@ -89,7 +96,24 @@ func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	updated, err := scanPlan(tx.QueryRowContext(ctx, query, args...))
+	var templateID int64
+	var templateVersion time.Time
+	var templateEnabled bool
+	// Template -> plan locks avoid a cycle with the atomic pause trigger.
+	err = tx.QueryRowContext(ctx, `SELECT t.id,t.updated_at,t.enabled FROM quality_rule_templates t
+ JOIN quality_rule_template_accounts l ON l.template_id=t.id WHERE l.plan_id=$1 FOR SHARE OF t`, plan.ID).Scan(&templateID, &templateVersion, &templateEnabled)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if expected != nil {
+		if err == sql.ErrNoRows || templateID != expected.ID || !templateVersion.Equal(expected.UpdatedAt) || templateEnabled != expected.Enabled {
+			return nil, service.ErrQualityTemplateSkipped
+		}
+	} else if err == nil && plan.Enabled && !templateEnabled {
+		return nil, service.QualityScopeConflict("resume this rule's template before enabling its plan")
+	}
+
+	updated, err := scanPlan(tx.QueryRowContext(ctx, query, args...), false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -322,11 +346,17 @@ func scanPlan(row scannable, withAccountName ...bool) (*service.ScheduledTestPla
 		&p.ID, &p.AccountID, &p.ModelID, &p.CronExpression, &p.Enabled, &p.MaxResults, &p.AutoRecover,
 		&p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt, &config, &p.RunningUntil, &p.ScopeSuspended, &p.QualityTemplateID,
 	}
+	if len(withAccountName) > 1 && withAccountName[1] {
+		dest = append(dest, &p.SourceTemplateID)
+	}
 	if len(withAccountName) > 0 && withAccountName[0] {
 		dest = append(dest, &p.AccountName)
 	}
 	if err := row.Scan(dest...); err != nil {
 		return nil, err
+	}
+	if len(withAccountName) < 2 || !withAccountName[1] {
+		p.SourceTemplateID = p.QualityTemplateID
 	}
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &p.PelicanConfig); err != nil {
@@ -372,7 +402,10 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE scheduled_test_plans
  SET running_until = $3, next_run_at = $4
- WHERE id = $1 AND enabled = true AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`)
+ WHERE id = $1 AND enabled = true
+ AND NOT EXISTS (SELECT 1 FROM quality_rule_template_accounts l JOIN quality_rule_templates t
+ ON t.id=l.template_id WHERE l.plan_id=scheduled_test_plans.id AND NOT t.enabled)
+ AND (NOT scope_suspended OR `+legacyOwnedRecoverySQL+`)
  AND (next_run_at <= $2 OR ($7 AND pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'))
  AND (NOT $7 OR (pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'
    AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id=account_id AND type='oauth')))
@@ -550,4 +583,29 @@ func marshalQualityJudgment(judgment *service.QualityJudgment) any {
 	}
 	data, _ := json.Marshal(judgment)
 	return string(data)
+}
+
+func (r *scheduledTestPlanRepository) PopulatePlanSources(ctx context.Context, plans []*service.ScheduledTestPlan) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(plans))
+	byID := make(map[int64]*service.ScheduledTestPlan, len(plans))
+	for _, p := range plans {
+		ids = append(ids, p.ID)
+		byID[p.ID] = p
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id,COALESCE(source_template_id,0) FROM scheduled_test_plans WHERE id=ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, source int64
+		if err := rows.Scan(&id, &source); err != nil {
+			return err
+		}
+		byID[id].SourceTemplateID = source
+	}
+	return rows.Err()
 }

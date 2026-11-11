@@ -10,6 +10,8 @@ import { useAuthStore } from '@/stores/auth'
 import type { ScheduledTestPlan } from '@/types'
 import { defaultQualityBPS } from '@/utils/qualityRulePatch'
 import { CANDY_PROMPT } from '@/utils/intelligenceTest'
+const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
+vi.mock('vue-router', () => ({ useRoute: () => route }))
 vi.mock('@/components/admin/operations/SmartOpsNav.vue', () => ({ default: { template: '<nav />' } }))
 vi.mock('@/components/admin/operations/QualityTabs.vue', () => ({ default: { template: '<nav />' } }))
 vi.mock('@/stores/auth', async () => {
@@ -31,6 +33,7 @@ vi.mock('@/components/account/ModelWhitelistSelector.vue', () => ({ default: { p
 const mountView = () => mount(AccountQualityView, { global: { plugins: [createPinia()], stubs: { Teleport: true, AppLayout: { template: '<main><slot /></main>' } } } })
 describe('quality operations', () => {
   beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); useAuthStore().user!.id = 1; useAuthStore().user!.role = 'admin'; vi.mocked(scheduledTests.create).mockReset(); vi.mocked(scheduledTests.delete).mockReset().mockResolvedValue(undefined); vi.mocked(scheduledTests.update).mockReset(); vi.mocked(accountsAPI.list).mockReset().mockResolvedValue({ items: [{ id: 1, name: 'Test account', platform: 'openai', type: 'oauth' }], total: 1 } as any); vi.mocked(listQualityPlans).mockResolvedValue([]); vi.mocked(listQualityOperations).mockResolvedValue({items:[],next_cursor:0})
+    route.query = {}
     vi.mocked(listQualityTemplates).mockReset().mockResolvedValue([])
     vi.mocked(listQualityPresets).mockReset().mockResolvedValue([])
     vi.mocked(createQualityPreset).mockReset(); vi.mocked(updateQualityPreset).mockReset()
@@ -52,6 +55,136 @@ describe('quality operations', () => {
   const preset = (): QualityRulePreset => ({ id: 17, name: 'Saved probe', model_id: 'preset-model', cron_expression: '0 * * * *', enabled: false, max_results: 75,
     pelican_config: { question_kind: 'state_probe', test_channel: 'account', prompt: '', reasoning_effort: 'high', parallel_count: 1,
       quality: { action: 'observe_only', expected_answer: '', remove_group_ids: [], auto_restore: false } }, created_at: '', updated_at: '' })
+
+  const probeFixture = () => {
+    const plans = rules()
+    // The same account has separate rules in two probes: selection must follow the rule, not account_id.
+    plans[1].account_id = plans[0].account_id
+    const templates = plans.map((plan, index) => ({ ...groupRule(), id: 7 + index, plan_ids: [plan.id],
+      model_id: plan.model_id, pelican_config: { ...plan.pelican_config!, rule_name: 'Probe ' + (7 + index),
+        ...(index === 1 ? { question_kind: 'candy' as const, test_channel: 'bps' as const, prompt: CANDY_PROMPT } : {}),
+        quality: { ...plan.pelican_config!.quality!, ...(index === 2 ? { action_on: 'passed' as const, action: 'enable_scheduling' as const } : {}) },
+      } }))
+    const operations = plans.map(plan => ({ id: 100 + plan.id, plan_id: plan.id, account_id: plan.account_id,
+      account_name: plan.account_name!, started_at: '2026-01-01T00:00:00Z', status: 'success' as const,
+      passed_count: 1, total_count: 1, result_ids: [], quality_action: 'no_change', error_message: '' }))
+    vi.mocked(listQualityPlans).mockResolvedValue(plans)
+    vi.mocked(listQualityTemplates).mockResolvedValue(templates)
+    vi.mocked(listQualityOperations).mockResolvedValue({ items: operations as any, next_cursor: 0 })
+    return { plans, templates, operations }
+  }
+
+  it('switches three probe tabs with only their own rules and records and resets selected account scope', async () => {
+    const { templates } = probeFixture()
+    const wrapper = mountView(); await flushPromises()
+    for (const template of templates) {
+      await wrapper.get('[data-probe-id="' + template.id + '"]').trigger('click'); await flushPromises()
+      const planId = template.plan_ids[0]
+      expect(wrapper.findAll('[data-plan-id]').map(row => row.attributes('data-plan-id'))).toEqual([String(planId)])
+      expect(wrapper.findAll('[data-operation-id]').map(row => row.attributes('data-operation-id'))).toEqual([String(100 + planId)])
+      expect(wrapper.get('[role="tabpanel"]').attributes('aria-labelledby')).toBe('quality-probe-' + template.id)
+      expect(wrapper.get('.all-accounts').attributes('aria-pressed')).toBe('true')
+      expect(wrapper.find('[data-testid="quality-clear-rules"]').exists()).toBe(false)
+      expect(listQualityOperations).toHaveBeenLastCalledWith(0, { template_id: template.id })
+      await wrapper.get('[data-plan-id="' + planId + '"] .rule-select').trigger('click'); await flushPromises()
+      expect(listQualityOperations).toHaveBeenLastCalledWith(0, { template_id: template.id, plan_id: planId })
+      await wrapper.get('[data-plan-id="' + planId + '"] .rule-checkbox input').setValue(true)
+    }
+    expect(wrapper.findAll('[data-plan-id] input:checked')).toHaveLength(1)
+    expect(scheduledTests.create).not.toHaveBeenCalled()
+    expect(updateQualityTemplate).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([7, 8, 9])('opens the corresponding probe %s editor through settings and right click', async id => {
+    probeFixture()
+    const wrapper = mountView(); await flushPromises()
+    for (const selector of ['[data-probe-configure="' + id + '"]', '[data-probe-id="' + id + '"]']) {
+      await wrapper.get(selector).trigger(selector.includes('configure') ? 'click' : 'contextmenu'); await flushPromises()
+      expect(wrapper.get<HTMLInputElement>('[data-testid="quality-model"]').element.value).toBe('model-' + (id - 6))
+      expect(wrapper.get('[data-testid="quality-template-edit-hint"]').exists()).toBe(true)
+      expect(wrapper.get('[data-probe-id="7"]').attributes('aria-selected')).toBe('true')
+      await wrapper.get('.editor-footer .btn-secondary').trigger('click'); await flushPromises()
+      expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+    }
+    expect(updateQualityTemplate).not.toHaveBeenCalled()
+    expect(scheduledTests.update).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('uses zero active plans from diagnostics instead of stale locally enabled membership', async () => {
+    const { templates } = probeFixture()
+    templates[0].diagnostics = { matched_accounts: 0, active_plans: 0, suspended_plans: 1, excluded_accounts: 0,
+      unsupported_accounts: 0, conflicting_accounts: 0, pending_accounts: 0, failed_accounts: 0, status: 'no_matches', reasons: null }
+    const wrapper = mountView(); await flushPromises()
+    const tab = wrapper.get('[data-probe-id="7"]')
+    expect(tab.text()).toContain('qualityOps.probeNoEligible')
+    expect(tab.text()).not.toContain('qualityOps.probeEnabled')
+    expect(tab.find('.state-warning').exists()).toBe(true)
+    expect(tab.find('.state-ready').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-probe-empty-warning"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(['account', 'bps'] as const)('saves a default exact candy probe on %s with its expected answer and minute interval', async channel => {
+    const wrapper = mountView(); await flushPromises()
+    await wrapper.get(channel === 'bps' ? '[data-testid="quality-create-bps-candy"]' : '[data-testid="quality-create-rule"]').trigger('click'); await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('[data-testid="quality-judge-kind"]').element.value).toBe('exact')
+    expect(wrapper.find('#quality-judge-models').exists()).toBe(false)
+    expect(wrapper.find('[placeholder="qualityOps.selectJudgeModel"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('qualityOps.judgeGroup')
+    expect(wrapper.text()).not.toContain('qualityOps.judgePrompt')
+    expect(wrapper.text()).not.toContain('qualityOps.probeIntervalHint')
+    await wrapper.get('[data-testid="quality-probe-interval"]').setValue('*/5 * * * *')
+    expect(wrapper.find('[data-testid="quality-probe-cron"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="quality-account-scope-manual"]').setValue(true); await flushPromises()
+    await wrapper.get('[data-testid="quality-account-1"] input[type="checkbox"]').setValue(true)
+    if (channel === 'account') await wrapper.get('[data-testid="quality-action-observe-only"]').setValue(true)
+    const answer = wrapper.findAll('label').find(label => label.find('input[maxlength="4000"]').exists())!.get('input')
+    expect((answer.element as HTMLInputElement).value).toBe('21')
+    await answer.setValue('Custom expected answer')
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.create).toHaveBeenCalledWith(expect.objectContaining({ account_id: 1, cron_expression: '*/5 * * * *',
+      pelican_config: expect.objectContaining({ question_kind: 'candy', test_channel: channel,
+        quality: expect.objectContaining({ expected_answer: 'Custom expected answer', judge: { kind: 'exact', group_id: 0, model_id: '', prompt: '' } }),
+      }),
+    }))
+    expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([1, 2, 3])('selects the owning probe for plan_id=%s deep links', async planId => {
+    probeFixture()
+    route.query = { plan_id: String(planId) }
+    const wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-probe-id="' + (planId + 6) + '"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-plan-id="' + planId + '"] .rule-select').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('[data-operation-id]').map(row => row.attributes('data-operation-id'))).toEqual([String(planId + 100)])
+    expect(listQualityOperations).toHaveBeenLastCalledWith(0, { template_id: planId + 6, plan_id: planId })
+    wrapper.unmount()
+  })
+
+  it('selects a newly saved template and loads only its rules and records', async () => {
+    const { templates, plans, operations } = probeFixture()
+    const createdPlan = { ...rules()[0], id: 44, account_id: 44, account_name: 'New probe account' }
+    const createdTemplate = { ...templates[0], id: 17, plan_ids: [44], model_id: 'new-template-model' }
+    vi.mocked(createQualityTemplate).mockResolvedValueOnce({ template: createdTemplate, created: 1 })
+    const wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="quality-create-rule"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="quality-model"]').setValue('new-template-model')
+    await wrapper.get('[data-testid="quality-action-observe-only"]').setValue(true)
+    vi.mocked(listQualityTemplates).mockResolvedValue([...templates, createdTemplate])
+    vi.mocked(listQualityPlans).mockResolvedValue([...plans, createdPlan])
+    vi.mocked(listQualityOperations).mockResolvedValue({ items: [...operations, { ...operations[0], id: 144, plan_id: 44 }] as any, next_cursor: 0 })
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(createQualityTemplate).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'new-template-model' }))
+    expect(wrapper.get('[data-probe-id="17"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.findAll('[data-plan-id]').map(row => row.attributes('data-plan-id'))).toEqual(['44'])
+    expect(wrapper.findAll('[data-operation-id]').map(row => row.attributes('data-operation-id'))).toEqual(['144'])
+    expect(listQualityOperations).toHaveBeenLastCalledWith(0, { template_id: 17 })
+    expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
+    wrapper.unmount()
+  })
 
   it('removes departed template members from the active list without losing history access', async () => {
     const plan = { ...rules()[0], scope_suspended: true }
@@ -1686,9 +1819,11 @@ describe('quality operations', () => {
     await vm.moreOperations(); expect(listQualityOperations).toHaveBeenLastCalledWith(10)
     wrapper.unmount()
   })
-  it('requires the operator to select a judge model and group', async () => {
+  it('requires a model and group after explicitly selecting an LLM judge', async () => {
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
     vm.newPlan(); vm.accountScope = 'manual'; vm.selectedAccounts = [1]; vm.form.model_id = 'test-model'
+    await flushPromises()
+    await wrapper.get('[data-testid="quality-judge-kind"]').setValue('llm')
     await vm.save(); expect(scheduledTests.create).not.toHaveBeenCalled()
     expect(wrapper.find('[role="alert"]').text()).toContain('qualityOps.configureJudge')
     wrapper.unmount()
@@ -1740,10 +1875,12 @@ describe('quality operations', () => {
     await wrapper.find('[data-testid="quality-question-kind"]').setValue('candy')
     expect(wrapper.find('#quality-prompt').exists()).toBe(true)
     expect(vm.form.pelican_config.quality.expected_answer).toBe('21')
-    expect(vm.form.pelican_config.quality.judge).toEqual({ group_id: 0, model_id: '', prompt: 'qualityOps.defaultJudgePrompt' })
+    expect(vm.form.pelican_config.quality.judge).toEqual({ kind: 'exact', group_id: 0, model_id: '', prompt: '' })
     await vm.save()
-    expect(scheduledTests.update).not.toHaveBeenCalled()
-    expect(wrapper.find('[role="alert"]').text()).toContain('qualityOps.configureJudge')
+    expect(scheduledTests.update).toHaveBeenCalledWith(5, expect.objectContaining({ pelican_config: expect.objectContaining({
+      question_kind: 'candy', prompt: CANDY_PROMPT,
+      quality: expect.objectContaining({ expected_answer: '21', judge: { kind: 'exact', group_id: 0, model_id: '', prompt: '' } }),
+    }) }))
     wrapper.unmount()
   })
   it.each(['state_probe', 'candy'] as const)('shows unsupported %s models as neutral skips without a fabricated answer', async kind => {
@@ -2241,6 +2378,7 @@ describe('quality operations', () => {
   it('does not page through accounts when the form itself is incomplete', async () => {
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
     vm.newPlan(); await flushPromises()
+    await wrapper.get('[data-testid="quality-judge-kind"]').setValue('llm')
     vi.mocked(accountsAPI.list).mockClear()
     await vm.save()
     expect(wrapper.find('[role="alert"]').text()).toContain('qualityOps.configureJudge')
@@ -2268,12 +2406,15 @@ describe('quality operations', () => {
     vi.mocked(listQualityPlans).mockResolvedValue(rules())
     vi.mocked(listQualityTemplates).mockResolvedValue([groupRule()])
     const wrapper = mountView(); await flushPromises()
-    const card = wrapper.get('[data-template-id="7"]')
-    expect(card.get('[data-testid="quality-template-filter"]').text()).toBe('Quality pool · qualityOps.allAccountTypes · admin.accounts.status.active')
+    const card = wrapper.get('[data-testid="quality-active-probe"]')
+    expect(card.get('.active-probe-details').text()).toContain('Quality pool · qualityOps.allAccountTypes · admin.accounts.status.active')
     expect(card.text()).toContain('group-model')
     expect(wrapper.find('[data-plan-id="1"] [data-testid="quality-template-tag"]').exists()).toBe(true)
+    expect(wrapper.find('[data-plan-id="2"]').exists()).toBe(false)
+    await wrapper.get('[data-probe-id="standalone"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('[data-plan-id="2"]').exists()).toBe(true)
     expect(wrapper.find('[data-plan-id="2"] [data-testid="quality-template-tag"]').exists()).toBe(false)
-
+    await wrapper.get('[data-probe-id="7"]').trigger('click'); await flushPromises()
     await card.get('[data-testid="quality-template-toggle"]').trigger('click'); await flushPromises()
     expect(updateQualityTemplate).toHaveBeenCalledWith(7, { enabled: false })
     expect(scheduledTests.update).not.toHaveBeenCalled()
@@ -2282,7 +2423,10 @@ describe('quality operations', () => {
   it('shows group rules even before any account rule exists', async () => {
     vi.mocked(listQualityTemplates).mockResolvedValue([{ ...groupRule(), plan_ids: [] }])
     const wrapper = mountView(); await flushPromises()
-    expect(wrapper.find('[data-template-id="7"]').exists()).toBe(true)
+    expect(wrapper.get('[data-probe-id="7"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-probe-id="7"]').text()).toContain('qualityOps.probeNoPlans')
+    expect(wrapper.get('[data-testid="quality-probe-empty-warning"]').text()).toContain('qualityOps.probeNoPlansHint')
+    expect(wrapper.get('[data-probe-id="7"]').text()).not.toContain('qualityOps.running')
     expect(wrapper.find('[data-testid="rules-scroll"] .panel-empty').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -2291,7 +2435,7 @@ describe('quality operations', () => {
     vi.mocked(listQualityTemplates).mockResolvedValue([groupRule()])
     vi.mocked(updateQualityTemplate).mockResolvedValueOnce({ template: groupRule(), updated: 1, failed: 0, created: 0 })
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
-    await wrapper.get('[data-template-id="7"] [data-testid="quality-template-edit"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-probe-configure="7"]').trigger('click'); await flushPromises()
     expect(wrapper.find('[data-testid="quality-template-edit-hint"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="quality-account-scope-all"]').exists()).toBe(false)
     expect(vm.accountGroup).toBe('21')
@@ -2324,7 +2468,7 @@ describe('quality operations', () => {
         id, name: `Fixture account ${id}`, platform: 'openai', type: 'oauth', status: 'active', extra: {},
       })), total: 4 } as any)
       const wrapper = mountView(); await flushPromises()
-      await wrapper.get('[data-template-id="7"] [data-testid="quality-template-edit"]').trigger('click'); await flushPromises()
+      await wrapper.get('[data-probe-configure="7"]').trigger('click'); await flushPromises()
       return wrapper
     }
 
@@ -2391,7 +2535,7 @@ describe('quality operations', () => {
       expect(wrapper.find('#quality-rule-form').exists()).toBe(false)
       expect(updateQualityTemplate).not.toHaveBeenCalled()
 
-      await wrapper.get('[data-template-id="7"] [data-testid="quality-template-edit"]').trigger('click'); await flushPromises()
+      await wrapper.get('[data-probe-configure="7"]').trigger('click'); await flushPromises()
       expect((wrapper.vm as any).reincludeAccountIds).toEqual([])
       expect(wrapper.get('[data-testid="quality-account-2"]').text()).toContain('qualityOps.accountExcluded')
       expect(wrapper.find('[data-testid="quality-reinclude-count"]').exists()).toBe(false)
@@ -2402,15 +2546,16 @@ describe('quality operations', () => {
       wrapper.unmount()
     })
 
-    it('lets the user undo a pending reinclusion after a conflicting rule appears', async () => {
+    it('lets the user undo a pending reinclusion after the template covers that account', async () => {
       const wrapper = await openTemplate()
       await wrapper.get('[data-testid="quality-reinclude-2"]').trigger('click')
       const conflict = { ...rules()[1], id: 22, pelican_config: templateWithExclusions().pelican_config }
       vi.mocked(listQualityPlans).mockResolvedValue([rules()[0], conflict])
+      vi.mocked(listQualityTemplates).mockResolvedValue([{ ...templateWithExclusions(), plan_ids: [1, 22] }])
       await useAccountQualityStore().refreshRules(true); await flushPromises()
       const row = wrapper.get('[data-testid="quality-account-2"]')
       const button = row.get<HTMLButtonElement>('[data-testid="quality-reinclude-2"]')
-      expect(row.text()).toContain('qualityOps.accountHasRule')
+      expect(row.text()).toContain('qualityOps.accountCoveredByTemplate')
       expect(button.text()).toBe('qualityOps.undoReinclude')
       expect(button.element.disabled).toBe(false)
       await button.trigger('click')

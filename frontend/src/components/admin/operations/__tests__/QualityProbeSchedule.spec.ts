@@ -7,15 +7,36 @@ vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 
 enableAutoUnmount(afterEach)
 
-function mountSchedule(initial = '*/2 * * * *') {
+function mountSchedule(initial = '*/2 * * * *', native = true) {
   return mount(defineComponent({
     components: { QualityProbeSchedule },
-    setup: () => ({ cron: ref(initial) }),
-    template: '<QualityProbeSchedule v-model="cron" />',
+    setup: () => ({ cron: ref(initial), native: ref(native) }),
+    template: '<QualityProbeSchedule v-model="cron" :native="native" />',
   }))
 }
 
 describe('QualityProbeSchedule', () => {
+  it.each([
+    [1, '* * * * *'], [2, '*/2 * * * *'], [5, '*/5 * * * *'], [10, '*/10 * * * *'],
+    [15, '*/15 * * * *'], [30, '*/30 * * * *'], [60, '0 * * * *'],
+    [120, '0 */2 * * *'], [360, '0 */6 * * *'], [720, '0 */12 * * *'], [1440, '0 0 * * *'],
+  ])('allows selecting a %s-minute interval for an answer probe without a native-channel hint', async (_minutes, cron) => {
+    const wrapper = mountSchedule('*/2 * * * *', false)
+    await wrapper.get('select').setValue(cron)
+    expect(wrapper.vm.cron).toBe(cron)
+    expect(wrapper.get<HTMLSelectElement>('select').element.value).toBe(cron)
+    expect(wrapper.find('[data-testid="quality-probe-cron"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('qualityOps.probeIntervalHint')
+  })
+
+  it('shows the native-channel hint only for native probes', async () => {
+    const wrapper = mountSchedule()
+    expect(wrapper.text()).toContain('qualityOps.probeIntervalHint')
+    wrapper.vm.native = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('qualityOps.probeIntervalHint')
+  })
+
   it('shows the two-minute preset and updates the schedule on selection', async () => {
     const wrapper = mountSchedule()
     const select = wrapper.get<HTMLSelectElement>('[data-testid="quality-probe-interval"]')

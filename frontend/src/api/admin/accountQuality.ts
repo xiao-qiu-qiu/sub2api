@@ -16,8 +16,13 @@ export interface QualityOperation extends ScheduledTestResult {
   total_count: number
   result_ids: number[]
 }
-export async function listQualityOperations(beforeId = 0): Promise<{ items: QualityOperation[]; next_cursor: number }> {
-  const { data } = await apiClient.get('/admin/account-quality-results', { params: { before_id: beforeId } })
+export interface QualityOperationFilter {
+  template_id?: number
+  plan_id?: number
+  unassigned?: boolean
+}
+export async function listQualityOperations(beforeId = 0, filter?: QualityOperationFilter): Promise<{ items: QualityOperation[]; next_cursor: number }> {
+  const { data } = await apiClient.get('/admin/account-quality-results', { params: { before_id: beforeId, ...filter } })
   return { items: data.items ?? [], next_cursor: data.next_cursor ?? 0 }
 }
 
@@ -29,8 +34,21 @@ export interface QualityRuleAccountFilter {
   search?: string
   statuses?: string[]
 }
+export interface QualityTemplateDiagnostics {
+  matched_accounts: number
+  active_plans: number
+  suspended_plans: number
+  excluded_accounts: number
+  unsupported_accounts: number
+  conflicting_accounts: number
+  pending_accounts: number
+  failed_accounts: number
+  status: string
+  reasons: Record<string, number> | null
+}
 export interface QualityRuleTemplate {
   id: number
+  diagnostics?: QualityTemplateDiagnostics | null
   account_filter: QualityRuleAccountFilter
   model_id: string
   cron_expression: string

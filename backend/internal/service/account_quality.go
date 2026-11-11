@@ -133,10 +133,14 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	}
 	q.Admission = nil
 	if j := q.Judge; j != nil {
-		if strings.TrimSpace(j.Prompt) == "" || len(j.Prompt) > 16000 {
+		if j.Kind != "exact" && (strings.TrimSpace(j.Prompt) == "" || len(j.Prompt) > 16000) {
 			return fmt.Errorf("grading prompt must be 1-16000 bytes")
 		}
 		switch j.Kind {
+		case "exact":
+			if j.GroupID != 0 || j.ModelID != "" || j.Prompt != "" {
+				return fmt.Errorf("exact grading is local; group, model and grading prompt must be empty")
+			}
 		case "", "llm":
 			if j.GroupID <= 0 || strings.TrimSpace(j.ModelID) == "" || len(j.ModelID) > 100 {
 				return fmt.Errorf("judge group, model and grading prompt are required (100/16000 byte limits)")

@@ -60,6 +60,7 @@ type ScheduledTestPlan struct {
 	CronExpression           string                    `json:"cron_expression"`
 	Enabled                  bool                      `json:"enabled"`
 	ScopeSuspended           bool                      `json:"scope_suspended"`
+	SourceTemplateID         int64                     `json:"source_template_id,omitempty"`
 	QualityTemplateID        int64                     `json:"quality_template_id,omitempty"`
 	MaxResults               int                       `json:"max_results"`
 	AutoRecover              bool                      `json:"auto_recover"`
@@ -128,12 +129,26 @@ type ScheduledTestResultRepository interface {
 
 type QualityHistoryResult struct {
 	PelicanHistoryResult
-	PassedCount  int     `json:"passed_count"`
-	SkippedCount int     `json:"skipped_count"`
-	TotalCount   int     `json:"total_count"`
-	ResultIDs    []int64 `json:"result_ids"`
+	SourceTemplateID int64   `json:"source_template_id,omitempty"`
+	PassedCount      int     `json:"passed_count"`
+	SkippedCount     int     `json:"skipped_count"`
+	TotalCount       int     `json:"total_count"`
+	ResultIDs        []int64 `json:"result_ids"`
 }
 type QualityHistoryPage struct {
 	Items      []*QualityHistoryResult `json:"items"`
 	NextCursor int64                   `json:"next_cursor"`
+}
+
+// QualityHistoryFilter is applied before round aggregation and cursor pagination.
+// Unassigned selects plans without a current template binding, including detached plans.
+type QualityHistoryFilter struct {
+	TemplateID int64 `json:"template_id,omitempty"`
+	PlanID     int64 `json:"plan_id,omitempty"`
+	Unassigned bool  `json:"unassigned,omitempty"`
+}
+
+// Optional capability keeps older repository adapters and unfiltered callers compatible.
+type FilteredQualityHistoryRepository interface {
+	ListFilteredQualityHistory(context.Context, int64, int, QualityHistoryFilter) ([]*QualityHistoryResult, error)
 }

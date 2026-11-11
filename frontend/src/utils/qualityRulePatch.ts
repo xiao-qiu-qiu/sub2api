@@ -4,9 +4,16 @@ import { STATE_PROBE_QUESTION } from './intelligenceTest'
 import { DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, isValidBPSRecoveryInterval } from './excelBPSRecovery'
 
 export function qualityJudgeConfigured(judge?: QualityJudgeConfig): judge is QualityJudgeConfig {
+  if (judge?.kind === 'exact') return true
   if (!judge?.prompt.trim()) return false
   if (judge.kind === 'jev') return !judge.group_id && !judge.model_id
   return (!judge.kind || judge.kind === 'llm') && judge.group_id > 0 && !!judge.model_id.trim()
+}
+
+function copyQualityJudge(judge?: QualityJudgeConfig): QualityJudgeConfig | undefined {
+  if (!judge) return undefined
+  if (judge.kind === 'exact') return { kind: 'exact', group_id: 0, model_id: '', prompt: '' }
+  return { ...(judge.kind ? { kind: judge.kind } : {}), group_id: judge.group_id, model_id: judge.model_id, prompt: judge.prompt }
 }
 
 // 新建「降智开 BPS」时的默认勾选；target_group_id = -1 表示还没选 403 后的目标分组。
@@ -57,7 +64,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
         recovery_probe_interval_minutes: policy.recovery_probe_interval_minutes ?? 60,
         recovery_confirmation_minutes: policy.recovery_confirmation_minutes ?? 5,
       } : {}),
-      judge: policy.judge ? { ...(policy.judge.kind ? { kind: policy.judge.kind } : {}), group_id: policy.judge.group_id, model_id: policy.judge.model_id, prompt: policy.judge.prompt } : undefined,
+      judge: copyQualityJudge(policy.judge),
       bps: bps ? {
         failure_threshold: bps.failure_threshold, usage_percent: bps.usage_percent, require_all: bps.require_all,
         all_models: bps.all_models, models: [...(bps.models || [])], omit_unsupported_tools: bps.omit_unsupported_tools,
@@ -291,6 +298,7 @@ export function buildQualityRulePatch(
   if (samples > 100 || (config.model_ids?.length || 0) > 50) throw new Error('qualityOps.tooManyModelSamples')
   if (fields.includes('retention') && samples > patch.max_results!) throw new Error('qualityOps.retentionTooSmall')
   if (!fields.includes('retention') && samples > plan.max_results) patch.max_results = samples
+  if (config.quality.judge?.kind === 'exact') config.quality.judge = copyQualityJudge(config.quality.judge)
   patch.pelican_config = config
   return patch
 }
