@@ -109,6 +109,7 @@ const (
 	upstreamProtocolModeLongStreamH2     = "long_stream_h2"
 	upstreamProtocolModeBPSH2            = "bps_h2"
 	upstreamProtocolModeBPSH1            = "bps_h1"
+	upstreamProtocolModeBPSWebSocketH1   = "bps_ws_h1"
 	upstreamProtocolModeOpenAIH1         = "openai_h1"
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
@@ -139,12 +140,13 @@ type openAIHTTP2Settings struct {
 // upstreamClientEntry 上游客户端缓存条目
 // 记录客户端实例及其元数据，用于连接池管理和淘汰策略
 type upstreamClientEntry struct {
-	client       *http.Client // HTTP 客户端实例
-	proxyKey     string       // 代理标识（用于检测代理变更）
-	poolKey      string       // 连接池配置标识（用于检测配置变更）
-	protocolMode string       // 协议模式（default/long_stream_h2/openai_h1/openai_h2/openai_h1_fallback）
-	lastUsed     int64        // 最后使用时间戳（纳秒），用于 LRU 淘汰
-	inFlight     int64        // 当前进行中的请求数，>0 时不可淘汰
+	client            *http.Client  // HTTP 客户端实例
+	proxyKey          string        // 代理标识（用于检测代理变更）
+	poolKey           string        // 连接池配置标识（用于检测配置变更）
+	protocolMode      string        // 协议模式（default/long_stream_h2/openai_h1/openai_h2/openai_h1_fallback）
+	bpsWebSocketSlots chan struct{} // Shared budget even when the WS adapter scopes a transport per connection.
+	lastUsed          int64         // 最后使用时间戳（纳秒），用于 LRU 淘汰
+	inFlight          int64         // 当前进行中的请求数，>0 时不可淘汰
 }
 
 type openAIHTTP2FallbackState struct {
@@ -907,6 +909,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 		poolKey:      poolKey,
 		protocolMode: protocolMode,
 	}
+	if protocolMode == upstreamProtocolModeBPSWebSocketH1 && settings.maxConnsPerHost > 0 {
+		entry.bpsWebSocketSlots = make(chan struct{}, settings.maxConnsPerHost)
+	}
 	atomic.StoreInt64(&entry.lastUsed, nowUnix)
 	if markInFlight {
 		atomic.StoreInt64(&entry.inFlight, 1)
@@ -1186,6 +1191,9 @@ func (s *httpUpstreamService) resolveOpenAIHTTP2Settings() openAIHTTP2Settings {
 }
 
 func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamProfile, proxyKey string, parsedProxy *url.URL) string {
+	if profile == service.HTTPUpstreamProfileExcelBPSWebSocket {
+		return upstreamProtocolModeBPSWebSocketH1
+	}
 	if profile == service.HTTPUpstreamProfileExcelBPS {
 		if s.bpsHTTP1Active(proxyKey, time.Now()) {
 			return upstreamProtocolModeBPSH1
@@ -1531,7 +1539,7 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		if _, err := enableHTTP2KeepAlive(transport, protocolMode); err != nil {
 			return nil, err
 		}
-	case upstreamProtocolModeOpenAIH1, upstreamProtocolModeBPSH1:
+	case upstreamProtocolModeOpenAIH1, upstreamProtocolModeBPSH1, upstreamProtocolModeBPSWebSocketH1:
 		transport.ForceAttemptHTTP2 = false
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	case upstreamProtocolModeOpenAIH1NoReuse:

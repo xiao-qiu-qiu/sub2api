@@ -54,6 +54,7 @@
             :loading="bpsDefaults.loading.value" :failed="bpsDefaults.failed.value" :applied="bpsDefaults.applied.value"
             :available="!authStore.isObserver" prefix="bulk-excel-bps" @toggle="bpsDefaults.toggle" />
           <div v-if="excelBPSEnabled" class="mt-3 space-y-3">
+            <ExcelBPSTransportSelect v-model="excelBPSTransportMode" prefix="bulk-excel-bps" />
             <label class="flex items-center gap-2 text-sm">
               <input v-model="excelBPSAllModels" type="checkbox" data-testid="bulk-excel-bps-all-models" />
               <span>{{ t('admin.accounts.openai.excelBPSAllModels') }}</span>
@@ -1583,6 +1584,8 @@ import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ExcelBPSModeSwitches from './ExcelBPSModeSwitches.vue'
+import ExcelBPSTransportSelect from './ExcelBPSTransportSelect.vue'
+import type { ExcelBPSTransport } from '@/utils/excelBPSTransport'
 import type { ExcelBPSMode } from '@/utils/excelBPSDefaults'
 import { useExcelBPSDefaults } from '@/composables/useExcelBPSDefaults'
 import { DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, MAX_BPS_RECOVERY_INTERVAL_MINUTES, isValidBPSRecoveryInterval, bpsRecoveryIntervalOrDefault } from '@/utils/excelBPSRecovery'
@@ -1822,6 +1825,7 @@ const rateMultiplier = ref(1)
 const status = ref<'active' | 'inactive'>('active')
 const groupIds = ref<number[]>([])
 const excelBPSEnabled = ref(false)
+const excelBPSTransportMode = ref<ExcelBPSTransport>('sse')
 const excelBPSMode = ref<ExcelBPSMode>('initial')
 const excelBPSAllModels = ref(false)
 const excelBPSModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
@@ -2156,6 +2160,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     const extra = ensureExtra()
     extra.openai_excel_bps = excelBPSEnabled.value
     extra.openai_excel_bps_config_mode = excelBPSEnabled.value ? excelBPSMode.value : null
+    extra.openai_excel_bps_transport = excelBPSEnabled.value && excelBPSTransportMode.value === 'ws' ? 'ws' : null
     // null explicitly removes an existing model scope; [] selects no BPS models.
     extra.openai_excel_bps_models = excelBPSEnabled.value && !excelBPSAllModels.value
       ? [...new Set(excelBPSModels.value.map(model => model.trim()).filter(Boolean))]
@@ -2628,6 +2633,7 @@ watch(
       // Reset all values
       baseUrl.value = ''
       excelBPSEnabled.value = false
+      excelBPSTransportMode.value = 'sse'
       excelBPSMode.value = 'initial'
       excelBPSAllModels.value = false
       excelBPSModels.value = [...DEFAULT_EXCEL_BPS_MODELS]

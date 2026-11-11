@@ -222,4 +222,5 @@ these ceilings are not throughput or memory-use guarantees.
   disables an account on an in-band 403, or changes shared Codex account health.
 - Failure/cancellation retains usage and withholds unvalidated tools. Readers
   stop at cancellation without waiting for EOF, including correction and image
-  compaction readers. This does not add a BPS WebSocket transport.
+  compaction readers. An account can now select the separate BPS WebSocket
+  adapter; it converts upstream frames to SSE before this protocol bridge.

@@ -268,7 +268,7 @@ func (s *OpenAIGatewayService) probeExcelBPS403Recovery(ctx context.Context, acc
 	if err != nil {
 		return err
 	}
-	resp, err := s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
+	resp, err := s.doExcelBPSUpstream(req, proxy, &probe)
 	if resp != nil && resp.Body != nil {
 		defer func() { _ = resp.Body.Close() }()
 	}

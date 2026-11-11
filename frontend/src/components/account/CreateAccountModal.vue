@@ -482,6 +482,7 @@
         <p v-if="isOpenAITwoFA" class="input-hint">{{ t('tokenGuard.twoFA.nameHint') }}</p>
         <div v-if="isOpenAIBPSOAuth" class="mt-3 space-y-2" data-testid="bps-oauth-models">
           <p class="input-hint">{{ t('admin.accounts.oauth.openai.excelLoginHint') }}</p>
+          <ExcelBPSTransportSelect v-model="bpsOAuthTransport" prefix="bps-oauth" />
           <label class="input-label">{{ t('admin.accounts.openai.excelBPSModels') }}</label>
           <ModelWhitelistSelector v-model="bpsOAuthModels" platform="openai" />
         </div>
@@ -4305,6 +4306,8 @@ import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import AccountAutoBPSSection from '@/components/account/AccountAutoBPSSection.vue'
+import ExcelBPSTransportSelect from '@/components/account/ExcelBPSTransportSelect.vue'
+import type { ExcelBPSTransport } from '@/utils/excelBPSTransport'
 import QuotaLimitCard from '@/components/account/QuotaLimitCard.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import AccountRpmSettings from '@/components/account/AccountRpmSettings.vue'
@@ -4548,6 +4551,7 @@ const step = ref(1)
 const openaiTwoFA = ref(false)
 const openaiBPSOAuth = ref(false)
 const bpsOAuthModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
+const bpsOAuthTransport = ref<ExcelBPSTransport>('sse')
 const isOpenAIBPSOAuth = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiBPSOAuth.value)
 const twoFABusy = ref(false)
 const isOpenAITwoFA = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiTwoFA.value)
@@ -5861,6 +5865,7 @@ const resetForm = () => {
   openaiTwoFA.value = false
   openaiBPSOAuth.value = false
   bpsOAuthModels.value = [...DEFAULT_EXCEL_BPS_MODELS]
+  bpsOAuthTransport.value = 'sse'
   autoBPS.reset()
   twoFABusy.value = false
   form.name = ''
@@ -6018,6 +6023,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   if (isOpenAIBPSOAuth.value) {
     extra.openai_excel_bps = true
+    if (bpsOAuthTransport.value === 'ws') extra.openai_excel_bps_transport = 'ws'
     extra.openai_excel_bps_models = [...new Set(bpsOAuthModels.value.map(m => m.trim()).filter(Boolean))]
   }
   if (accountCategory.value === 'oauth-based') {

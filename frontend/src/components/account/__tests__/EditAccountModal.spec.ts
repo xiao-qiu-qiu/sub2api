@@ -720,6 +720,7 @@ describe('EditAccountModal', () => {
       openai_excel_bps_403_recovery_interval_minutes: 360,
       openai_excel_bps_models: ['gpt-6-astra'], openai_excel_bps_mihomo: true,
       openai_excel_bps_proxy_source: 'ip_pool',
+      openai_excel_bps_transport: 'ws',
       openai_excel_bps_ignore_encrypted_content: true, openai_excel_bps_cache_creation_as_input: true,
       openai_excel_bps_auto_move_on_403: true, openai_excel_bps_403_target_group_id: 0
     }
@@ -745,6 +746,31 @@ describe('EditAccountModal', () => {
     expect(stopped.openai_excel_bps).not.toBe(true)
   })
 
+  it('saves and restores BPS WebSocket transport, then switches back to SSE', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_excel_bps: true, unrelated: 'preserve' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const selector = '[data-testid="excel-bps-transport"]'
+    expect(wrapper.get<HTMLSelectElement>(selector).element.value).toBe('sse')
+    await wrapper.get(selector).setValue('ws')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const saved = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(saved).toMatchObject({ openai_excel_bps_transport: 'ws', unrelated: 'preserve' })
+    await wrapper.setProps({ account: { ...account, extra: saved } })
+    expect(wrapper.get<HTMLSelectElement>(selector).element.value).toBe('ws')
+    await wrapper.get(selector).setValue('sse')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const reverted = updateAccountMock.mock.calls[1]?.[1]?.extra
+    expect(reverted.openai_excel_bps_transport).toBeUndefined()
+    expect(reverted.unrelated).toBe('preserve')
+    wrapper.unmount()
+  })
+
   it('saves, restores and clears the BPS encrypted-content option', async () => {
     const account = buildAccount()
     account.type = 'oauth'
@@ -755,6 +781,7 @@ describe('EditAccountModal', () => {
     const selector = '[data-testid="excel-bps-ignore-encrypted-content"]'
     expect(wrapper.get<HTMLInputElement>(selector).element.checked).toBe(false)
     await wrapper.get(selector).setValue(true)
+    await wrapper.get('[data-testid="excel-bps-transport"]').setValue('ws')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     await flushPromises()
     const savedExtra = updateAccountMock.mock.calls[0]?.[1]?.extra
@@ -771,6 +798,7 @@ describe('EditAccountModal', () => {
     const clearedExtra = updateAccountMock.mock.calls[1]?.[1]?.extra
     expect(clearedExtra.openai_excel_bps).toBeUndefined()
     expect(clearedExtra.openai_excel_bps_ignore_encrypted_content).toBeUndefined()
+    expect(clearedExtra.openai_excel_bps_transport).toBeUndefined()
     expect(clearedExtra.unrelated).toBe('preserve')
     wrapper.unmount()
   })

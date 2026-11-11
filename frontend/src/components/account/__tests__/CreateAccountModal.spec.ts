@@ -392,10 +392,11 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 
-  it('creates BPS OAuth through the Excel client and enables only the selected BPS models', async () => {
+  it.each(['sse', 'ws'])('creates BPS OAuth through the Excel client using %s', async transport => {
     const wrapper = await prepareWSAcceleration(0)
     await wrapper.get('[data-testid="openai-bps-oauth"]').trigger('click')
     expect(wrapper.find('[data-testid="bps-oauth-models"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="bps-oauth-transport"]').setValue(transport)
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     const flow = wrapper.getComponent(OAuthAuthorizationFlowStub)
     flow.vm.$emit('generate-url')
@@ -412,6 +413,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       credentials: { access_token: 'excel-at', refresh_token: 'excel-rt', client_id: 'app_fnr0pYvVwwFDocDumLG3H2Bp' },
       extra: { openai_excel_bps: true, openai_excel_bps_models: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra'] }
     })
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_excel_bps_transport).toBe(transport === 'ws' ? 'ws' : undefined)
   })
 
   it.each([0, 1, 2].flatMap(clicks => [

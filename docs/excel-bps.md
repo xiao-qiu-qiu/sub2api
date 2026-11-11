@@ -4,7 +4,19 @@
 
 `credentials.plan_type` 为 `free` 的账号禁止开启 BPS（忽略大小写与首尾空格）。创建、编辑和批量编辑会拒绝保存开启配置；质量规则和 403 自动恢复也会跳过 free 账号。旧数据即使保留 BPS 开关，运行时也不会走 BPS，可通过编辑或批量编辑关闭旧开关。套餐未知的账号沿用原有规则；该限制不代表原生 Codex 通道支持相同模型。
 
-本入口面向 HTTP `/v1/responses` 和 `/v1/responses/compact`。强制上游 HTTP/SSE，优先于账号的自动透传、WS mode 和 Codex ticket 注入。保持原始模型名或显式账号映射，不因模型权限不足偷偷切换模型。现有调度、分组授权和并发额度继续生效；开关不会重新启用已停用的账号。
+本入口面向 HTTP `/v1/responses` 和 `/v1/responses/compact`。上游默认 HTTP/SSE，也可按账号选择 WebSocket；BPS 传输独立于账号原生 Codex 的 WS mode、自动透传和 ticket 配置。保持原始模型名或显式账号映射，不因模型权限不足偷偷切换模型。现有调度、分组授权和并发额度继续生效；开关不会重新启用已停用的账号。
+
+## 新版 Excel WebSocket
+
+在 **账号管理 → 编辑账号 → Excel / BPS 协议 → BPS 上游传输** 选择 **WebSocket（新版 Excel）**，保存后新开客户端会话。新建 BPS OAuth 和批量编辑也可选择。已有账号缺省保持 **HTTP / SSE（原方式）**；切回该项即可恢复。
+
+对应账号字段为 `extra.openai_excel_bps_transport: "ws"`；缺省或 `"sse"` 使用原方式。该设置只作用于账号已选定的 BPS 模型，不会自动开启 BPS 或扩大模型范围。使用独立 Excel 授权及该账号现有代理配置。
+
+WS 模式仍请求 `/basispoints/api/responses`，通过 WebSocket 握手和 `response.create` 提交，包含 Excel 客户端信息、请求标识及控制帧参数。每次请求使用独立连接，文本、工具纠错、compact 和 403 恢复探测均沿用所选传输。附件上传和独立生图/编辑保持各自 HTTP 接口。客户端仍发送 Responses HTTP 请求，流式和非流式返回方式保持原有约定，无需开启客户端 WS。
+
+Responses 响应头 `X-Sub2API-BPS-Transport` 返回 `ws` 或 `sse`，可用来确认实际选择。可以先用账号连接测试中的 **BPS 工具往返** 验证，再在同账号、同模型、同出口下切换传输进行答题对照。
+
+断线、超时或协议错误不会重连、自动切回 SSE 或重放已提交生成。未启用 ARC 初始化或诊断模式的 ticket/Cookie 回传。此功能用于协议对照，质量效果需要实际测试。协议参考：[bps-local-public](https://github.com/sunboyzoey/bps-local-public/tree/7134964fe0ce72b6b44b000cc97d86ea1e7b80e5)。
 
 ## BPS OAuth 登录
 

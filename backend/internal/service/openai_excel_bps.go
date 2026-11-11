@@ -623,7 +623,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			logger.LegacyPrintf("service.openai_excel_bps", "retrying invalid encrypted reasoning once: account_id=%d", account.ID)
 			c.Set("excel_bps_upstream_attempt", c.GetInt("excel_bps_upstream_attempt")+1)
 			// Do not re-enter proxy acquisition or transport retries after sending.
-			resp, err = s.doPriorityObservedHTTP(retryReq, proxyURL, account)
+			resp, err = s.doExcelBPSUpstream(retryReq, proxyURL, account)
 			if err == nil {
 				s.guardExcelBPSProgress(requestCtx, resp)
 			}
@@ -735,7 +735,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		if err != nil {
 			return nil, err
 		}
-		repairResp, err := s.doPriorityObservedHTTP(repairReq, proxyURL, account)
+		repairResp, err := s.doExcelBPSUpstream(repairReq, proxyURL, account)
 		if err == nil {
 			s.guardExcelBPSProgress(repairCtx, repairResp)
 		}
@@ -785,7 +785,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		if isControlledExperiment(ctx) {
 			return nil, errors.New("controlled experiment disables BPS correction submissions")
 		}
-		repaired, err := s.doPriorityObservedHTTP(retry, proxyURL, account)
+		repaired, err := s.doExcelBPSUpstream(retry, proxyURL, account)
 		if err == nil {
 			s.guardExcelBPSProgress(repairCtx, repaired)
 		}

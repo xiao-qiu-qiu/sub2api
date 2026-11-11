@@ -2144,6 +2144,7 @@
           :loading="bpsDefaults.loading.value" :failed="bpsDefaults.failed.value" :applied="bpsDefaults.applied.value"
           :available="!authStore.isObserver" prefix="excel-bps" @toggle="bpsDefaults.toggle" />
         <div v-if="excelBPSEnabled" class="mt-3 space-y-3">
+          <ExcelBPSTransportSelect v-model="excelBPSTransportMode" />
           <label class="flex items-center gap-2 text-sm">
             <input v-model="excelBPSAllModels" type="checkbox" data-testid="excel-bps-all-models" />
             <span>{{ t('admin.accounts.openai.excelBPSAllModels') }}</span>
@@ -3724,6 +3725,8 @@ import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier, readAcco
 import { ref, reactive, computed, watch, nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ExcelBPSModeSwitches from './ExcelBPSModeSwitches.vue'
+import ExcelBPSTransportSelect from './ExcelBPSTransportSelect.vue'
+import { excelBPSTransport, type ExcelBPSTransport } from '@/utils/excelBPSTransport'
 import type { ExcelBPSMode } from '@/utils/excelBPSDefaults'
 import { useExcelBPSDefaults } from '@/composables/useExcelBPSDefaults'
 import { DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, MAX_BPS_RECOVERY_INTERVAL_MINUTES, isValidBPSRecoveryInterval, bpsRecoveryIntervalOrDefault } from '@/utils/excelBPSRecovery'
@@ -4546,6 +4549,7 @@ const customBaseUrl = ref('')
 
 // OpenAI 自动透传开关（OAuth/API Key）
 const excelBPSEnabled = ref(false)
+const excelBPSTransportMode = ref<ExcelBPSTransport>('sse')
 const excelBPSMode = ref<ExcelBPSMode>('initial')
 const excelBPSAllModels = ref(false)
 const excelBPSModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
@@ -5122,6 +5126,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   // Load OpenAI passthrough toggle (OpenAI OAuth/SetupToken/API Key)
   siwcEnabled.value = false
   excelBPSEnabled.value = false
+  excelBPSTransportMode.value = 'sse'
   excelBPSMode.value = 'initial'
   excelBPSAllModels.value = false
   excelBPSModels.value = [...DEFAULT_EXCEL_BPS_MODELS]
@@ -5173,6 +5178,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     }
     siwcEnabled.value = extra?.openai_siwc === true
     excelBPSEnabled.value = newAccount.type === 'oauth' && extra?.openai_excel_bps === true
+    excelBPSTransportMode.value = excelBPSTransport(extra?.openai_excel_bps_transport)
     excelBPSMode.value = extra?.openai_excel_bps_config_mode === 'defaults' ? 'defaults' : 'initial'
     excelBPSAllModels.value = excelBPSEnabled.value && !Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_excel_bps_models')
     if (Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_excel_bps_models')) {
@@ -6818,6 +6824,8 @@ const handleSubmit = async () => {
       if (props.account.type === 'oauth' && !isSparkShadow.value && excelBPSEnabled.value) {
         newExtra.openai_excel_bps = true
         newExtra.openai_excel_bps_config_mode = excelBPSMode.value
+        if (excelBPSTransportMode.value === 'ws') newExtra.openai_excel_bps_transport = 'ws'
+        else delete newExtra.openai_excel_bps_transport
         if (excelBPSAllModels.value) {
           delete newExtra.openai_excel_bps_models
         } else {
@@ -6826,6 +6834,7 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.openai_excel_bps
         delete newExtra.openai_excel_bps_config_mode
+        delete newExtra.openai_excel_bps_transport
         delete newExtra.openai_excel_bps_models
       }
       if (newExtra.openai_excel_bps === true && excelBPSMihomo.value && excelBPSProxySource.value === 'ip_pool') {
@@ -6857,7 +6866,7 @@ const handleSubmit = async () => {
       const preserveDisabledBPS = props.account.type === 'oauth' && !isSparkShadow.value &&
         !excelBPSEnabled.value && excelBPS403RecoveryPending.value
       if (preserveDisabledBPS) {
-        for (const key of ['openai_excel_bps_config_mode', 'openai_excel_bps_models', 'openai_excel_bps_mihomo', 'openai_excel_bps_proxy_source',
+        for (const key of ['openai_excel_bps_config_mode', 'openai_excel_bps_transport', 'openai_excel_bps_models', 'openai_excel_bps_mihomo', 'openai_excel_bps_proxy_source',
           'openai_excel_bps_cache_creation_as_input', 'openai_excel_bps_omit_unsupported_tools',
           'openai_excel_bps_ignore_encrypted_content']) {
           if (Object.prototype.hasOwnProperty.call(currentExtra, key)) newExtra[key] = currentExtra[key]

@@ -162,6 +162,7 @@ func (b *excelBPSTrackedBody) Read(p []byte) (int, error) {
 // before HTTP could have written anything. The caller owns the returned lease
 // through response closure. Static account proxies retain their old behavior.
 func (s *OpenAIGatewayService) doExcelBPSRequest(ctx context.Context, c *gin.Context, account *Account, scope string, body []byte, token, accountID string, acquire excelBPSAcquire) (*http.Response, excelBPSLease, string, error) {
+	c.Header("X-Sub2API-BPS-Transport", account.ExcelBPSTransport())
 	build := func(ctx context.Context) (*http.Request, error) {
 		return newExcelBPSRequest(ctx, body, token, accountID)
 	}
@@ -213,7 +214,15 @@ func (s *OpenAIGatewayService) doExcelBPSRequestTo(ctx context.Context, c *gin.C
 			return nil, nil, proxy, err
 		}
 		evidence := &excelBPSWriteEvidence{}
-		resp, err := s.doPriorityObservedHTTP(evidence.request(req), proxy, account)
+		var tracedRequest *http.Request
+		if account.ExcelBPSTransport() == ExcelBPSTransportWS && upstreamURL == basispoints.ResponsesURL {
+			// WS parses the prepared POST body locally. Only the GET
+			// handshake's network trace can indicate a submission.
+			tracedRequest = evidence.Trace.Request(req)
+		} else {
+			tracedRequest = evidence.request(req)
+		}
+		resp, err := s.doExcelBPSUpstream(tracedRequest, proxy, account)
 		controlledHTTPResponse(ctx, resp)
 		s.rateLimitService.observeQualityResponse(req.Context(), account, resp, err)
 		if err == nil {

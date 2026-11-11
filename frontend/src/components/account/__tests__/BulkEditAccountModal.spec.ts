@@ -172,6 +172,7 @@ describe('BulkEditAccountModal', () => {
     const oauthProps = { selectedPlatforms: ['openai'], selectedTypes: ['oauth'] }
     const defaultExtra = {
       openai_excel_bps_config_mode: 'initial',
+      openai_excel_bps_transport: null,
       openai_excel_bps: true,
       openai_excel_bps_models: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra'],
       openai_excel_bps_mihomo: false,
@@ -300,6 +301,18 @@ describe('BulkEditAccountModal', () => {
           openai_excel_bps_proxy_source: 'ip_pool'
         }
       })
+    })
+
+    it('sets WebSocket for the selected accounts and clears it when BPS is disabled', async () => {
+      const wrapper = mountModal(oauthProps)
+      await enableBPS(wrapper)
+      await wrapper.get('[data-testid="bulk-excel-bps-transport"]').setValue('ws')
+      await submit(wrapper)
+      expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0]?.[1]?.extra?.openai_excel_bps_transport).toBe('ws')
+      await wrapper.get('[data-testid="bulk-excel-bps-toggle"]').trigger('click')
+      await submit(wrapper)
+      expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[1]?.[1]?.extra?.openai_excel_bps_transport).toBeNull()
+      wrapper.unmount()
     })
 
     it('submits normalized selected models and cache creation billing', async () => {

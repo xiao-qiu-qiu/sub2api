@@ -34,6 +34,17 @@ func TestWithHTTPUpstreamProfile_LongStream(t *testing.T) {
 	}
 }
 
+func TestWithHTTPUpstreamProfile_ExcelBPSWebSocket(t *testing.T) {
+	ctx := WithHTTPUpstreamProfile(nil, HTTPUpstreamProfileExcelBPSWebSocket)
+	if got := HTTPUpstreamProfileFromContext(ctx); got != HTTPUpstreamProfileExcelBPSWebSocket {
+		t.Fatalf("expected profile %q, got %q", HTTPUpstreamProfileExcelBPSWebSocket, got)
+	}
+	ctx = WithHTTPUpstreamProfile(ctx, HTTPUpstreamProfile("unknown"))
+	if got := HTTPUpstreamProfileFromContext(ctx); got != HTTPUpstreamProfileDefault {
+		t.Fatalf("unknown profile should use the default, got %q", got)
+	}
+}
+
 func TestWithHTTPUpstreamRedirectsDisabled(t *testing.T) {
 	//nolint:staticcheck // Exercises the defensive nil-context fallback.
 	ctx := WithHTTPUpstreamRedirectsDisabled(nil)

@@ -15,7 +15,8 @@ import (
 
 func (s *httpUpstreamService) useRegionalEgress(proxy string, accountID int64, profile service.HTTPUpstreamProfile) bool {
 	return (s.upstreamRoutes != nil || s.upstreamRoutesErr != nil) && strings.TrimSpace(proxy) == "" && accountID > 0 &&
-		profile != service.HTTPUpstreamProfileOpenAIHarvest && profile != service.HTTPUpstreamProfileExcelBPS
+		profile != service.HTTPUpstreamProfileOpenAIHarvest && profile != service.HTTPUpstreamProfileExcelBPS &&
+		profile != service.HTTPUpstreamProfileExcelBPSWebSocket
 }
 
 // Use one outer Client.Do to retain net/http's redirect credential policy.

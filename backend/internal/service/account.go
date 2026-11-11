@@ -2365,6 +2365,23 @@ func (a *Account) IsExcelBPSEnabled() bool {
 // The requested switch stays on while the worker prepares the independent grant.
 const ExcelBPSAuthorizationPendingKey = "openai_excel_bps_authorization_pending"
 
+const (
+	ExcelBPSTransportKey = "openai_excel_bps_transport"
+	ExcelBPSTransportSSE = "sse"
+	ExcelBPSTransportWS  = "ws"
+)
+
+// ExcelBPSTransport requires an explicit WebSocket opt-in on an enabled BPS account.
+func (a *Account) ExcelBPSTransport() string {
+	if a == nil || !a.IsExcelBPSEnabled() {
+		return ExcelBPSTransportSSE
+	}
+	if transport, _ := a.Extra[ExcelBPSTransportKey].(string); transport == ExcelBPSTransportWS {
+		return ExcelBPSTransportWS
+	}
+	return ExcelBPSTransportSSE
+}
+
 const ExcelBPSIgnoreEncryptedContentKey = "openai_excel_bps_ignore_encrypted_content"
 
 // IsExcelBPSIgnoreEncryptedContentEnabled opts into replacing ciphertext that
