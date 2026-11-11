@@ -146,13 +146,18 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 							continue
 						}
 						found++
-						path := "error"
-						if tc.event != "error" {
-							path = "response.error"
+						if tc.event == "error" {
+							require.False(t, gjson.Get(raw, "error").Exists())
+							require.Equal(t, tc.wantCode, gjson.Get(raw, "code").String())
+							require.NotEmpty(t, gjson.Get(raw, "message").String())
+							require.Equal(t, "null", gjson.Get(raw, "param").Raw)
+							require.EqualValues(t, 1, gjson.Get(raw, "sequence_number").Int())
+							require.EqualValues(t, tc.status, gjson.Get(raw, "status").Int())
+						} else {
+							require.Equal(t, tc.wantCode, gjson.Get(raw, "response.error.code").String())
+							require.Equal(t, tc.wantType, gjson.Get(raw, "response.error.type").String())
+							require.EqualValues(t, tc.status, gjson.Get(raw, "response.error.status").Int())
 						}
-						require.Equal(t, tc.wantCode, gjson.Get(raw, path+".code").String())
-						require.Equal(t, tc.wantType, gjson.Get(raw, path+".type").String())
-						require.EqualValues(t, tc.status, gjson.Get(raw, path+".status").Int())
 					}
 					require.Equal(t, 1, found)
 				} else {
@@ -169,6 +174,65 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 				require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 				require.True(t, account.IsSchedulable())
 				require.True(t, account.IsExcelBPSEnabled(), "an in-band 403 must not disable the account")
+			})
+		}
+	}
+}
+
+func TestExcelBPSResponsesErrorFieldsAndExtractors(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("nested=%t/stream=%t", nested, stream), func(t *testing.T) {
+				detail := map[string]any{"code": "invalid_value", "message": "PRIVATE_UPSTREAM_BODY", "param": "input[2].id"}
+				event := map[string]any{"type": "error", "error": detail}
+				if !nested {
+					event = detail
+					event["type"] = "error"
+				}
+				raw, err := json.Marshal(event)
+				require.NoError(t, err)
+				upstream := &httpUpstreamRecorder{resp: bpsCompletionResponse(http.StatusOK,
+					"event: error\ndata: "+string(raw)+"\n\n")}
+				svc := openAIClientToolsTestService(upstream)
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				body, err := json.Marshal(map[string]any{"model": "gpt-6-astra", "input": "hello", "stream": stream})
+				require.NoError(t, err)
+				result, err := svc.Forward(context.Background(), c, excelAccount(), body)
+				require.Error(t, err)
+				require.NotNil(t, result)
+				require.Equal(t, "error", result.UpstreamTerminalEvent)
+				require.Len(t, upstream.requests, 1)
+				require.NotContains(t, rec.Body.String(), "PRIVATE")
+				require.NotContains(t, rec.Body.String(), "response.completed")
+				raw = rec.Body.Bytes()
+				if !stream {
+					require.Equal(t, http.StatusBadRequest, rec.Code)
+					require.Equal(t, "invalid_value", gjson.GetBytes(raw, "error.code").String())
+					require.Equal(t, "input[2].id", gjson.GetBytes(raw, "error.param").String())
+					return
+				}
+				require.Equal(t, http.StatusOK, rec.Code)
+				require.Equal(t, 1, strings.Count(string(raw), "event: error\n"))
+				raw = []byte(strings.TrimSpace(strings.TrimPrefix(string(raw), "event: error\ndata: ")))
+				require.True(t, json.Valid(raw))
+				require.False(t, gjson.GetBytes(raw, "error").Exists())
+				require.Equal(t, "error", gjson.GetBytes(raw, "type").String())
+				require.Equal(t, "input[2].id", gjson.GetBytes(raw, "param").String())
+				require.Equal(t, "0", gjson.GetBytes(raw, "sequence_number").Raw)
+				require.False(t, IsSuccessfulStreamTerminal(raw))
+				require.Equal(t, "invalid_value", extractUpstreamErrorCode(raw))
+				message := extractOpenAISSEErrorMessage(raw)
+				require.NotEmpty(t, message)
+				failedSSE := buildOpenAIResponseFailedSSE("resp_error", "gpt-6-astra", 1, raw, "")
+				failedJSON := strings.TrimSpace(strings.TrimPrefix(failedSSE, "event: response.failed\ndata: "))
+				for _, failed := range []string{failedJSON, string(buildOpenAIWSHTTPBridgeFailedEvent("resp_error", "gpt-6-astra", 1, raw, ""))} {
+					require.Equal(t, "failed", gjson.Get(failed, "response.status").String())
+					require.Equal(t, "invalid_value", gjson.Get(failed, "response.error.code").String())
+					require.Equal(t, message, gjson.Get(failed, "response.error.message").String())
+					require.Equal(t, "input[2].id", gjson.Get(failed, "response.error.param").String())
+				}
 			})
 		}
 	}

@@ -46,6 +46,47 @@ func TestUpstreamFailureClassificationBoundaries(t *testing.T) {
 	require.Nil(t, ParseUpstreamFailure([]byte("invalid JSON")))
 }
 
+func TestUpstreamFailureErrorEventParamRedaction(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		param any
+		want  any
+	}{
+		{"field", "input", "input"},
+		{"indexed field", "input[2].content[0].image_url", "input[2].content[0].image_url"},
+		{"tool schema", "tools[0].function.parameters", "tools[0].function.parameters"},
+		{"null", nil, nil},
+		{"empty", "", nil},
+		{"wrong type", object{"private": "PRIVATE"}, nil},
+		{"private identifier", "private_parameter", nil},
+		{"private field", "input[0].PRIVATE", nil},
+		{"URL", "https://example.invalid/?token=PRIVATE", nil},
+		{"bearer", "Bearer PRIVATE", nil},
+		{"control", "input\nPRIVATE", nil},
+		{"path separator", "input/id", nil},
+		{"invalid index", "input[1x].id", nil},
+		{"oversized index", "input[" + strings.Repeat("1", 257) + "].id", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, bridge := mustPrepare(t, testSource(), "", nil)
+			body := bridge.Stream(io.NopCloser(strings.NewReader(sse(object{
+				"type": "error", "code": "invalid_value", "message": "PRIVATE", "param": tc.param,
+			}))))
+			defer func() { _ = body.Close() }()
+			events := repairEvents(t, body)
+			require.Len(t, events, 1)
+			event := events[0]
+			require.Equal(t, "error", event["type"])
+			require.Equal(t, "invalid_value", event["code"])
+			require.Equal(t, "Excel BPS upstream failure: invalid_value; request was not replayed", event["message"])
+			require.Equal(t, tc.want, event["param"])
+			require.Contains(t, event, "param")
+			require.NotContains(t, event, "error")
+			require.Equal(t, json.Number("0"), event["sequence_number"])
+		})
+	}
+}
+
 func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
 	for _, mode := range []string{"bridge", "tool correction", "unknown tool correction", "compaction"} {
 		t.Run(mode, func(t *testing.T) {

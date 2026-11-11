@@ -968,7 +968,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	if !stream {
 		if upstreamFailure != nil {
 			if StopOpenAICompactSSEKeepaliveCommitted(c) {
-				writeOpenAICompactSSEFailureMessage(c, upstreamFailure.Status, upstreamFailure.Code, upstreamFailure.Message)
+				writeOpenAICompactSSEFailureMessageParam(c, upstreamFailure.Status, upstreamFailure.Code, upstreamFailure.Message, upstreamFailure.Param)
 			} else {
 				c.JSON(upstreamFailure.Status, gin.H{"error": upstreamFailure.Details()})
 			}

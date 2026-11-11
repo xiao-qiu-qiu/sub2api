@@ -3,6 +3,7 @@ package basispoints
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 )
 
 // UpstreamFailure is a safe interpretation of an in-band error. Status is a
@@ -12,12 +13,17 @@ type UpstreamFailure struct {
 	Code    string
 	Type    string
 	Message string
+	Param   string
 }
 
 func (f *UpstreamFailure) Error() string { return f.Message }
 
 func (f *UpstreamFailure) Details() map[string]any {
-	return object{"status": f.Status, "code": f.Code, "type": f.Type, "message": f.Message}
+	detail := object{"status": f.Status, "code": f.Code, "type": f.Type, "message": f.Message}
+	if f.Param != "" {
+		detail["param"] = f.Param
+	}
+	return detail
 }
 
 // ParseUpstreamFailure recognizes failure terminals only. Unknown identifiers
@@ -79,8 +85,19 @@ func classifyUpstreamFailure(kind string, payload object) *UpstreamFailure {
 			errorType = "invalid_request_error"
 		}
 	}
-	return &UpstreamFailure{Status: status, Code: code, Type: errorType,
+	return &UpstreamFailure{Status: status, Code: code, Type: errorType, Param: safeFailureParam(text(detail["param"])),
 		Message: "Excel BPS upstream failure: " + code + "; request was not replayed"}
+}
+
+// Only protocol field names and bounded array indices may cross the bridge.
+// Arbitrary identifiers, schema property names and upstream free text can hold secrets.
+var failureParamPattern = regexp.MustCompile(`^(?:model|input|instructions|tools|tool_choice|text|reasoning|previous_response_id|temperature|top_p|max_output_tokens|parallel_tool_calls|store|stream|metadata|truncation|service_tier)(?:\[[0-9]{1,6}\]|\.(?:id|type|role|content|text|image_url|file_id|file_url|file_data|name|arguments|call_id|output|tools|function|parameters|format|schema|strict|effort|summary|mode|verbosity|status))*$`)
+
+func safeFailureParam(param string) string {
+	if len(param) > 256 || !failureParamPattern.MatchString(param) {
+		return ""
+	}
+	return param
 }
 
 func failureStatus(value any) int {
@@ -135,7 +152,12 @@ func normalizeFailureEvent(kind string, payload object) object {
 		out["usage"] = usage
 	}
 	if kind == "error" {
-		out["error"] = failure.Details()
+		out["code"] = failure.Code
+		out["message"] = failure.Message
+		out["param"] = nil
+		if failure.Param != "" {
+			out["param"] = failure.Param
+		}
 	} else {
 		response, _ := payload["response"].(object)
 		if response == nil {
