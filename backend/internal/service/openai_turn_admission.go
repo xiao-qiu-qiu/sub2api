@@ -317,7 +317,8 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 	if latest.Platform != selected.Platform || (latest.Type != selected.Type && selected.AuthConnectionID == "") {
 		return nil, denyOpenAITurn("account_binding_changed")
 	}
-	if authoritativeRead && !latest.IsSchedulable() {
+	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
+	if authoritativeRead && !latest.IsSchedulableWithContext(ctx) {
 		return nil, denyOpenAITurn("account_ineligible")
 	}
 	if authoritativeRead && latest.IsShadow() && (parent == nil || parent.IsShadow() ||

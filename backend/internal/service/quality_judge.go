@@ -146,8 +146,11 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 func qualityJudgeCandidates(accounts []Account, testedAccount int64, judge *QualityJudgeConfig) []Account {
 	candidates := make([]Account, 0, len(accounts))
 	seen := make(map[int64]bool, len(accounts))
+	// Grading is part of the internal probe. Waiting for graders' own checks
+	// would deadlock a pool whose quota windows reset together.
+	probeCtx := context.WithValue(context.Background(), qualityProbeContextKey{}, true)
 	for _, account := range accounts {
-		if seen[account.ID] || account.ID == testedAccount || !account.IsSchedulable() ||
+		if seen[account.ID] || account.ID == testedAccount || !account.IsSchedulableWithContext(probeCtx) ||
 			!account.IsModelSupportedInGroup(&judge.GroupID, judge.ModelID) {
 			continue
 		}

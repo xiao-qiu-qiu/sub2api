@@ -2,6 +2,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -238,6 +239,14 @@ func accountLoadPreferenceRate(account *Account, loadRate int) int {
 }
 
 func (a *Account) IsSchedulable() bool {
+	return a.IsSchedulableWithContext(context.Background())
+}
+
+// Internal quality probes bypass only their admission gate, never native limits.
+func (a *Account) IsSchedulableWithContext(ctx context.Context) bool {
+	if a == nil {
+		return false
+	}
 	if !a.IsActive() || !a.Schedulable || a.PerformancePaused {
 		return false
 	}
@@ -255,6 +264,9 @@ func (a *Account) IsSchedulable() bool {
 		return false
 	}
 	if a.SupportsAccountQuota() && a.IsQuotaExceeded() {
+		return false
+	}
+	if ctx.Value(qualityProbeContextKey{}) != true && a.QualityProbeAdmissionPendingWithContext(ctx, now) {
 		return false
 	}
 	return true

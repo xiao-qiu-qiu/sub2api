@@ -117,13 +117,20 @@ func TestQualityCooldownOrdinaryEditRetainsOwnershipUntilPassingRecovery(t *test
 	require.NoError(t, err)
 	require.JSONEq(t, before, cooldownScopeState(t, f))
 	requireCooldownScopeBlocked(t, f)
-	require.Zero(t, f.events())
+	pausedAdmission, ok := f.extra()[service.QualityProbeAdmissionKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, pausedAdmission["enabled"], "pausing the last rule disables only its admission monitoring")
+	require.Equal(t, 1, f.events(), "the admission toggle must publish one account_changed event")
 	action, err := f.plans.ApplyQualityOutcome(ctx, &stale, f.until, "passed")
 	require.NoError(t, err)
 	require.Equal(t, "stale_run", action)
 	f.plan.Enabled = true
 	f.plan, err = f.plans.Update(ctx, f.plan)
 	require.NoError(t, err)
+	resumedAdmission, ok := f.extra()[service.QualityProbeAdmissionKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, resumedAdmission["enabled"])
+	require.Equal(t, 1, f.events(), "resuming admission monitoring must refresh the scheduler once")
 	f.plan.QualityModelOutcomes = map[string]string{"sol": "passed"}
 	require.Equal(t, "passed", f.apply("passed"))
 	require.JSONEq(t, before, cooldownScopeState(t, f), "auto_restore=false retains ownership even on pass")
@@ -213,14 +220,27 @@ func TestQualityCooldownChangedActionOutcomeRetainsOwnership(t *testing.T) {
 			beforeState, beforeExtra := cooldownScopeState(t, f), f.extra()
 			f.exec(`UPDATE scheduled_test_plans SET pelican_config=jsonb_set(pelican_config,'{quality,action}',to_jsonb($2::text)),running_until=NULL,updated_at=clock_timestamp() WHERE account_id=$1`, action)
 			f.claim()
+			expectedAdmission, ok := beforeExtra[service.QualityProbeAdmissionKey].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, true, expectedAdmission["enabled"])
+			wantAdmissionEnabled := action != service.QualityActionEnableBPS
+			expectedAdmission["enabled"] = wantAdmissionEnabled
 			for _, verdict := range []string{"failed", "passed", "inconclusive"} {
 				f.plan.QualityModelOutcomes = map[string]string{"sol": verdict, "astra": "passed"}
 				require.Equal(t, "action_conflict", f.apply(verdict))
 				require.JSONEq(t, beforeState, cooldownScopeState(t, f))
-				require.Equal(t, beforeExtra, f.extra())
+				afterExtra := f.extra()
+				afterAdmission, ok := afterExtra[service.QualityProbeAdmissionKey].(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, wantAdmissionEnabled, afterAdmission["enabled"])
+				require.Equal(t, beforeExtra, afterExtra, "policy changes may only toggle admission participation; conflicting outcomes preserve all ownership and runtime evidence")
 				requireCooldownScopeBlocked(t, f)
 			}
-			require.Zero(t, f.events())
+			wantEvents := 0
+			if !wantAdmissionEnabled {
+				wantEvents = 1
+			}
+			require.Equal(t, wantEvents, f.events(), "only disabling the main-rule admission participant publishes a refresh")
 		})
 	}
 }

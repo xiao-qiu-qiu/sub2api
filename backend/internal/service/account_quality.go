@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const QualityActionObserveOnly = "observe_only"
@@ -18,13 +19,44 @@ const QualityModelIsolationKey = "quality_model_isolation"
 // comparison batches may be finalized later, but never move this boundary.
 func SetQualityProbeFinishedAt(plan *ScheduledTestPlan, results []*ScheduledTestResult) {
 	plan.QualityProbeFinishedAt = nil
+	plan.QualityProbeStartedAt = nil
+	plan.QualityProbeAdmissionChecked = len(results) > 0
+	now := time.Now()
 	for _, result := range results {
 		if result == nil || result.FinishedAt.IsZero() {
+			plan.QualityProbeAdmissionChecked = false
 			continue
+		}
+		if result.StartedAt.IsZero() || result.FinishedAt.Before(result.StartedAt) || result.FinishedAt.After(now) {
+			plan.QualityProbeAdmissionChecked = false
+		} else if plan.QualityProbeStartedAt == nil || result.StartedAt.Before(*plan.QualityProbeStartedAt) {
+			started := result.StartedAt
+			plan.QualityProbeStartedAt = &started
+		}
+		if result.QualityJudgment == nil ||
+			!(result.Status == "success" && result.QualityJudgment.Verdict == "correct" ||
+				result.Status == "failed" && result.QualityJudgment.Verdict == "incorrect" &&
+					(result.ErrorMessage == "answer_mismatch" || result.ErrorMessage == openAICodexStateDegradedError)) {
+			plan.QualityProbeAdmissionChecked = false
+		}
+		if plan.PelicanConfig != nil && plan.PelicanConfig.QuestionKind == QualityRandomQuestionKind {
+			// Raw incorrect verdicts remain in history even when peer comparison
+			// cannot establish degradation. Every sample needs final evidence.
+			cfg := result.PelicanConfig
+			if !plan.QualityBatchEvaluated || cfg == nil || cfg.QualityBatch == nil ||
+				(cfg.QualityBatch.Decision != "passed" && cfg.QualityBatch.Decision != "peer_passed") {
+				plan.QualityProbeAdmissionChecked = false
+			}
 		}
 		if plan.QualityProbeFinishedAt == nil || result.FinishedAt.After(*plan.QualityProbeFinishedAt) {
 			finished := result.FinishedAt
 			plan.QualityProbeFinishedAt = &finished
+		}
+	}
+	if plan.PelicanConfig != nil {
+		expected := max(1, plan.PelicanConfig.ParallelCount) * max(1, len(plan.PelicanConfig.ModelIDs))
+		if len(results) < expected {
+			plan.QualityProbeAdmissionChecked = false
 		}
 	}
 }

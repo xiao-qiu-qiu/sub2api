@@ -38,7 +38,7 @@ func (a *Account) IsSchedulableForModelWithContext(ctx context.Context, requeste
 	if a == nil {
 		return false
 	}
-	if !a.IsSchedulable() {
+	if !a.IsSchedulableWithContext(ctx) {
 		return false
 	}
 	// Quality isolation is independent of provider cooldowns and overage credits.

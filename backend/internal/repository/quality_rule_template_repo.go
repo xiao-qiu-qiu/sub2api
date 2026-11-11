@@ -309,7 +309,9 @@ func (r *qualityRuleTemplateRepository) CreateLinkedPlan(ctx context.Context, t 
 // Only configuration used by type/model validation and discovery belongs in this
 // snapshot. Traffic timestamps and other runtime fields must not invalidate it;
 // current filter membership is checked separately inside the transaction.
-const qualityTemplateAccountConfigSnapshot = `jsonb_build_array(a.platform, a.type, a.credentials, a.extra, a.proxy_id, a.parent_account_id)::text`
+// Plan lifecycle publishes admission independently of account configuration.
+// Strip only that server-owned key; all other Extra still fences discovery.
+const qualityTemplateAccountConfigSnapshot = `jsonb_build_array(a.platform, a.type, a.credentials, CASE WHEN jsonb_typeof(a.extra)='object' THEN a.extra-'` + service.QualityProbeAdmissionKey + `' ELSE a.extra END, a.proxy_id, a.parent_account_id)::text`
 
 // ReincludeAccount prepares models before opening a transaction, then consumes
 // only the same NULL binding against an unchanged account snapshot. Lock order is

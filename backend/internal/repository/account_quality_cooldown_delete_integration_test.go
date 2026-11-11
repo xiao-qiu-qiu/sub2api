@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"testing"
 
@@ -104,7 +105,18 @@ func TestQualityCooldownDeleteAfterRecoveryPreservesExternalRestrictions(t *test
 	require.NotContains(t, limits, "sol")
 	require.Contains(t, limits, "native")
 	require.Contains(t, limits, "other-owner")
+	admission, ok := extra[service.QualityProbeAdmissionKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, admission["enabled"], "the remaining quality rule keeps admission monitoring enabled")
 	require.NoError(t, f.plans.Delete(context.Background(), f.plan.ID))
 	require.Zero(t, f.count(`SELECT count(*) FROM scheduled_test_plans WHERE account_id=$1`))
-	require.Equal(t, extra, f.extra(), "deleting a recovered rule must preserve external restrictions")
+	after := f.extra()
+	afterAdmission, ok := after[service.QualityProbeAdmissionKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, afterAdmission["enabled"], "deleting the last quality rule disables its independent admission gate")
+	expectedExtra := maps.Clone(extra)
+	expectedAdmission := maps.Clone(admission)
+	expectedAdmission["enabled"] = false
+	expectedExtra[service.QualityProbeAdmissionKey] = expectedAdmission
+	require.Equal(t, expectedExtra, after, "only admission.enabled may change; external restrictions and other runtime evidence must survive")
 }

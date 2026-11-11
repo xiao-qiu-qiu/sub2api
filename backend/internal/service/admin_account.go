@@ -118,6 +118,7 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	// Provider observations, capability probes, and transient scheduling state.
 	"model_rate_limits":                      {},
 	QualityModelIsolationKey:                 {},
+	QualityProbeAdmissionKey:                 {},
 	"session_window_utilization":             {},
 	"passive_usage_7d_utilization":           {},
 	"passive_usage_7d_reset":                 {},
@@ -1062,6 +1063,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	// Dedicated quality restore/runtime paths use their own transaction/UpdateExtra.
 	updates = maps.Clone(updates)
 	delete(updates, QualityModelIsolationKey)
+	delete(updates, QualityProbeAdmissionKey)
 	if err := ValidateAccountCostMultiplierExtra(updates); err != nil {
 		return err
 	}
@@ -1128,6 +1130,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
 	input.Extra = stripOpenAIAutoResetCreditManagedExtra(input.Extra, true)
 	delete(input.Extra, OpenAITwoFAAdmissionExtraKey)
+	delete(input.Extra, QualityProbeAdmissionKey)
 	delete(input.Extra, UpstreamBillingProbeEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingProbeExtraKey)

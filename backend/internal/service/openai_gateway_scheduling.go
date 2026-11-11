@@ -420,7 +420,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 		return reason
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
-		if account.IsSchedulable() {
+		if account.IsSchedulableWithContext(ctx) {
 			return "model_rate_limited"
 		}
 		return "not_schedulable"
@@ -552,18 +552,32 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	if account == nil || !account.IsOpenAI() {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := time.Now()
+	utilization5h, has5h := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
+	utilization7d, has7d := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
+	paused, decision := evaluateOpenAIQuotaAutoPause(ctx, account, now, utilization5h, has5h, utilization7d, has7d)
+	if paused && strings.HasPrefix(decision.reason, "quota_auto_reset_") {
+		notifyOpenAIAutoResetFromScheduler(account.ID)
+	}
+	if !paused && ctx.Value(qualityProbeContextKey{}) != true && account.QualityProbeAdmissionPendingWithContext(ctx, now) {
+		return true, openAIQuotaAutoPauseDecision{reason: "quality_probe_admission_pending"}
+	}
+	return paused, decision
+}
+
+// Pure policy evaluation is shared by live scheduling and recovery admission.
+// Recovery supplies the retained pre-reset utilization without notifying jobs.
+func evaluateOpenAIQuotaAutoPause(ctx context.Context, account *Account, now time.Time, utilization5h float64, has5h bool, utilization7d float64, has7d bool) (bool, openAIQuotaAutoPauseDecision) {
 	// 自动用卡有独立阈值：达到消费阈值时必须先退出调度；仅达到普通暂停阈值时，
 	// 只有新鲜状态明确存在可用卡才继续放行到消费阈值。
 	if config := ResolveOpenAIAutoResetCreditConfig(account); config.Enabled {
-		now := time.Now()
-		utilization5h, has5h := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
-		utilization7d, has7d := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
 		if config.Threshold5h > 0 && has5h && utilization5h >= config.Threshold5h {
-			notifyOpenAIAutoResetFromScheduler(account.ID)
 			return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: config.Threshold5h, utilization: utilization5h, reason: "quota_auto_reset_pending_5h"}
 		}
 		if config.Threshold7d > 0 && has7d && utilization7d >= config.Threshold7d {
-			notifyOpenAIAutoResetFromScheduler(account.ID)
 			return true, openAIQuotaAutoPauseDecision{window: "7d", threshold: config.Threshold7d, utilization: utilization7d, reason: "quota_auto_reset_pending_7d"}
 		}
 
@@ -584,7 +598,6 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 			if state != nil && state.Status == OpenAIAutoResetStatusAvailable && state.AvailableCount > 0 && !openAIAutoResetStateStale(state, now) {
 				return false, openAIQuotaAutoPauseDecision{}
 			}
-			notifyOpenAIAutoResetFromScheduler(account.ID)
 			if pauseReached5h {
 				return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: pause5h, utilization: utilization5h, reason: "quota_auto_reset_credit_check_5h"}
 			}
@@ -599,15 +612,14 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	disabled5h := resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled")
 	disabled7d := resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled")
 	threshold5h, threshold7d := resolveOpenAIQuotaAutoPauseThresholds(ctx, account)
-	now := time.Now()
 	if !disabled5h && threshold5h > 0 {
-		if utilization, ok := resolveOpenAIQuotaUtilization(account.Extra, "5h", now); ok && utilization >= threshold5h {
-			return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: threshold5h, utilization: utilization}
+		if has5h && utilization5h >= threshold5h {
+			return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: threshold5h, utilization: utilization5h}
 		}
 	}
 	if !disabled7d && threshold7d > 0 {
-		if utilization, ok := resolveOpenAIQuotaUtilization(account.Extra, "7d", now); ok && utilization >= threshold7d {
-			return true, openAIQuotaAutoPauseDecision{window: "7d", threshold: threshold7d, utilization: utilization}
+		if has7d && utilization7d >= threshold7d {
+			return true, openAIQuotaAutoPauseDecision{window: "7d", threshold: threshold7d, utilization: utilization7d}
 		}
 	}
 	return false, openAIQuotaAutoPauseDecision{}

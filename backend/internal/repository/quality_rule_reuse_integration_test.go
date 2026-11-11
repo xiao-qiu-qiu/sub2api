@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -43,9 +44,20 @@ func TestQualityReusePreservesTargetOwnershipWithoutImplicitRestoration(t *testi
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT state::text FROM account_quality_states WHERE plan_id=$1`, plan.ID).Scan(&afterState))
 			require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT row_to_json(a)::text FROM accounts a WHERE id=$1`, f.account).Scan(&afterAccount))
 			require.JSONEq(t, beforeState, afterState)
-			require.JSONEq(t, beforeAccount, afterAccount)
+			var expectedAccount, actualAccount map[string]any
+			require.NoError(t, json.Unmarshal([]byte(beforeAccount), &expectedAccount))
+			require.NoError(t, json.Unmarshal([]byte(afterAccount), &actualAccount))
+			beforeAdmission, ok := expectedAccount["extra"].(map[string]any)[service.QualityProbeAdmissionKey].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, true, beforeAdmission["enabled"])
+			afterAdmission, ok := actualAccount["extra"].(map[string]any)[service.QualityProbeAdmissionKey].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, false, afterAdmission["enabled"], "pausing the last rule disables admission without restoring its account action")
+			beforeAdmission["enabled"] = false
+			require.Equal(t, expectedAccount, actualAccount, "only admission.enabled may change; all account configuration and other runtime evidence must remain identical")
 			require.Equal(t, groupCount, f.count(`SELECT count(*) FROM account_groups WHERE account_id=$1`))
-			require.Zero(t, f.count(`SELECT count(*) FROM scheduler_outbox WHERE account_id=$1`))
+			require.Equal(t, 1, f.count(`SELECT count(*) FROM scheduler_outbox WHERE account_id=$1`), "the changed admission gate needs one scheduler refresh")
+			require.Equal(t, 1, f.count(`SELECT count(*) FROM scheduler_outbox WHERE account_id=$1 AND event_type='account_changed' AND group_id IS NULL`))
 		})
 	}
 }
