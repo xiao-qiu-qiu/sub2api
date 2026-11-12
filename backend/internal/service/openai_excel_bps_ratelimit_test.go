@@ -32,6 +32,10 @@ type excelBPSQuotaRepo struct {
 	limitErr  error
 }
 
+func (r *excelBPSQuotaRepo) GetByID(context.Context, int64) (*Account, error) {
+	return nil, nil
+}
+
 type excelBPSQuotaSettingsRepo struct {
 	SettingRepository
 	cooldown string

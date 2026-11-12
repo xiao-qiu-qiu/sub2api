@@ -559,6 +559,12 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	utilization5h, has5h := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
 	utilization7d, has7d := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
 	paused, decision := evaluateOpenAIQuotaAutoPause(ctx, account, now, utilization5h, has5h, utilization7d, has7d)
+	if !paused {
+		if window, _, exhausted := openAIExhaustedQuotaWindow(account, now); exhausted {
+			paused = true
+			decision = openAIQuotaAutoPauseDecision{window: window, threshold: 1, utilization: 1, reason: "quota_exhausted_" + window}
+		}
+	}
 	if paused && strings.HasPrefix(decision.reason, "quota_auto_reset_") {
 		notifyOpenAIAutoResetFromScheduler(account.ID)
 	}

@@ -17,16 +17,20 @@ func TestIssue578ThresholdSemantics(t *testing.T) {
 		name                string
 		threshold           any
 		pause               any
+		used                float64
 		wantGate, wantPause bool
 	}{
-		{"unconfigured credits allowed", nil, nil, false, false},
-		{"explicit 90 percent", 90, 0.9, true, true},
-		{"100 disables account gate", 100, nil, false, false},
-		{"auto pause 1 means 100 percent", 100, 1.0, false, true},
+		{"unconfigured with capacity", nil, nil, 99, false, false},
+		{"unconfigured exhausted quota pauses", nil, nil, 100, false, true},
+		{"explicit 90 percent", 90, 0.9, 95, true, true},
+		{"100 disables early account gate", 100, nil, 99, false, false},
+		{"100 does not bypass exhausted quota", 100, nil, 100, false, true},
+		{"auto pause 1 allows below 100 percent", 100, 1.0, 99, false, false},
+		{"auto pause 1 means 100 percent", 100, 1.0, 100, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := issue578Account()
-			a.Extra["codex_5h_used_percent"] = 100.0
+			a.Extra["codex_5h_used_percent"] = tc.used
 			a.Extra["codex_usage_updated_at"] = time.Now().UTC().Format(time.RFC3339)
 			a.Credentials["account_scheduling_threshold"] = tc.threshold
 			a.Extra["auto_pause_5h_threshold"] = tc.pause

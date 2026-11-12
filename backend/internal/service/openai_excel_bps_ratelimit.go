@@ -20,12 +20,9 @@ const excelBPSRateLimitedClientMessage = "Excel BPS rate limit exceeded, please 
 // accounts" diagnostics; the handler reports such pools as rate limited.
 const excelBPSRateLimitedFilterReason = "excel_bps_rate_limited"
 
-// BPS throttles its own endpoint independently of the account's Codex quota.
-// A BPS 429 is therefore handed back to the handler's account-switch loop
-// before any response byte is written, and cools only this account's BPS
-// route. Natively forwarded models, persisted quota fields and the shared
-// scheduler health score are left alone. Like other runtime blocks, the
-// cooldown is local to this process.
+// Rejected requests can fail over before any generation is accepted. Only
+// explicit quota errors backed by a trusted snapshot affect shared Codex quota;
+// ordinary BPS throttles keep their separate local route cooldown.
 func newExcelBPSRateLimitedFailoverError(retryAfter string) *UpstreamFailoverError {
 	failoverErr := &UpstreamFailoverError{
 		StatusCode:        http.StatusTooManyRequests,
@@ -48,7 +45,7 @@ func newExcelBPSRateLimitedFailoverError(retryAfter string) *UpstreamFailoverErr
 // Retry-After, or the configured 429 fallback when none is given. A shorter
 // cooldown never replaces a longer one.
 func (s *OpenAIGatewayService) coolDownExcelBPS(ctx context.Context, account *Account, retryAfter string) {
-	if s == nil || account == nil {
+	if s == nil || account == nil || isQualityObservation(ctx) {
 		return
 	}
 	if account.AuthConnectionID != "" {

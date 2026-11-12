@@ -217,8 +217,8 @@ func excelBPSImagesFallbackStatus(status int) bool {
 
 // forwardExcelBPSImages sends a text-to-image request to BPS. fallback=true
 // means BPS rejected the format before generating anything; the caller then
-// uses Codex. BPS failures never write Codex account state, and a request that
-// may have reached BPS is never replayed.
+// uses Codex. Only verified quota exhaustion affects Codex account state;
+// an accepted generation is never replayed.
 func (s *OpenAIGatewayService) forwardExcelBPSImages(ctx context.Context, c *gin.Context, account *Account, parsed *OpenAIImagesRequest, requestModel, upstreamModel string, startTime time.Time) (*OpenAIForwardResult, bool, error) {
 	endpoint, upstreamURL := excelBPSImagesEndpoint, basispoints.ImagesGenerationsURL
 	if parsed.IsEdits() {
@@ -296,13 +296,10 @@ func (s *OpenAIGatewayService) forwardExcelBPSImages(ctx context.Context, c *gin
 			return nil, true, nil
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// Like text BPS: cool only the BPS route and let the handler try
-			// another account; Codex quota state is left alone.
+			// Use the same trusted-quota check as text BPS before failing over.
 			event.Kind = "failover"
 			appendOpsUpstreamError(c, event)
-			if !isQualityObservation(ctx) {
-				s.coolDownExcelBPS(ctx, account, resp.Header.Get("Retry-After"))
-			}
+			s.handleExcelBPSRateLimit(ctx, account, resp.Header.Get("Retry-After"), raw)
 			// The next account may use Codex, so the endpoint is recorded only
 			// for final BPS outcomes; the image path never clears it.
 			return nil, false, newExcelBPSRateLimitedFailoverError(resp.Header.Get("Retry-After"))

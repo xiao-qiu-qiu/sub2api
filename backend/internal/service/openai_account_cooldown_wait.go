@@ -83,6 +83,9 @@ func (s *OpenAIGatewayService) queueOpenAIAccountCooldown(ctx context.Context, a
 	if b == nil || ctx.Err() != nil || s.excelBPSCooldownRemaining(account, model) <= 0 {
 		return false
 	}
+	if _, _, exhausted := openAIExhaustedQuotaWindow(account, time.Now()); exhausted {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.deadline.IsZero() {

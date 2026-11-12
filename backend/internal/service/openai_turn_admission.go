@@ -62,6 +62,8 @@ func IsOpenAIInitialAdmissionRejection(err error) bool {
 // state that can route the current conversation back to an account which has
 // just failed the authoritative pre-send check.  It deliberately does not
 // touch account data, tickets, quotas, or unrelated sessions.
+// Quota pauses retain logical account bindings for recovery after a reset,
+// while discarding the rejected connection's affinity and turn state.
 //
 // A database/read failure is not evidence that the account became ineligible,
 // so callers must not invoke this helper for latest_state_unavailable.  Keeping
@@ -79,18 +81,22 @@ func (s *OpenAIGatewayService) invalidateOpenAIWSTurnStateAfterAdmissionFailure(
 	if !errors.As(err, &denied) || denied == nil || denied.Reason == "latest_state_unavailable" || errors.Is(err, ErrPriorityLatencyUnavailable) {
 		return
 	}
+	preserveQuotaBinding := denied.Reason == "quota_auto_pause" ||
+		strings.HasPrefix(denied.Reason, "quota_exhausted_") ||
+		strings.HasPrefix(denied.Reason, "quota_auto_pause_") ||
+		strings.HasPrefix(denied.Reason, "quota_auto_reset_")
 
 	sessionHash = strings.TrimSpace(sessionHash)
 	responseID = strings.TrimSpace(responseID)
 	stateStore := s.getOpenAIWSStateStore()
 	if stateStore != nil {
 		if responseID != "" {
-			// Delete both routing and connection affinity for the exact response
-			// that was rejected.  Redis deletion errors are intentionally not
-			// promoted to a request failure: the authoritative admission check
-			// already prevented the send, and the next scheduler read will
-			// revalidate the account.
-			_ = stateStore.DeleteResponseAccount(ctx, groupID, responseID)
+			// Quota pauses are transient, matching previous-response selection.
+			// Keep that route for recovery; the next admission still checks quota.
+			// Redis deletion errors do not override the pre-send rejection.
+			if !preserveQuotaBinding {
+				_ = stateStore.DeleteResponseAccount(ctx, groupID, responseID)
+			}
 			stateStore.DeleteResponseConn(responseID)
 		}
 		if sessionHash != "" {
@@ -99,7 +105,7 @@ func (s *OpenAIGatewayService) invalidateOpenAIWSTurnStateAfterAdmissionFailure(
 		}
 	}
 
-	if groupID != 0 && sessionHash != "" {
+	if !preserveQuotaBinding && groupID != 0 && sessionHash != "" {
 		group := groupID
 		_ = s.deleteStickySessionAccountID(ctx, &group, sessionHash)
 	}
@@ -109,7 +115,7 @@ func (s *OpenAIGatewayService) invalidateOpenAIWSTurnStateAfterAdmissionFailure(
 		accountID,
 		groupID,
 		truncateOpenAIWSLogValue(sessionHash, 12),
-		responseID != "",
+		responseID != "" && !preserveQuotaBinding,
 		normalizeOpenAIWSLogValue(denied.Reason),
 	)
 }
@@ -343,6 +349,21 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 			return nil, denyOpenAITurn("account_runtime_blocked")
 		}
 	}
+	// Recheck the resolved snapshot on every send, including cache hits and WS
+	// retries which skip BeforeTurn. Only the account's own quota applies; the
+	// credential parent and managed connection projection keep their own gates.
+	if !isManualAccountTest(ctx) {
+		if paused, decision := shouldAutoPauseOpenAIAccountByQuota(ctx, latest); paused {
+			reason := decision.reason
+			if reason == "" {
+				reason = "quota_auto_pause"
+				if decision.window != "" {
+					reason += "_" + decision.window
+				}
+			}
+			return nil, denyOpenAITurn(reason)
+		}
+	}
 	return latest, nil
 }
 
@@ -363,6 +384,9 @@ func (s *OpenAIGatewayService) admitOpenAITurn(ctx context.Context, c *gin.Conte
 	if err != nil {
 		return nil, err
 	}
+	// Managed projections inherit the aggregate Extra, not a connection-owned
+	// quota snapshot. Attaching AuthConnectionID does not make that old usage
+	// authoritative for this grant; its connection gates remain in preparation.
 	return s.prepareAuthConnection(ctx, c, latest, selected, outboundModel)
 }
 

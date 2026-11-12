@@ -26,13 +26,13 @@ func TestOpenAIQuotaAutoResetDisabledWindowHTTPFlow(t *testing.T) {
 		wantReason               string
 		wantWindow               string
 	}{
-		{name: "ignore exhausted 5h below weekly threshold", threshold7d: 0.9, used5h: 100, used7d: 89.9},
-		{name: "ignore overused 5h below weekly threshold", threshold7d: 0.9, used5h: 150, used7d: 20},
+		{name: "ignored exhausted 5h pauses without spending credit", threshold7d: 0.9, used5h: 100, used7d: 89.9, wantPause: true, wantReason: "quota_exhausted_5h", wantWindow: "5h"},
+		{name: "ignored overused 5h pauses without spending credit", threshold7d: 0.9, used5h: 150, used7d: 20, wantPause: true, wantReason: "quota_exhausted_5h", wantWindow: "5h"},
 		{name: "weekly threshold consumes with exhausted 5h", threshold7d: 0.9, used5h: 100, used7d: 90, wantReset: true, wantPause: true, wantReason: "quota_auto_reset_pending_7d", wantWindow: "7d"},
 		{name: "weekly threshold consumes with unused 5h", threshold7d: 0.9, used7d: 90, wantReset: true, wantPause: true, wantReason: "quota_auto_reset_pending_7d", wantWindow: "7d"},
-		{name: "ignore exhausted 7d below 5h threshold", threshold5h: 0.8, used5h: 79.9, used7d: 100},
+		{name: "ignored exhausted 7d pauses without spending credit", threshold5h: 0.8, used5h: 79.9, used7d: 100, wantPause: true, wantReason: "quota_exhausted_7d", wantWindow: "7d"},
 		{name: "5h threshold consumes while ignoring 7d", threshold5h: 0.8, used5h: 80, used7d: 100, wantReset: true, wantPause: true, wantReason: "quota_auto_reset_pending_5h", wantWindow: "5h"},
-		{name: "both ignored never consume", used5h: 100, used7d: 100},
+		{name: "both ignored pause without spending credit", used5h: 100, used7d: 100, wantPause: true, wantReason: "quota_exhausted_7d", wantWindow: "7d"},
 		{name: "ignored 5h retains normal pause despite available credits", threshold7d: 0.9, used5h: 100, used7d: 85, pause5h: 0.8, pause7d: 0.8, wantPause: true, wantWindow: "5h"},
 		{name: "ignored 7d retains normal pause despite available credits", threshold5h: 0.9, used5h: 85, used7d: 100, pause5h: 0.8, pause7d: 0.8, wantPause: true, wantWindow: "7d"},
 	}
