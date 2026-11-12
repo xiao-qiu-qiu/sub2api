@@ -25,6 +25,10 @@ type object = map[string]any
 // PrepareOptions contains internal conversion settings, never client request fields.
 // The zero value preserves the ordinary BPS protocol instructions.
 type PrepareOptions struct {
+	// ClientInstructions overrides the common developer prefix; whitespace uses
+	// DefaultClientInstructions. Transport and output constraints are appended.
+	ClientInstructions string
+	// SkipProtocolInstructions disables all gateway-injected instructions for tests.
 	SkipProtocolInstructions bool
 }
 
@@ -199,10 +203,11 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	if instructions := text(source["instructions"]); instructions != "" {
 		prologue = append(prologue, message("developer", instructions))
 	}
-	protocol := "This request comes from an external Responses client. Return assistant text. Do not call Excel, Office, workbook or connector tools."
+	protocol := "No client tools are available for this request. Return assistant text and do not call tools."
 	if len(catalog) > 0 {
-		protocol = "This request comes from an external Responses client. Use only the client tools in the catalog below. " +
-			"There is no live Excel workbook for this request. The proxy intercepts run_officejs as a transport and never executes Office code. " +
+		protocol = "Use only the client tools in the catalog below. " +
+			"Do not assume access to an upstream built-in Excel workbook. Client-declared spreadsheet and workbook tools remain available through this catalog. " +
+			"The proxy intercepts run_officejs as a transport and never executes Office code. " +
 			"To call one client tool, call native run_officejs using the transport matching its catalog type. " +
 			"FUNCTION: code must contain one serialized JSON object {\"name\":\"CATALOG_NAME\",\"arguments\":{...}}. Arguments is an object, not an extra JSON string. " +
 			"FUNCTION_CODE: when a catalog function explicitly specifies this transport, set summary to exactly codex2api.function_code/CATALOG_NAME, put its exact code argument directly in native code, and serialize all other arguments as one JSON object in extended_summary ({} if none). Never put code in extended_summary. This replaces the FUNCTION envelope for that tool, so do not JSON-wrap, fence or re-escape the code text. " +
@@ -233,7 +238,11 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 		protocol += "\n" + structured.instructions()
 	}
 	if !b.prepareOptions.SkipProtocolInstructions {
-		prologue = append(prologue, message("developer", protocol))
+		clientInstructions := b.prepareOptions.ClientInstructions
+		if strings.TrimSpace(clientInstructions) == "" {
+			clientInstructions = DefaultClientInstructions
+		}
+		prologue = append(prologue, message("developer", clientInstructions+"\n\n"+protocol))
 	}
 	cacheKey := text(source["prompt_cache_key"])
 	conversation := cacheKey

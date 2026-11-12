@@ -433,6 +433,7 @@ type UpdateSettingsRequest struct {
 	RequestCaptureEnabled                 *bool   `json:"request_capture_enabled"`
 	RequestCaptureQuotaMiB                *int64  `json:"request_capture_quota_mib"`
 	RequestCaptureRetentionDays           *int    `json:"request_capture_retention_days"`
+	ExcelBPSClientInstructions            *string `json:"excel_bps_client_instructions"`
 	ExcelBPSImageMode                     *string `json:"excel_bps_image_mode"`
 	ExcelBPSImageRelayEnabled             *bool   `json:"excel_bps_image_relay_enabled"`
 	ExcelBPSImageBaseURL                  *string `json:"excel_bps_image_base_url"`
@@ -560,6 +561,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if req.ExcelBPSClientInstructions != nil {
+		if _, err := service.NormalizeExcelBPSClientInstructions(*req.ExcelBPSClientInstructions); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
 	if raw, sent := sentFields[service.SettingKeyAccountRotationSettings]; sent {
 		settings, err := decodeAccountRotationSettings(raw)
 		if err != nil {
@@ -641,6 +648,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+	if req.ExcelBPSClientInstructions == nil {
+		omitted[service.SettingKeyExcelBPSClientInstructions] = struct{}{}
+	}
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
 	if err != nil {
@@ -1867,6 +1877,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.RequestCaptureRetentionDays
 		}(),
+		ExcelBPSClientInstructions: func() string {
+			if req.ExcelBPSClientInstructions != nil {
+				return *req.ExcelBPSClientInstructions
+			}
+			return previousSettings.ExcelBPSClientInstructions
+		}(),
 		ExcelBPSImageMode: func() string {
 			if req.ExcelBPSImageMode != nil {
 				return *req.ExcelBPSImageMode
@@ -2915,6 +2931,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		RequestCaptureEnabled:                 updatedSettings.RequestCaptureEnabled,
 		RequestCaptureQuotaMiB:                updatedSettings.RequestCaptureQuotaMiB,
 		RequestCaptureRetentionDays:           updatedSettings.RequestCaptureRetentionDays,
+		ExcelBPSClientInstructions:            updatedSettings.ExcelBPSClientInstructions,
+		ExcelBPSDefaultClientInstructions:     updatedSettings.ExcelBPSDefaultClientInstructions,
 		ExcelBPSImageMode:                     updatedSettings.ExcelBPSImageMode,
 		ExcelBPSImageRelayEnabled:             updatedSettings.ExcelBPSImageRelayEnabled,
 		ExcelBPSImageMaxImageMiB:              updatedSettings.ExcelBPSImageMaxImageMiB,

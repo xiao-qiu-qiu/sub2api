@@ -426,6 +426,8 @@ const baseSettingsResponse = {
   home_content: "",
   compact_home_enabled: false,
   excel_bps_enabled: true,
+  excel_bps_client_instructions: 'Default external client instructions.',
+  excel_bps_default_client_instructions: 'Default external client instructions.',
   excel_bps_image_mode: 'native',
   excel_bps_image_relay_enabled: true,
   excel_bps_image_base_url: '',
@@ -1090,6 +1092,63 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(showError).not.toHaveBeenCalled();
     expect(showSuccess).toHaveBeenCalledWith('admin.settings.settingsSaved');
     wrapper.unmount();
+  });
+
+  it("edits BPS client instructions, saves them, and reloads the custom text", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get('[data-testid="excel-bps-client-instructions-settings"]');
+    const toggle = card.get('[data-testid="excel-bps-instructions-toggle"]');
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    await toggle.trigger('click');
+    expect(toggle.attributes('aria-expanded')).toBe('true');
+    const editor = card.get('textarea');
+    expect((editor.element as HTMLTextAreaElement).value).toBe(baseSettingsResponse.excel_bps_default_client_instructions);
+    const custom = 'Use the current client context.\n\nKeep replies concise.';
+    await editor.setValue(custom);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ excel_bps_client_instructions: custom }));
+    expect(updateSettings.mock.calls.at(-1)?.[0]).not.toHaveProperty('excel_bps_default_client_instructions');
+    wrapper.unmount();
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, excel_bps_client_instructions: custom });
+    const reloaded = mountView();
+    await flushPromises();
+    expect((reloaded.get('#excel-bps-client-instructions').element as HTMLTextAreaElement).value).toBe(custom);
+  });
+
+  it("restores BPS instructions from the server default and accepts an empty reset", async () => {
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, excel_bps_client_instructions: 'Custom instructions' });
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get('[data-testid="excel-bps-client-instructions-settings"]');
+    await card.get('[data-testid="excel-bps-instructions-toggle"]').trigger('click');
+    await card.get('[data-testid="excel-bps-instructions-reset"]').trigger('click');
+    expect((card.get('textarea').element as HTMLTextAreaElement).value).toBe(baseSettingsResponse.excel_bps_default_client_instructions);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ excel_bps_client_instructions: baseSettingsResponse.excel_bps_default_client_instructions }));
+    await card.get('textarea').setValue('');
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ excel_bps_client_instructions: '' }));
+    expect(card.get('[data-testid="excel-bps-instructions-reset"]').attributes('disabled')).toBeUndefined();
+    await card.get('[data-testid="excel-bps-instructions-reset"]').trigger('click');
+    expect((card.get('textarea').element as HTMLTextAreaElement).value).toBe(baseSettingsResponse.excel_bps_default_client_instructions);
+  });
+
+  it("rejects BPS instructions longer than 16000 Unicode characters before saving", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get('#excel-bps-client-instructions').setValue('字'.repeat(16001));
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith('admin.settings.features.excelBpsInstructions.tooLong');
+    await wrapper.get('#excel-bps-client-instructions').setValue('🌟'.repeat(16000));
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ excel_bps_client_instructions: '🌟'.repeat(16000) }));
   });
 
   it("saves the BPS and Prism protocol switches", async () => {

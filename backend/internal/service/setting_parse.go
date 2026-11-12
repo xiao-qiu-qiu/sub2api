@@ -1125,6 +1125,8 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	if result.RequestCaptureRetentionDays < 1 || result.RequestCaptureRetentionDays > 30 {
 		result.RequestCaptureRetentionDays = 7
 	}
+	result.ExcelBPSClientInstructions = effectiveExcelBPSClientInstructions(settings[SettingKeyExcelBPSClientInstructions])
+	result.ExcelBPSDefaultClientInstructions = basispoints.DefaultClientInstructions
 	result.ExcelBPSImageMode = settings[SettingKeyExcelBPSImageMode]
 	if result.ExcelBPSImageMode == "" {
 		result.ExcelBPSImageMode = ExcelBPSImageModeNative

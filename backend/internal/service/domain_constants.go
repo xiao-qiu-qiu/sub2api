@@ -530,6 +530,8 @@ const (
 
 	// Protocol-wide switches default on for BPS compatibility and off for Prism.
 	SettingKeyExcelBPSEnabled = "excel_bps_enabled"
+	// SettingKeyExcelBPSClientInstructions stores the administrator-only prompt override.
+	SettingKeyExcelBPSClientInstructions = "excel_bps_client_instructions"
 	// Prism browser bridge is administrator-managed and disabled by default.
 	SettingKeyPrismBrowserEnabled = "prism_browser_enabled"
 	SettingKeyPrismBrowserBaseURL = "prism_browser_base_url"

@@ -359,6 +359,8 @@ type SystemSettings struct {
 	RequestCaptureQuotaMiB      int64
 	RequestCaptureRetentionDays int
 	// 使用详情中长上下文计费 x2 徽标的展示开关（默认开启）
+	ExcelBPSClientInstructions            string
+	ExcelBPSDefaultClientInstructions     string
 	ExcelBPSImageMode                     string
 	UsageShowLongContextBadge             bool
 	UsageShowCacheRate                    bool

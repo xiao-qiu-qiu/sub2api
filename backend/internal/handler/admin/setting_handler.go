@@ -443,6 +443,8 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		RequestCaptureEnabled:                 settings.RequestCaptureEnabled,
 		RequestCaptureQuotaMiB:                settings.RequestCaptureQuotaMiB,
 		RequestCaptureRetentionDays:           settings.RequestCaptureRetentionDays,
+		ExcelBPSClientInstructions:            settings.ExcelBPSClientInstructions,
+		ExcelBPSDefaultClientInstructions:     settings.ExcelBPSDefaultClientInstructions,
 		ExcelBPSImageMode:                     settings.ExcelBPSImageMode,
 		ExcelBPSImageRelayEnabled:             settings.ExcelBPSImageRelayEnabled,
 		ExcelBPSImageBaseURL:                  settings.ExcelBPSImageBaseURL,

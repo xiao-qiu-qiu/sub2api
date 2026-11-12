@@ -13,12 +13,13 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
-const bpsTextTestProtocol = "This request comes from an external Responses client. Return assistant text. Do not call Excel, Office, workbook or connector tools."
+const bpsTextTestProtocol = basispoints.DefaultClientInstructions + "\n\nNo client tools are available for this request. Return assistant text and do not call tools."
 
 func bpsInstructionsTestResponse() *http.Response {
 	wire := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n" +

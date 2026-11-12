@@ -50,7 +50,7 @@ func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *S
 	omitted.dropFrom(updates)
 
 	wakeHarvest := s.codexHarvestSettingsChanged(ctx, updates)
-	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+	if err := s.persistSystemSettingsUpdates(ctx, updates); err != nil {
 		return err
 	}
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
@@ -88,7 +88,7 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 	omitted.dropFrom(updates)
 
 	wakeHarvest := s.codexHarvestSettingsChanged(ctx, updates)
-	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+	if err := s.persistSystemSettingsUpdates(ctx, updates); err != nil {
 		return err
 	}
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
@@ -119,6 +119,11 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
+	clientInstructions, err := NormalizeExcelBPSClientInstructions(settings.ExcelBPSClientInstructions)
+	if err != nil {
+		return nil, err
+	}
+	settings.ExcelBPSClientInstructions = effectiveExcelBPSClientInstructions(clientInstructions)
 	if err := settings.normalizeBalanceForecastSettings(); err != nil {
 		return nil, err
 	}
@@ -737,6 +742,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyRequestCaptureEnabled] = strconv.FormatBool(captureConfig.Enabled)
 	updates[SettingKeyRequestCaptureQuotaMiB] = strconv.FormatInt(captureConfig.QuotaMiB, 10)
 	updates[SettingKeyRequestCaptureRetentionDays] = strconv.Itoa(captureConfig.RetentionDays)
+	updates[SettingKeyExcelBPSClientInstructions] = clientInstructions
 	updates[SettingKeyExcelBPSImageMode] = imageRelay.Mode
 	updates[SettingKeyExcelBPSImageRelayEnabled] = strconv.FormatBool(imageRelay.Enabled)
 	updates[SettingKeyExcelBPSImageBaseURL] = imageRelay.BaseURL

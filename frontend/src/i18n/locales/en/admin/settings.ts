@@ -17,6 +17,18 @@ export default {
         payment: 'Payment',
       },
       features: {
+        excelBpsInstructions: {
+          title: 'BPS client instructions',
+          description: 'Applies to all BPS clients. Tool transport rules are appended separately.',
+          default: 'Default',
+          custom: 'Custom',
+          edit: 'Edit instructions',
+          collapse: 'Collapse editor',
+          label: 'General instructions',
+          reset: 'Restore default',
+          hint: 'Saving applies to new requests. Leave blank to use the default instructions.',
+          tooLong: 'BPS client instructions must not exceed 16,000 characters.',
+        },
         smartOpsSidebar: {
           title: 'Smart operations sidebar',
           description: 'Choose which smart operations entries appear in the sidebar. Saving applies to all administrators. Hiding a menu does not stop background jobs, change feature settings, or block direct page access.',

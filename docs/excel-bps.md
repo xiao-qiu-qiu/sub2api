@@ -22,6 +22,14 @@ Responses 响应头 `X-Sub2API-BPS-Transport` 返回 `ws` 或 `sse`，可用来�
 
 断线、超时或协议错误不会重连、自动切回 SSE 或重放已提交生成。未启用 ARC 初始化或诊断模式的 ticket/Cookie 回传。此功能用于协议对照，质量效果需要实际测试。协议参考：[bps-local-public](https://github.com/sunboyzoey/bps-local-public/tree/7134964fe0ce72b6b44b000cc97d86ea1e7b80e5)。
 
+## 客户端提示词
+
+**系统设置 → 功能开关 → BPS 客户端提示词** 可以查看和编辑通用提示词，也可以恢复默认。默认内容适用于任意 API 客户端：按当前客户端的任务、工具和表达要求工作，不把上游 Excel 环境或账号资料当作当前用户的身份与能力。
+
+保存后当前实例的新 BPS 请求立即采用新设置；多实例部署的其他节点最多 60 秒刷新，无需重启。HTTP/SSE、WebSocket 和 Chat 兼容入口使用相同设置。留空或恢复默认后保存，使用程序内置版本。管理员设置字段为 `excel_bps_client_instructions`，最多 16,000 个 Unicode 字符；仅管理员设置接口返回该文本。
+
+自定义内容替换通用前缀；工具目录、调用封装、不可用工具提示与结构化输出约束仍由网关追加。客户端原有指令和消息角色继续保留。普通账号连接测试关闭“注入内置提示词”时仍跳过本地提示词，便于比较；这不会关闭 BPS 上游自身的产品环境。
+
 ## BPS OAuth 登录
 
 账号管理 → 添加账号 → OpenAI → **BPS OAuth（官方 Excel 登录）**。选择需要走 BPS 的模型后进入授权；默认勾选 Astra、5.6 Sol 和 5.6 Terra，模型是否可用仍由上游决定。其他 OAuth、API Key 和 2FA 入口保持原有行为。

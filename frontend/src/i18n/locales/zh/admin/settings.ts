@@ -17,6 +17,18 @@ export default {
         payment: '支付设置',
       },
       features: {
+        excelBpsInstructions: {
+          title: 'BPS 客户端提示词',
+          description: '适用于所有 BPS 客户端，工具调用协议由系统另行追加。',
+          default: '使用默认',
+          custom: '已自定义',
+          edit: '编辑提示词',
+          collapse: '收起编辑',
+          label: '通用提示词',
+          reset: '恢复默认',
+          hint: '保存后对新请求生效；留空使用默认提示词。',
+          tooLong: 'BPS 客户端提示词不能超过 16,000 个字符。',
+        },
         smartOpsSidebar: {
           title: '智能运维侧边栏',
           description: '选择侧边栏中展示的智能运维入口。保存后对所有管理员生效；仅隐藏菜单，不会停止后台任务、修改功能配置或禁止直接访问页面。',

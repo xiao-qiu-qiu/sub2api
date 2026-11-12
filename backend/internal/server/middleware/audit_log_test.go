@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,51 @@ func TestUserQuickEnableUsesUserManagementAudit(t *testing.T) {
 	require.Equal(t, "admin", entry.ActorRole)
 	require.Equal(t, map[string]string{"id": "306"}, entry.Extra["params"])
 	require.JSONEq(t, `{"status":"active","reason":"reviewed disable source"}`, entry.RequestBody)
+}
+
+func TestSettingsExcelBPSClientInstructionsAuditRedactsOnlyExactField(t *testing.T) {
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.StartWriter()
+	t.Cleanup(auditService.Stop)
+
+	privateInstructions := "private-bps-instructions-canary\n私有提示词第二段"
+	payload := map[string]any{
+		"excel_bps_client_instructions":      privateInstructions,
+		"site_name":                          "Audit test site",
+		"excel_bps_enabled":                  true,
+		"prompt":                             "ordinary prompt remains visible",
+		"excel_bps_client_instructions_note": "non-sensitive note",
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	var handlerBody map[string]any
+	router := gin.New()
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	router.PUT("/api/v1/admin/settings", func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&handlerBody); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	auditService.Stop()
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, payload, handlerBody, "audit redaction must not change the handler's request body")
+	require.Len(t, repository.logs, 1)
+	entry := repository.logs[0]
+	require.Equal(t, "/api/v1/admin/settings", entry.Path)
+	require.JSONEq(t, `{"excel_bps_client_instructions":"***","site_name":"Audit test site","excel_bps_enabled":true,"prompt":"ordinary prompt remains visible","excel_bps_client_instructions_note":"non-sensitive note"}`, entry.RequestBody)
+	encoded, err := json.Marshal(entry)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "private-bps-instructions-canary")
+	require.NotContains(t, string(encoded), "私有提示词第二段")
 }
 
 func (r *auditCaptureRepository) BatchInsert(_ context.Context, logs []*service.AuditLog) (int64, error) {

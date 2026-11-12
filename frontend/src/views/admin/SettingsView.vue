@@ -7434,6 +7434,10 @@
             </div>
           </div>
         </div>
+        <ExcelBPSClientInstructions
+          v-model="form.excel_bps_client_instructions"
+          :default-instructions="excelBPSDefaultClientInstructions"
+        />
         <div class="card" data-testid="request-capture-settings">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 id="settings-section-request-capture" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.requestCapture.title') }}</h2>
@@ -9618,6 +9622,7 @@ import { useAppStore, useAuthStore } from "@/stores";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
 import BalanceForecastSettings from "@/components/settings/BalanceForecastSettings.vue";
 import SmartOpsSidebarSettings from "@/components/settings/SmartOpsSidebarSettings.vue";
+import ExcelBPSClientInstructions from "./settings/ExcelBPSClientInstructions.vue";
 import NewFeatureBadge from "@/components/common/NewFeatureBadge.vue";
 import { NEW_FEATURE_NOTICES } from "@/constants/newFeatureNotices";
 import { normalizeVisibleMethod } from "@/components/payment/paymentFlow";
@@ -9659,6 +9664,7 @@ const paymentMethodsHref = computed(() =>
 );
 
 const loading = ref(true);
+const excelBPSDefaultClientInstructions = ref("");
 const loadFailed = ref(false);
 const { activeTab, selectSettingsTab } = useSettingsNavigation(loading, loadFailed);
 const settingsTabs = [
@@ -10328,6 +10334,7 @@ type SettingsForm = Omit<
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
   account_rotation_settings: AccountRotationSettings;
   prism_browser_api_key: string;
+  excel_bps_client_instructions: string;
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
@@ -10345,6 +10352,7 @@ function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] 
 const form = reactive<SettingsForm>({
   account_rotation_settings: defaultAccountRotationSettings(),
   excel_bps_enabled: true,
+  excel_bps_client_instructions: "",
   prism_browser_enabled: false,
   prism_browser_base_url: "http://127.0.0.1:8319/v1",
   prism_browser_api_key_configured: false,
@@ -11714,6 +11722,8 @@ async function loadSettings() {
       settings.channel_monitor_hide_user_ranking
     );
     form.excel_bps_enabled = settings.excel_bps_enabled !== false;
+    excelBPSDefaultClientInstructions.value = settings.excel_bps_default_client_instructions ?? "";
+    form.excel_bps_client_instructions = settings.excel_bps_client_instructions ?? excelBPSDefaultClientInstructions.value;
     form.prism_browser_enabled = Boolean(settings.prism_browser_enabled);
     form.prism_browser_base_url = settings.prism_browser_base_url || "http://127.0.0.1:8319/v1";
     form.prism_browser_api_key_configured = Boolean(settings.prism_browser_api_key_configured);
@@ -11945,6 +11955,10 @@ const siteBillingModeHint = computed(() =>
 );
 
 async function saveSettings() {
+  if (Array.from(form.excel_bps_client_instructions.trim()).length > 16000) {
+    appStore.showError(t('admin.settings.features.excelBpsInstructions.tooLong'));
+    return;
+  }
   if (!Number.isFinite(form.balance_forecast_threshold_hours) || form.balance_forecast_threshold_hours <= 0 || form.balance_forecast_threshold_hours > 168 || !Number.isInteger(form.balance_forecast_max_notifications) || form.balance_forecast_max_notifications < 1 || form.balance_forecast_max_notifications > 10) {
     appStore.showError(t('admin.settings.balanceForecast.invalid'));
     return;
@@ -12149,6 +12163,7 @@ async function saveSettings() {
     const payload: UpdateSettingsRequest = {
       prism_browser_enabled: form.prism_browser_enabled,
       excel_bps_enabled: form.excel_bps_enabled,
+      excel_bps_client_instructions: form.excel_bps_client_instructions,
       prism_browser_base_url: form.prism_browser_base_url,
       ...(form.prism_browser_api_key ? { prism_browser_api_key: form.prism_browser_api_key } : {}),
       registration_enabled: form.registration_enabled,
@@ -12569,6 +12584,9 @@ async function saveSettings() {
       adminAPI.settings.updateSettings(payload),
     );
     adminSettingsStore.smartOpsHiddenMenuItems = updated.smart_ops_hidden_menu_items ?? [];
+    if (updated.excel_bps_default_client_instructions !== undefined) {
+      excelBPSDefaultClientInstructions.value = updated.excel_bps_default_client_instructions;
+    }
     for (const [key, value] of Object.entries(updated)) {
       if (key === "openai_fast_policy_settings") continue;
       if (value !== null && value !== undefined) {
