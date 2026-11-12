@@ -1247,6 +1247,14 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 				return s.sendErrorAndEnd(c, local.Error()+": "+payload.Error.Message)
 			}
 		}
+		// BPS has already classified and sanitized in-band failures. Preserve
+		// that explanation in manual and scheduled tests instead of only the
+		// generic terminal event name returned by the forwarding layer.
+		if GetActualOpenAIUpstreamEndpoint(probeCtx) == "/basispoints/api/responses" && !errors.Is(err, context.Canceled) {
+			if failure, ok := GetOpsStreamError(probeCtx); ok && failure.Code != OpsClientCanceledCode && strings.TrimSpace(failure.Message) != "" {
+				return s.sendErrorAndEnd(c, failure.Message)
+			}
+		}
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 
