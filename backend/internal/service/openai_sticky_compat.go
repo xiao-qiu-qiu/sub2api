@@ -123,6 +123,10 @@ func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, gr
 	if s == nil || s.cache == nil {
 		return 0, nil
 	}
+	if accountID := openAIAccountCooldownStickyOwner(ctx, groupID, sessionHash); accountID > 0 {
+		rememberOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID)
+		return accountID, nil
+	}
 
 	primaryKey := s.openAISessionCacheKey(sessionHash)
 	if primaryKey == "" {
@@ -161,7 +165,7 @@ func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, gr
 	if primaryKey == "" {
 		return nil
 	}
-	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID) {
+	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, accountID) || s.preserveOpenAIAccountCooldownStickyBinding(ctx, groupID, sessionHash, accountID) {
 		return s.refreshStickySessionTTL(ctx, groupID, sessionHash, ttl)
 	}
 
@@ -209,7 +213,7 @@ func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context,
 	if s == nil || s.cache == nil {
 		return nil
 	}
-	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, 0) {
+	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, 0) || s.preserveOpenAIAccountCooldownStickyBinding(ctx, groupID, sessionHash, 0) {
 		return nil
 	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)

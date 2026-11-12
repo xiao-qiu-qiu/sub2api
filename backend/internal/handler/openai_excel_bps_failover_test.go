@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -93,7 +94,7 @@ func (r excelBPSFailoverAccountRepo) ListModelAvailabilityCandidates(_ context.C
 
 // loadBatch selects the production default (load-aware) scheduling path;
 // otherwise the simple priority path is used.
-func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream, loadBatch bool) *OpenAIGatewayHandler {
+func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream, loadBatch bool, bindings ...service.GatewayCache) *OpenAIGatewayHandler {
 	t.Helper()
 	var accounts []service.Account
 	for _, id := range []int64{1, 2} {
@@ -111,9 +112,13 @@ func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream,
 		cfg.Gateway.Scheduling.LoadBatchEnabled = true
 		schedulingConcurrency = concurrencyService
 	}
+	var binding service.GatewayCache
+	if len(bindings) > 0 {
+		binding = bindings[0]
+	}
 	gatewayService := service.NewOpenAIGatewayService(
 		excelBPSFailoverAccountRepo{openAIImagesFailoverAccountRepo{accounts: accounts}},
-		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, binding,
 		cfg,
 		nil, schedulingConcurrency, nil, nil, nil,
 		upstream,
@@ -152,8 +157,9 @@ func newExcelBPSFailoverTestContext(ctx context.Context, stream bool) (*gin.Cont
 	return c, rec
 }
 
-// Issue #146: A -> B within the first request, then B directly while A cools.
-func TestOpenAIResponsesExcelBPS429SwitchesAccountAndCoolsIt(t *testing.T) {
+// A bound request waits for the short BPS cooldown and retries its original
+// account. A healthy backup must not be borrowed during that wait.
+func TestOpenAIResponsesExcelBPS429WaitsForRecoveryBeforeRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		loadBatch, stream bool
@@ -162,19 +168,22 @@ func TestOpenAIResponsesExcelBPS429SwitchesAccountAndCoolsIt(t *testing.T) {
 		t.Run(fmt.Sprintf("load_batch=%t/stream=%t", tc.loadBatch, stream), func(t *testing.T) {
 			upstream := &excelBPSFailoverUpstream{answer: func(call int) *http.Response {
 				if call == 0 {
-					return excelBPS429("30")
+					return excelBPS429("1")
 				}
 				return excelBPSCompleted()
 			}}
-			handler := newExcelBPSFailoverTestHandler(t, upstream, tc.loadBatch)
+			handler := newExcelBPSFailoverTestHandler(t, upstream, tc.loadBatch, &oauthRecoveryHandlerBindings{})
 
 			c, rec := newExcelBPSFailoverTestContext(context.Background(), stream)
+			c.Request.Header.Set("session_id", "bps-cooldown-recovery")
+			started := time.Now()
 			handler.Responses(c)
+			require.GreaterOrEqual(t, time.Since(started), time.Second, "retry must wait for the original cooldown")
 
 			calls := upstream.calls()
 			require.Len(t, calls, 2)
-			throttled, healthy := calls[0], calls[1]
-			require.NotEqual(t, throttled, healthy, "the throttled account must not be retried in this request")
+			throttled := calls[0]
+			require.Equal(t, throttled, calls[1], "the original sticky account must be retried after recovery")
 			require.Equal(t, http.StatusOK, rec.Code)
 			require.Contains(t, rec.Body.String(), "done")
 			require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
@@ -195,9 +204,10 @@ func TestOpenAIResponsesExcelBPS429SwitchesAccountAndCoolsIt(t *testing.T) {
 			require.Equal(t, http.StatusTooManyRequests, events[0].UpstreamStatusCode)
 
 			c, rec = newExcelBPSFailoverTestContext(context.Background(), stream)
+			c.Request.Header.Set("session_id", "bps-cooldown-recovery")
 			handler.Responses(c)
 
-			require.Equal(t, []int64{throttled, healthy, healthy}, upstream.calls(), "the cooling account is skipped by the next request")
+			require.Equal(t, []int64{throttled, throttled, throttled}, upstream.calls(), "a recovered sticky account remains the owner of new requests")
 			require.Equal(t, http.StatusOK, rec.Code)
 		})
 	}
@@ -205,6 +215,20 @@ func TestOpenAIResponsesExcelBPS429SwitchesAccountAndCoolsIt(t *testing.T) {
 
 func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// Exercise the real 30s budget once. The remaining table checks existing
+	// failover/error formatting with that exhausted budget, avoiding a fresh
+	// 30s sleep for every Retry-After variant.
+	upstream := &excelBPSFailoverUpstream{answer: func(int) *http.Response { return excelBPS429("60") }}
+	handler := newExcelBPSFailoverTestHandler(t, upstream, false)
+	c, rec := newExcelBPSFailoverTestContext(context.Background(), false)
+	started := time.Now()
+	handler.Responses(c)
+	require.GreaterOrEqual(t, time.Since(started), service.OpenAIAccountCooldownWait)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	require.Len(t, upstream.calls(), 2, "the backup is available only after the wait budget")
+	probe := &accountCooldownBudgetCaptureContext{Context: context.Background()}
+	service.WithOpenAIAccountCooldownBudget(probe)
+	budgetCtx := context.WithValue(context.Background(), probe.key, c.Request.Context().Value(probe.key))
 	for _, tc := range []struct {
 		name, retryAfter, wantRetryAfter string
 		stream, loadBatch                bool
@@ -220,7 +244,7 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 			upstream := &excelBPSFailoverUpstream{answer: func(int) *http.Response { return excelBPS429(tc.retryAfter) }}
 			handler := newExcelBPSFailoverTestHandler(t, upstream, tc.loadBatch)
 
-			c, rec := newExcelBPSFailoverTestContext(context.Background(), tc.stream)
+			c, rec := newExcelBPSFailoverTestContext(budgetCtx, tc.stream)
 			handler.Responses(c)
 
 			calls := upstream.calls()
@@ -233,8 +257,9 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 			require.NotContains(t, rec.Body.String(), "workspace")
 			require.Equal(t, tc.wantRetryAfter, rec.Header().Get("Retry-After"))
 
-			// Both accounts cool down: the next request is answered without an upstream call.
-			c, rec = newExcelBPSFailoverTestContext(context.Background(), tc.stream)
+			// After its wait allowance is exhausted, a cooling pool is answered
+			// without an additional upstream call or another cooldown wait.
+			c, rec = newExcelBPSFailoverTestContext(budgetCtx, tc.stream)
 			handler.Responses(c)
 
 			require.Len(t, upstream.calls(), 2)

@@ -1010,6 +1010,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if handled, retry := h.handleOpenAIAccountCooldownSelectionError(c, h.gatewayService, userSlots, err, &streamStarted, false); handled {
+				if !retry {
+					return
+				}
+				continue
+			}
 			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, false); handled {
 				if !retry {
 					return
@@ -1300,6 +1306,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							return
 						}
 						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
+					}
+					if handled, retry := h.retryOpenAIAccountCooldownHTTP(c, h.gatewayService, userSlots, account, forwardModel, result, failoverErr, openAIForwardMayFailover(c, writerSizeBeforeForward, nil), &streamStarted, false); handled {
+						if !retry {
+							return
+						}
 						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
@@ -1743,6 +1755,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if handled, retry := h.handleOpenAIAccountCooldownSelectionError(c, h.gatewayService, userSlots, err, &streamStarted, true); handled {
+				if !retry {
+					return
+				}
+				continue
+			}
 			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, true); handled {
 				if !retry {
 					return
@@ -1947,6 +1965,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							return
 						}
 						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
+					}
+					if handled, retry := h.retryOpenAIAccountCooldownHTTP(c, h.gatewayService, userSlots, account, currentRoutingModel, result, failoverErr, openAIForwardMayFailover(c, writerSizeBeforeForward, nil), &streamStarted, true); handled {
+						if !retry {
+							return
+						}
 						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
@@ -3473,6 +3497,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if errors.Is(err, service.ErrOpenAIAccountCooldownAdmissionInterrupted) {
+				releaseTurnSlots()
+				if _, waitErr := waitForOpenAIAccountCooldownWS(ctx, c, h.gatewayService); waitErr != nil {
+					closeOpenAIWSAdmissionError(wsConn, reqLog, "openai.websocket_cooldown_wait_failed", waitErr)
+					return
+				}
+				if !service.OpenAIWSIngressCanFailover(ctx, c) || !ensureUserSlotHeld() {
+					return
+				}
+				continue
+			}
 			if errors.Is(err, service.ErrOAuthRecoveryAdmissionInterrupted) || isOpenAIOAuthRecoveryError(err) {
 				releaseTurnSlots()
 				recoveryErr := err
@@ -3868,6 +3903,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					if outboundModel == "" {
 						outboundModel = strings.TrimSpace(wsForwardModel)
 					}
+					if h.gatewayService.QueueOpenAIAccountCooldown(ctx, account.ID, outboundModel) {
+						releaseTurnSlots()
+						if _, waitErr := waitForOpenAIAccountCooldownWS(ctx, c, h.gatewayService); waitErr != nil {
+							return waitErr
+						}
+					}
 					if recoveryErr := waitForOpenAIOAuthWSRecovery(ctx, c, h.gatewayService, apiKey.GroupID, outboundModel); recoveryErr != nil {
 						return recoveryErr
 					}
@@ -4152,6 +4193,22 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if !retrySafe || currentRecoveryTurnObservedResult || (currentRecoveryTurn > 1 && !retryCurrentTurn) {
 					closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 					return
+				}
+				cooldownModel := wsForwardModel
+				if snapshot := turnChannelMapping.Load(); snapshot != nil && snapshot.turn == currentRecoveryTurn && strings.TrimSpace(snapshot.mapping.MappedModel) != "" {
+					cooldownModel = snapshot.mapping.MappedModel
+				}
+				if handled, waitErr := waitForOpenAIAccountCooldownWSFailover(ctx, c, h.gatewayService, releaseTurnSlots, account.ID, cooldownModel, failoverErr, true); handled {
+					if waitErr != nil {
+						closeOpenAIWSAdmissionError(wsConn, reqLog, "openai.websocket_cooldown_wait_failed", waitErr)
+						return
+					}
+					wsAttemptMessage = nextAttemptMessage
+					previousResponseID = strings.TrimSpace(gjson.GetBytes(wsAttemptMessage, "previous_response_id").String())
+					if !service.OpenAIWSIngressCanFailover(ctx, c) || !ensureUserSlotHeld() {
+						return
+					}
+					break
 				}
 				// Proxy has joined upstream work. Release slots before waiting,
 				// then re-enter selection and latest turn admission with fresh auth.

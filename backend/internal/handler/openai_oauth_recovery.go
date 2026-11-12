@@ -45,6 +45,7 @@ func newOpenAIOAuthWSTurnRecoveryContext(ctx context.Context) *openAIOAuthWSTurn
 
 func (c *openAIOAuthWSTurnRecoveryContext) beginTurn() {
 	budgetCtx := service.NewOpenAIOAuthRecoveryBudget(c.Context)
+	budgetCtx = service.NewOpenAIAccountCooldownBudget(budgetCtx)
 	c.budget.Store(&budgetCtx)
 	c.credentialRetries.Store(0)
 }
@@ -161,6 +162,7 @@ func openAIOAuthRecoveryErrorDetails(err error) (string, string) {
 // New requests wait without consuming user or API key concurrency slots.
 func (h *OpenAIGatewayHandler) waitForOpenAIOAuthRecoveryBeforeAdmission(c *gin.Context, groupID *int64, model string, streamStarted, anthropic bool) bool {
 	ctx := service.WithOpenAIOAuthRecoveryBudget(c.Request.Context())
+	ctx = service.WithOpenAIAccountCooldownBudget(ctx)
 	ctx = context.WithValue(ctx, openAIOAuthRecoveryAdmissionKey{}, &openAIOAuthRecoveryAdmission{groupID: groupID, model: model, anthropic: anthropic})
 	ctx = service.WithOAuthRecoveryAdmissionCheck(ctx, func(checkCtx context.Context) bool {
 		return h.gatewayService.HasPendingOpenAIOAuthRecovery(checkCtx, groupID, model)

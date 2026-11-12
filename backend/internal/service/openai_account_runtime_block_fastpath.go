@@ -598,7 +598,14 @@ func (s *OpenAIGatewayService) isOpenAIAccountRequestRuntimeBlocked(account *Acc
 	if s == nil {
 		return false
 	}
-	if s.isExcelBPSCoolingDown(account, requestedModel, readOnly...) || s.isExcelBPSModelCoolingDown(account, requestedModel, readOnly...) {
+	if s.isExcelBPSCoolingDown(account, requestedModel, readOnly...) {
+		return true
+	}
+	return s.isOpenAIAccountRequestRuntimeBlockedWithoutBPSCooldown(account, requestedModel, requireCompact, readOnly...)
+}
+
+func (s *OpenAIGatewayService) isOpenAIAccountRequestRuntimeBlockedWithoutBPSCooldown(account *Account, requestedModel string, requireCompact bool, readOnly ...bool) bool {
+	if s.isExcelBPSModelCoolingDown(account, requestedModel, readOnly...) {
 		return true
 	}
 	outboundModel := s.openAICodexTicketOutboundModel(account, requestedModel, requireCompact)

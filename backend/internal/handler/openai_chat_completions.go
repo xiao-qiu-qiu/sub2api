@@ -203,6 +203,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if handled, retry := h.handleOpenAIAccountCooldownSelectionError(c, h.gatewayService, userSlots, err, &streamStarted, false); handled {
+				if !retry {
+					return
+				}
+				continue
+			}
 			if handled, retry := h.handleOpenAIOAuthRecoverySelectionError(c, userSlots, err, streamStarted, false); handled {
 				if !retry {
 					return
@@ -396,6 +402,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							return
 						}
 						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						continue
+					}
+					if handled, retry := h.retryOpenAIAccountCooldownHTTP(c, h.gatewayService, userSlots, account, forwardModel, result, failoverErr, c.Writer.Size() == writerSizeBeforeForward, &streamStarted, false); handled {
+						if !retry {
+							return
+						}
 						continue
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {

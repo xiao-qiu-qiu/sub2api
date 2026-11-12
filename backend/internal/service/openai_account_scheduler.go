@@ -428,8 +428,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
 	ctx = s.service.withAccountRotationSession(ctx, req.GroupID, req.SessionHash)
 	ctx = WithAccountRotationSticky(ctx, req.StickyAccountID, req.StickyPreviousAccountID)
-	if req.StickyWeighted && (s.service.openAIStickyRotationWaiting(ctx, req.StickyPreviousAccountID) ||
-		s.service.openAIStickyRotationWaiting(ctx, req.StickyAccountID)) {
+	if req.StickyWeighted && (s.service.openAIStickyWaitProtected(ctx, req.StickyPreviousAccountID) ||
+		s.service.openAIStickyWaitProtected(ctx, req.StickyAccountID)) {
 		// A confirmed HOLD/recovery keeps the existing owner out of the
 		// weighted race. The ordinary sticky paths retain all hard filters.
 		req.StickyWeighted = false
@@ -749,7 +749,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
-	rotationWaiting := s.service.openAIStickyRotationWaiting(ctx, accountID)
+	rotationWaiting := s.service.openAIStickyWaitProtected(ctx, accountID)
 	if !rotationWaiting && !req.PreserveStickyBinding && s.service.openAICodexTicketShouldYieldSticky(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs) {
 		clearBinding()
 		return nil, false, nil
@@ -1681,7 +1681,7 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		}
 		// Primary scored candidates have already been tried. Do not reintroduce
 		// a measured slow ordinary affinity through this separate shortcut.
-		if !s.service.openAIStickyRotationWaiting(ctx, account.ID) && s.shouldYieldPriorityLatencySticky(req, account) {
+		if !s.service.openAIStickyWaitProtected(ctx, account.ID) && s.shouldYieldPriorityLatencySticky(req, account) {
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
@@ -2701,6 +2701,26 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	if NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI && requiredImageCapability == "" {
+		ctx = WithOpenAIAccountCooldownBudget(ctx)
+		queueCooldown := s.prepareOpenAIAccountCooldownSelection(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requireCompact)
+		if queueCooldown() {
+			return nil, decision, ErrOpenAIAccountCooldownAdmissionInterrupted
+		}
+		defer func() {
+			if !errors.Is(err, ErrOpenAIAccountCooldownAdmissionInterrupted) && queueCooldown() {
+				if selection != nil && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				selection = nil
+				decision.SelectedAccountID = 0
+				decision.SelectedAccountType = ""
+				decision.StickyPreviousHit = false
+				decision.StickySessionHit = false
+				err = ErrOpenAIAccountCooldownAdmissionInterrupted
+			}
+		}()
+	}
 	if s.oauthRecovery != nil && NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI && requiredImageCapability == "" {
 		ctx = WithOpenAIOAuthRecoveryBudget(ctx)
 		excludedIDs = withOAuthRecoveryExcludedAccounts(ctx, excludedIDs)

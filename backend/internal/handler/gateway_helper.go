@@ -541,11 +541,8 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 	// Determine if ping is needed (streaming + ping format defined)
 	needPing := isStream && h.pingFormat != ""
 
-	var flusher http.Flusher
 	if needPing {
-		var ok bool
-		flusher, ok = c.Writer.(http.Flusher)
-		if !ok {
+		if _, ok := c.Writer.(http.Flusher); !ok {
 			return nil, fmt.Errorf("streaming not supported")
 		}
 	}
@@ -585,19 +582,9 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 
 		case <-pingCh:
 			// Send ping to keep connection alive
-			if !*streamStarted {
-				c.Header("Content-Type", "text/event-stream")
-				c.Header("Cache-Control", "no-cache")
-				c.Header("Connection", "keep-alive")
-				c.Header("X-Accel-Buffering", "no")
-				*streamStarted = true
-			}
-			written, err := fmt.Fprint(c.Writer, string(h.pingFormat))
-			if err != nil {
+			if err := h.writeWaitPing(c, streamStarted); err != nil {
 				return nil, err
 			}
-			recordGatewayStreamHeartbeat(c, written)
-			flusher.Flush()
 
 		case <-timer.C:
 			// Try to acquire slot
@@ -613,6 +600,25 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 			timer.Reset(backoff)
 		}
 	}
+}
+
+// writeWaitPing is shared by concurrency and slot-free cooldown waits. Only the
+// caller writes the response; the service wait worker never touches Gin.
+func (h *ConcurrencyHelper) writeWaitPing(c *gin.Context, streamStarted *bool) error {
+	if !*streamStarted {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		*streamStarted = true
+	}
+	written, err := fmt.Fprint(c.Writer, string(h.pingFormat))
+	if err != nil {
+		return err
+	}
+	recordGatewayStreamHeartbeat(c, written)
+	c.Writer.Flush()
+	return nil
 }
 
 // AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout (keeps SSE ping).
