@@ -32,10 +32,10 @@ func TestQualityBPSObservationValidation(t *testing.T) {
 			require.False(t, q.AutoRestore)
 			require.Empty(t, q.RemoveGroupIDs)
 			require.Nil(t, q.BPS)
-			for _, action := range []string{QualityActionEnableBPS, "remove_groups", "disable_scheduling"} {
+			for _, action := range []string{QualityActionEnableBPS, QualityActionOpenAITwoFAAdmission} {
 				q.Action = action
 				_, err := nextPlanRun(plan, time.Now())
-				require.ErrorContains(t, err, "observation-only")
+				require.ErrorContains(t, err, "native-only")
 			}
 			q.Action = QualityActionObserveOnly
 			plan.PelicanConfig.QuestionKind = OpenAICodexStateProbeQuestionKind

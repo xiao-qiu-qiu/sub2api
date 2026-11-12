@@ -142,7 +142,12 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 		// probe and make an opted-in 5xx signal ineffective.
 	}
 	for _, plan := range plans {
-		if !plan.Enabled || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil || !plan.PelicanConfig.Quality.TriggerOnUpstream5xx {
+		if plan == nil || !plan.Enabled || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil || !plan.PelicanConfig.Quality.TriggerOnUpstream5xx {
+			continue
+		}
+		if matching, err := s.qualityProbeRouteMatches(ctx, plan); err != nil {
+			return err
+		} else if !matching {
 			continue
 		}
 		plan.TriggerSource = quality5xxSource
@@ -161,6 +166,11 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 				return err
 			}
 			if current == nil || !current.Enabled || current.PelicanConfig == nil || current.PelicanConfig.Quality == nil || !current.PelicanConfig.Quality.TriggerOnUpstream5xx {
+				continue
+			}
+			if matching, err := s.qualityProbeRouteMatches(ctx, current); err != nil {
+				return err
+			} else if !matching {
 				continue
 			}
 			if current.RunningUntil != nil && current.RunningUntil.After(time.Now()) {
@@ -222,6 +232,14 @@ func (s *RateLimitService) temporarilyUnscheduleQuality5xx(ctx context.Context, 
 // bypass BPS to test direct ticket state when diagnosing the BPS route itself.
 func quality5xxTestConfig(account *Account, model string, cfg PelicanTestConfig) (PelicanTestConfig, bool) {
 	cfg.ParallelCount = 1
+	if cfg.TestChannel == "bps" {
+		return cfg, !cfg.BPSRecoveryPending
+	}
+	if isOpenAICodexStateProbePlan(&cfg) {
+		// A native rule never becomes a BPS candy rule. Its enable_bps owner
+		// continues probing native state while ordinary rules leave BPS alone.
+		return cfg, QualityStateProbeMatchesAccount(account, &cfg)
+	}
 	if cfg.QuestionKind == QualityRandomQuestionKind {
 		// Preserve the configured external judge. Never substitute the public
 		// fixed candy answer or bypass judging for a random reasoning rule.

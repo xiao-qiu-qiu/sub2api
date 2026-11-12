@@ -270,18 +270,17 @@ func TestQuality5xxStaleFailedResultKeepsTriggeredQualityGate(t *testing.T) {
 							return nil, err
 						}
 					}
-					return &ScheduledTestResult{Status: "success", ResponseText: "17", PelicanConfig: cfg}, nil
+					require.Equal(t, OpenAICodexStateProbeQuestionKind, cfg.QuestionKind)
+					return &ScheduledTestResult{Status: "failed", ErrorMessage: openAICodexStateDegradedError,
+						QualityJudgment: &QualityJudgment{Verdict: "incorrect"}, PelicanConfig: cfg}, nil
 				}
 				require.NoError(t, h.run(context.Background()))
-				require.Empty(t, h.repo.outcomes, "a failed BPS candy answer must not bypass applyTriggeredQuality")
+				require.Equal(t, []string{"failed"}, h.repo.outcomes, "the BPS owner still checks its native recovery route")
 				require.Len(t, h.saved.results, 1)
 				result := h.saved.results[0]
-				require.Equal(t, "candy", result.PelicanConfig.QuestionKind)
+				require.Equal(t, OpenAICodexStateProbeQuestionKind, result.PelicanConfig.QuestionKind)
 				require.Equal(t, "incorrect", result.QualityJudgment.Verdict)
-				wantAction := "inconclusive"
-				if stale {
-					wantAction = "stale_run"
-				}
+				wantAction := "scheduling_disabled"
 				require.Equal(t, wantAction, result.QualityAction)
 			})
 		}

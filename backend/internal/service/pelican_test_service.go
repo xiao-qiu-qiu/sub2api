@@ -37,6 +37,7 @@ func pelicanTestOptionsFromContext(ctx context.Context) (pelicanTestOptions, boo
 
 // Record the chosen test path and mapped target, never credentials or URLs.
 func recordQualityBatchRoute(c *gin.Context, account *Account, model, route string) {
+	recordQualityTestRoute(c.Request.Context(), route, account.GetMappedModel(model))
 	options, ok := pelicanTestOptionsFromContext(c.Request.Context())
 	if ok && options.qualityBatch != nil {
 		options.qualityBatch.Route = route

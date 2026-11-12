@@ -452,15 +452,14 @@ describe('move group quality rules', () => {
     }
   })
 
-  it('clears stale targets on partial configuration updates and when switching to BPS observation', () => {
+  it('clears stale targets but preserves explicit move actions when switching to BPS', () => {
     const own = plan()
     own.pelican_config!.quality!.move_group_ids = [101]
     expect(buildQualityRulePatch(own, draft(), ['restore']).pelican_config!.quality).not.toHaveProperty('move_group_ids')
     own.pelican_config!.quality!.action = 'move_groups'
     const source = draft(); source.pelican_config.test_channel = 'bps'
     const updated = buildQualityRulePatch(own, source, ['test', 'restore']).pelican_config!.quality!
-    expect(updated).toMatchObject({ action: 'observe_only', auto_restore: false, remove_group_ids: [] })
-    expect(updated).not.toHaveProperty('move_group_ids')
+    expect(updated).toMatchObject({ action: 'move_groups', auto_restore: true, move_group_ids: [101] })
     expect(own.pelican_config!.quality!.move_group_ids).toEqual([101])
   })
 

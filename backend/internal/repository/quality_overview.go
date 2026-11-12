@@ -9,20 +9,36 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
+// Match Account.IsExcelBPSEnabled for current plan membership. Historical
+// results still require their own route evidence; current settings are not proof.
+const qualityOverviewBPSEnabledSQL = `(a.platform='openai' AND a.type='oauth' AND a.parent_account_id IS NULL
+ AND COALESCE(a.extra->'openai_excel_bps'='true'::jsonb,false)
+ AND NOT COALESCE(a.extra->'openai_excel_bps_authorization_pending'='true'::jsonb,false)
+ AND NOT COALESCE(a.extra->'openai_siwc'='true'::jsonb,false)
+ AND lower(btrim(COALESCE(a.credentials->>'plan_type','')))<>'free'
+ AND lower(btrim(COALESCE(a.credentials->>'auth_mode',''))) NOT IN ('agentidentity','personalaccesstoken','personal_access_token')
+ AND lower(btrim(COALESCE(a.credentials->>'openai_auth_mode',''))) NOT IN ('personalaccesstoken','personal_access_token'))`
+
 // One statement/snapshot for count, page, membership, plans and round evidence.
 // Each plan's indexed newest-result scan is capped at 60*100: a valid quality
 // round has at most 100 samples. A cutoff partial round can only be unknown.
 // LATERAL joins are internal to PostgreSQL, not per-account network queries.
 const qualityOverviewSQL = `
 WITH eligible_plans AS NOT MATERIALIZED (
- SELECT p.* FROM scheduled_test_plans p
+ SELECT p.*,channel.effective_channel FROM scheduled_test_plans p
  JOIN accounts a ON a.id=p.account_id AND a.deleted_at IS NULL
+ CROSS JOIN LATERAL (SELECT ` + qualityOverviewBPSEnabledSQL + ` AS bps_enabled) routing
+ CROSS JOIN LATERAL (SELECT CASE WHEN p.pelican_config->>'question_kind'='state_probe' THEN 'account'
+   WHEN p.pelican_config->>'test_channel'='bps' OR routing.bps_enabled THEN 'bps' ELSE 'account' END AS effective_channel) channel
  WHERE $7::text='all' OR (
    jsonb_typeof(p.pelican_config->'quality')='object'
    AND COALESCE(p.pelican_config->'quality'->>'action','')<>'openai_two_fa_admission'
    AND (COALESCE(p.pelican_config->'quality'->>'action_on','')='passed')=($7='recovery')
-   AND (CASE WHEN p.pelican_config->>'question_kind'='state_probe' THEN 'account'
-     WHEN p.pelican_config->>'test_channel'='bps' THEN 'bps' ELSE 'account' END)=$6
+   AND channel.effective_channel=$6
+   AND NOT (COALESCE(p.pelican_config->>'question_kind','')='state_probe' AND routing.bps_enabled
+     AND COALESCE(p.pelican_config->'quality'->>'action','')<>'enable_bps')
+   AND NOT (COALESCE(p.pelican_config->>'test_channel','')='bps'
+     AND COALESCE(p.pelican_config->>'question_kind','')<>'state_probe' AND NOT routing.bps_enabled)
    -- A retained template binding is not membership evidence. Recheck the same
    -- current-account predicates as qualityTemplateAccountsQuery, including
    -- derived statuses, even before the background membership sync runs.
@@ -82,8 +98,7 @@ WITH eligible_plans AS NOT MATERIALIZED (
    'action_on',CASE WHEN p.pelican_config->'quality'->>'action_on'='passed' THEN 'passed' ELSE 'failed' END,
    'model_id',p.model_id,'model_ids',CASE WHEN jsonb_typeof(p.pelican_config->'model_ids')='array' AND p.pelican_config->'model_ids'<>'[]'::jsonb
      THEN p.pelican_config->'model_ids' ELSE jsonb_build_array(p.model_id) END,
-   'test_channel',CASE WHEN p.pelican_config->>'question_kind'='state_probe' THEN 'account'
-     WHEN p.pelican_config->>'test_channel'='bps' THEN 'bps' ELSE 'account' END,
+   'test_channel',p.effective_channel,
    'auto_restore',COALESCE(p.pelican_config->'quality'->>'auto_restore'='true',false),
    'recovery_probe_enabled',COALESCE(p.pelican_config->'quality'->>'recovery_probe_enabled'='true',false),
    'recovery_probe_interval_minutes',CASE WHEN COALESCE(p.pelican_config->'quality'->>'recovery_probe_interval_minutes','') ~ '^[0-9]{1,5}$'
@@ -94,7 +109,7 @@ WITH eligible_plans AS NOT MATERIALIZED (
  ) plans ON true
  LEFT JOIN LATERAL (
    WITH source AS (
-     SELECT r.*,COALESCE(NULLIF(r.quality_round_id,''),'legacy:'||r.id::text) AS round_key
+     SELECT r.*,p.effective_channel AS plan_channel,COALESCE(NULLIF(r.quality_round_id,''),'legacy:'||r.id::text) AS round_key
      FROM eligible_plans p
      CROSS JOIN LATERAL (
        SELECT r.id,r.plan_id,r.status,r.error_message,r.started_at,r.finished_at,r.created_at,
@@ -112,10 +127,12 @@ WITH eligible_plans AS NOT MATERIALIZED (
          THEN COALESCE(pelican_config->>'parallel_count','1')::int ELSE 0 END AS parallel,
        CASE WHEN jsonb_typeof(pelican_config->'model_ids')='array' AND pelican_config->'model_ids'<>'[]'::jsonb
          THEN pelican_config->'model_ids' ELSE jsonb_build_array(COALESCE(pelican_config->>'model_id','')) END AS models,
-       COALESCE(pelican_config->'quality_batch'->>'route','') AS route,
+       COALESCE(NULLIF(pelican_config->>'test_route',''),pelican_config->'quality_batch'->>'route','') AS route,
        CASE WHEN pelican_config->>'question_kind'='state_probe' THEN 'account'
-         WHEN pelican_config->>'test_channel'='bps' OR pelican_config->'quality_batch'->>'route'='openai:bps' THEN 'bps'
-         ELSE 'account' END AS channel
+         WHEN pelican_config->>'test_route'='openai:bps' OR pelican_config->'quality_batch'->>'route'='openai:bps'
+           OR pelican_config->>'test_channel'='bps' THEN 'bps'
+         WHEN COALESCE(pelican_config->>'test_route','')<>'' THEN 'account'
+         ELSE plan_channel END AS channel
      FROM source
    ), samples AS (
      SELECT parsed.*,count(*) OVER (PARTITION BY plan_id,round_key,model) AS model_samples,
@@ -139,6 +156,7 @@ WITH eligible_plans AS NOT MATERIALIZED (
        min(kind) AS question_kind,count(*) AS samples,max(parallel*jsonb_array_length(models)) AS expected_samples,
        count(*) FILTER (WHERE passed) AS passed,count(*) FILTER (WHERE failed) AS failed,
        count(*) FILTER (WHERE status='skipped') AS skipped,
+       bool_or(NOT COALESCE(route_known,false) AND status<>'skipped') AS route_evidence_missing,
        bool_and(COALESCE(finished_at>=started_at AND quality_action NOT IN ('','stale_run','comparison_pending')
          AND parallel>0 AND jsonb_array_length(models) BETWEEN 1 AND 50 AND parallel*jsonb_array_length(models)<=100
          AND models ? model AND model_samples=parallel AND (status='skipped' OR route_known),false))

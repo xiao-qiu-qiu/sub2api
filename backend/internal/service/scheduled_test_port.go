@@ -9,6 +9,9 @@ import (
 type PelicanTestConfig struct {
 	// Optional display name stored in the existing configuration JSON.
 	RuleName string `json:"rule_name,omitempty"`
+	// Runtime result evidence from the actual test path; never a rule input.
+	TestRoute       string `json:"test_route,omitempty"`
+	TestMappedModel string `json:"test_mapped_model,omitempty"`
 	// Filled only on saved result snapshots, never used to configure a rule.
 	QualityRestoreDiagnostic *QualityRestoreDiagnostic `json:"quality_restore_diagnostic,omitempty"`
 	QualityModelOutcomes     map[string]string         `json:"quality_model_outcomes,omitempty"`
@@ -33,8 +36,9 @@ type PelicanTestConfig struct {
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
-	QualityProbeStartedAt        *time.Time `json:"-"`
-	QualityProbeAdmissionChecked bool       `json:"-"`
+	QualityProbeModels           map[string]string `json:"-"`
+	QualityProbeStartedAt        *time.Time        `json:"-"`
+	QualityProbeAdmissionChecked bool              `json:"-"`
 	// Runtime evidence only: the probe's completion boundary, never commit time.
 	QualityProbeFinishedAt    *time.Time `json:"-"`
 	QualityRequestWindowStart *time.Time `json:"-"`

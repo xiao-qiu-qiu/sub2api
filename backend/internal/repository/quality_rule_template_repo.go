@@ -208,14 +208,14 @@ func (r *qualityRuleTemplateRepository) Delete(ctx context.Context, id int64) (p
 func (r *qualityRuleTemplateRepository) MatchingAccounts(ctx context.Context, filter service.QualityRuleAccountFilter) ([]service.QualityTemplateAccount, error) {
 	rows, err := qualityTemplateAccountsQuery(r.accountClient(), filter).
 		Order(dbent.Asc(dbaccount.FieldID)).
-		Select(dbaccount.FieldID, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldExtra).
+		Select(dbaccount.FieldID, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldExtra, dbaccount.FieldCredentials, dbaccount.FieldParentAccountID).
 		All(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]service.QualityTemplateAccount, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, service.QualityTemplateAccount{ID: row.ID, Platform: row.Platform, Type: row.Type, Extra: row.Extra})
+		out = append(out, service.QualityTemplateAccount{ID: row.ID, Platform: row.Platform, Type: row.Type, Extra: row.Extra, Credentials: row.Credentials, ParentAccountID: row.ParentAccountID})
 	}
 	return out, nil
 }
@@ -360,7 +360,7 @@ func (r *qualityRuleTemplateRepository) ReincludeAccount(ctx context.Context, t 
 		} else if err != nil {
 			return result, err
 		} else {
-			plan, prepareReason = prepare(ctx, service.QualityTemplateAccount{ID: account.ID, Platform: account.Platform, Type: account.Type, Extra: account.Extra})
+			plan, prepareReason = prepare(ctx, service.QualityTemplateAccount{ID: account.ID, Platform: account.Platform, Type: account.Type, Extra: account.Extra, Credentials: account.Credentials, ParentAccountID: account.ParentAccountID})
 		}
 	}
 	tx, err := r.db.BeginTx(ctx, nil)

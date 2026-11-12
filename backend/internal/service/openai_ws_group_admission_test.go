@@ -89,7 +89,7 @@ func TestExcelBPSAccountTestOutsideBPSModelsPassesWSGroupAdmission(t *testing.T)
 	account.Extra["openai_excel_bps_models"] = []any{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"}
 	conn := &openAIWSCaptureConn{events: [][]byte{
 		[]byte(`{"type":"response.output_text.delta","delta":"OK"}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp_252","model":"gpt-6.1-sol","usage":{"input_tokens":1,"output_tokens":1}}}`),
+  []byte(`{"type":"response.completed","response":{"id":"resp_252","model":"gpt-6.1-sol","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}`),
 	}}
 	gateway, _ := newGroupAdmissionWSv2Service(t, &groupAdmissionRepo{first: account}, conn)
 	svc := &AccountTestService{openaiGatewayService: gateway}

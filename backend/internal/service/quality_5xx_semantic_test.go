@@ -96,7 +96,7 @@ func TestQuality5xxBPSStreamFailure(t *testing.T) {
 	require.Equal(t, []string{fmt.Sprint(account.ID)}, qualityTestMembers(t, client))
 }
 
-func TestQuality5xxChoosesProbeOrCandyWithoutChangingRule(t *testing.T) {
+func TestQuality5xxKeepsNativeProbeAndExcludesOrdinaryBPS(t *testing.T) {
 	for _, bps := range []bool{false, true} {
 		for _, recovery := range []bool{false, true} {
 			t.Run(fmt.Sprintf("bps=%t/recovery=%t", bps, recovery), func(t *testing.T) {
@@ -118,25 +118,22 @@ func TestQuality5xxChoosesProbeOrCandyWithoutChangingRule(t *testing.T) {
 				calls := 0
 				runner.runPelican = func(_ context.Context, _ int64, _ string, cfg *PelicanTestConfig) (*ScheduledTestResult, error) {
 					calls++
-					if bps {
-						require.Equal(t, "candy", cfg.QuestionKind)
-						require.Equal(t, CandyPrompt, cfg.Prompt)
-						return &ScheduledTestResult{Status: "success", ResponseText: "21"}, nil
-					}
 					require.Equal(t, OpenAICodexStateProbeQuestionKind, cfg.QuestionKind)
 					return &ScheduledTestResult{Status: "success", QualityJudgment: &QualityJudgment{Verdict: "correct"}}, nil
 				}
 				require.True(t, runner.runOnePlan(context.Background(), plan))
+				if bps && !recovery {
+					require.Zero(t, calls)
+					require.Zero(t, plans.outcomes)
+					require.Empty(t, results.results)
+					return
+				}
 				require.Equal(t, 1, calls)
 				require.Len(t, results.results, 1)
 				require.Equal(t, "success", results.results[0].Status)
 				require.Equal(t, OpenAICodexStateProbeQuestionKind, original.QuestionKind)
 				require.Empty(t, original.Quality.ExpectedAnswer)
-				if bps && recovery {
-					require.Zero(t, plans.outcomes, "BPS candy is not evidence of direct recovery")
-				} else {
-					require.Equal(t, 1, plans.outcomes)
-				}
+				require.Equal(t, 1, plans.outcomes)
 			})
 		}
 	}

@@ -186,6 +186,20 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 	}
 
 	if plan.PelicanConfig.Quality.Action == service.QualityActionObserveOnly && !plan.PelicanConfig.Quality.RunsOnPassed() && state.Action != service.QualityActionIsolateModels {
+		if plan.PelicanConfig.QuestionKind == service.OpenAICodexStateProbeQuestionKind {
+			var accountID int64
+			if err = tx.QueryRowContext(ctx, `SELECT id FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, plan.AccountID).Scan(&accountID); err == sql.ErrNoRows {
+				return "account_deleted", nil
+			} else if err != nil {
+				return "", err
+			}
+			if matching, matchErr := qualityProbeRouteMatchesTx(ctx, tx, plan, &state); matchErr != nil || !matching {
+				if matchErr != nil {
+					return "", matchErr
+				}
+				return "stale_run", nil
+			}
+		}
 		// Relinquish any former action without restoring or changing account
 		// settings; observation leaves BPS lifecycle to independent policies.
 		if _, err = tx.ExecContext(ctx, `DELETE FROM account_quality_states WHERE plan_id=$1`, plan.ID); err != nil {
@@ -203,6 +217,12 @@ func applyQualityOutcomeCoreTx(ctx context.Context, tx *sql.Tx, plan *service.Sc
 	}
 	if err != nil {
 		return "", err
+	}
+	if matching, matchErr := qualityProbeRouteMatchesTx(ctx, tx, plan, &state); matchErr != nil || !matching {
+		if matchErr != nil {
+			return "", matchErr
+		}
+		return "stale_run", nil
 	}
 	if plan.QualityTemplateID != 0 {
 		matching, matchErr := qualityTemplatePlanMatchesTx(ctx, tx, plan.ID, plan.AccountID)

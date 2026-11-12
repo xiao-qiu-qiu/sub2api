@@ -73,14 +73,15 @@ type QualityOverviewPlan struct {
 }
 
 type QualityOverviewHistory struct {
-	ID            int64     `json:"id"`
-	PlanID        int64     `json:"plan_id"`
-	StartedAt     time.Time `json:"started_at"`
-	Status        string    `json:"status"`
-	ModelID       string    `json:"model_id"`
-	ModelIDs      []string  `json:"model_ids"`
-	QuestionKind  string    `json:"question_kind"`
-	QualityAction string    `json:"quality_action"`
+	RouteEvidenceMissing bool      `json:"route_evidence_missing,omitempty"`
+	ID                   int64     `json:"id"`
+	PlanID               int64     `json:"plan_id"`
+	StartedAt            time.Time `json:"started_at"`
+	Status               string    `json:"status"`
+	ModelID              string    `json:"model_id"`
+	ModelIDs             []string  `json:"model_ids"`
+	QuestionKind         string    `json:"question_kind"`
+	QualityAction        string    `json:"quality_action"`
 }
 
 type QualityOverviewItem struct {

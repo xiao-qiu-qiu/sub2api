@@ -5,7 +5,7 @@ import { getQualityOverview, type QualityOverviewAccount } from '@/api/admin/qua
 import { runQualityPlan } from '@/api/admin/accountQuality'
 
 const { push } = vi.hoisted(() => ({ push: vi.fn() }))
-vi.mock('vue-router', () => ({ useRouter: () => ({ push }), RouterLink: { props: ['to'], template: '<a><slot /></a>' } }))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push }), RouterLink: { props: ['to'], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' } }))
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key, te: () => true }) }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { id: 1 } }) }))
 vi.mock('@/api/admin/qualityOverview', () => ({ getQualityOverview: vi.fn() }))
@@ -26,6 +26,27 @@ beforeEach(() => { vi.clearAllMocks(); vi.mocked(getQualityOverview).mockReset()
 afterEach(() => { wrapper?.unmount(); vi.useRealTimers() })
 
 describe('account quality status', () => {
+  it('labels BPS scopes and opens matching BPS creation and recovery presets', async () => {
+    vi.mocked(getQualityOverview).mockResolvedValue(response([]))
+    wrapper = mount(AccountQualityStatusView); await flushPromises()
+    await wrapper.get('.channel-switch button:last-child').trigger('click'); await flushPromises()
+    const main = wrapper.get('[data-probe-scope="main"]'), recovery = wrapper.get('[data-probe-scope="recovery"]')
+    expect(main.get('h2').text()).toBe('qualityOps.bpsProbeScope')
+    expect(main.get('.empty-state').text()).toContain('qualityOps.noBpsProbeScope')
+    expect(JSON.parse(main.get('.scope-configure').attributes('data-to')).query).toEqual({ create: '1', channel: 'bps' })
+    expect(recovery.get('h2').text()).toBe('qualityOps.bpsRecoveryScope')
+    expect(recovery.get('.empty-state').text()).toContain('qualityOps.noBpsRecoveryScope')
+    expect(JSON.parse(recovery.get('.scope-configure').attributes('data-to')).query).toEqual({ recovery: '1', channel: 'bps' })
+  })
+  it('explains missing historical route evidence without displaying it as a failed answer', async () => {
+    const account = fixture()
+    account.history = [{ ...account.history[2], route_evidence_missing: true }]
+    vi.mocked(getQualityOverview).mockImplementation(async params => response(params.probe_scope === 'recovery' ? [] : [account]))
+    wrapper = mount(AccountQualityStatusView); await flushPromises()
+    await wrapper.get('button.bar-unknown').trigger('click')
+    expect(wrapper.get('[data-testid="quality-missing-route"]').text()).toBe('qualityOps.statusMissingRouteEvidence')
+    expect(wrapper.findAll('button.bar-degraded')).toHaveLength(0)
+  })
   it('loads both scopes with independent pagination and runs the recovery rule in its own section', async () => {
     vi.mocked(getQualityOverview).mockImplementation(async params => {
       const account = fixture()

@@ -36,13 +36,35 @@ const (
 )
 
 func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error) {
+	// Never trust a caller's route label, including configurations loaded from
+	// older storage. Only this execution's private context can supply evidence.
+	snapshot := *cfg
+	snapshot.ModelID = model
+	snapshot.TestRoute = ""
+	snapshot.TestMappedModel = ""
+	cfg = &snapshot
 	ctx = context.WithValue(ctx, qualityProbeContextKey{}, true)
+	ctx, routeEvidence := withQualityTestRouteEvidence(ctx)
+	if QualityProbeRequiresBPS(cfg) {
+		account, err := s.accountRepo.GetByID(ctx, accountID)
+		if err != nil {
+			return nil, err
+		}
+		if !QualityProbeMatchesAccount(account, cfg) {
+			return skippedQualityProbeResult(model, cfg, "bps_account_not_enabled"), nil
+		}
+	}
 	if reason := s.qualityProbeQuotaSkipReason(ctx, accountID, cfg); reason != "" {
 		return skippedQualityProbeResult(model, cfg, reason), nil
 	}
 	// 探针题型不下发题目，直接走门票探针。
 	if isOpenAICodexStateProbePlan(cfg) {
-		return s.runOpenAICodexStateProbeScheduled(ctx, accountID, model, cfg)
+		result, err := s.runOpenAICodexStateProbeScheduled(ctx, accountID, model, cfg)
+		if result != nil && result.PelicanConfig != nil {
+			result.PelicanConfig.TestRoute = routeEvidence.value()
+			result.PelicanConfig.TestMappedModel = routeEvidence.mapped()
+		}
+		return result, err
 	}
 	// Recognize the exact built-in question in legacy HTML plans as well.
 	if isBuiltinCandyPlan(cfg) {
@@ -84,8 +106,10 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 		status = "failed"
 	}
 	finished := time.Now()
-	snapshot := *cfg
+	snapshot = *cfg
 	snapshot.ModelID = model
+	snapshot.TestRoute = routeEvidence.value()
+	snapshot.TestMappedModel = routeEvidence.mapped()
 	return &ScheduledTestResult{Status: status, ResponseText: output, ErrorMessage: message, LatencyMs: finished.Sub(started).Milliseconds(), StartedAt: started, FinishedAt: finished, PelicanConfig: &snapshot}, nil
 }
 
@@ -158,6 +182,20 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 		snapshot.TriggerSource = "scheduled"
 	}
 	applyTriggeredQuality := true
+	tests := s.accountTestSvc
+	if tests == nil && s.scheduledSvc != nil {
+		tests = s.scheduledSvc.accountTests
+	}
+	if (isOpenAICodexStateProbePlan(&snapshot) || QualityProbeRequiresBPS(&snapshot)) && tests != nil && tests.accountRepo != nil {
+		account, lookupErr := tests.accountRepo.GetByID(ctx, plan.AccountID)
+		if lookupErr == nil && account != nil && !QualityProbeMatchesAccount(account, &snapshot) {
+			// Claim populated BPS ownership. Recheck before any 5xx substitution,
+			// dispatch or recovery-state update; this signal is safely consumed.
+			finishCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stop()
+			return s.planRepo.FinishPelican(finishCtx, plan.ID, until, time.Now()) == nil
+		}
+	}
 	if triggeredAccount != nil {
 		snapshot, applyTriggeredQuality = quality5xxTestConfig(triggeredAccount, plan.ModelID, snapshot)
 	}
@@ -446,7 +484,14 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 	if result == nil {
 		return failure("scheduled_test_empty_result: background sample returned no result")
 	}
-	result.PelicanConfig = plan.PelicanConfig
+	snapshot := *plan.PelicanConfig
+	snapshot.TestRoute = ""
+	snapshot.TestMappedModel = ""
+	if result.PelicanConfig != nil {
+		snapshot.TestRoute = result.PelicanConfig.TestRoute
+		snapshot.TestMappedModel = result.PelicanConfig.TestMappedModel
+	}
+	result.PelicanConfig = &snapshot
 	if qualityExactJudgeConfigured(plan.PelicanConfig) && !isOpenAICodexStateProbePlan(plan.PelicanConfig) && result.Status != "skipped" &&
 		(result.Status != "success" || result.ErrorMessage != "") {
 		// Never compare text from a failed HTTP request or incomplete stream,

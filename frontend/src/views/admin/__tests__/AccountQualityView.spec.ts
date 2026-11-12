@@ -2094,6 +2094,38 @@ describe('quality operations', () => {
     wrapper.unmount()
   })
 
+  it('preserves BPS account actions and restoration when selecting the BPS channel', async () => {
+    vi.mocked(accountsAPI.list).mockResolvedValue({ items: [{ id: 1, name: 'BPS account', platform: 'openai', type: 'oauth', extra: { openai_excel_bps: true } }], total: 1 } as any)
+    vi.mocked(scheduledTests.create).mockResolvedValue({ ...rules()[0], id: 91 })
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newPlan(); await flushPromises()
+    vm.accountScope = 'manual'
+    vm.form.pelican_config.quality.action = 'move_groups'
+    await flushPromises()
+    vm.form.pelican_config.quality.move_group_ids = [21]
+    vm.form.pelican_config.quality.auto_restore = true
+    vm.form.pelican_config.test_channel = 'bps'
+    vm.selectTestChannel(); await flushPromises()
+    vm.selectedAccounts = [1]
+    expect(wrapper.find('[data-testid="quality-action-move-groups"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-auto-restore"]').exists()).toBe(true)
+    await vm.save(); await flushPromises()
+    expect(scheduledTests.create).toHaveBeenCalledWith(expect.objectContaining({ account_id: 1, pelican_config: expect.objectContaining({ test_channel: 'bps', quality: expect.objectContaining({ action: 'move_groups', move_group_ids: [21], auto_restore: true }) }) }))
+    wrapper.unmount()
+  })
+
+  it('creates a BPS candy recovery draft and excludes the other channel from account actions', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newRecoveryPlan(true); await flushPromises()
+    expect(vm.form.pelican_config).toMatchObject({ question_kind: 'candy', test_channel: 'bps', quality: { action_on: 'passed', action: 'move_groups', recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 } })
+    expect(wrapper.find('[data-testid="quality-action-move-groups"]').exists()).toBe(true)
+    expect(vm.accountDisabledReason({ id: 55, platform: 'openai', type: 'oauth', extra: {} })).toBe('qualityOps.bpsActionAccountUnsupported')
+    vm.newRecoveryPlan(); await flushPromises()
+    expect(vm.form.pelican_config.question_kind).toBe('state_probe')
+    expect(vm.accountDisabledReason({ id: 56, platform: 'openai', type: 'oauth', extra: { openai_excel_bps: true } })).toBe('qualityOps.probeAccountUnsupported')
+    wrapper.unmount()
+  })
+
   it('opens the BPS candy shortcut as a complete observation draft without creating anything', async () => {
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
     await wrapper.get('[data-testid="quality-create-bps-candy"]').trigger('click'); await flushPromises()
@@ -2102,7 +2134,10 @@ describe('quality operations', () => {
       test_channel: 'bps', prompt: CANDY_PROMPT, model_ids: [],
       quality: { action_on: 'failed', action: 'observe_only', expected_answer: '21', auto_restore: false, recovery_probe_enabled: false } })
     expect(wrapper.text()).toContain('qualityOps.bpsModelsHint')
-    for (const id of ['quality-action-on', 'quality-action-enable-bps', 'quality-action-observe-only', 'quality-auto-restore', 'quality-bps-settings']) {
+    expect(wrapper.find('[data-testid="quality-action-on"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-action-observe-only"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-action-move-groups"]').exists()).toBe(true)
+    for (const id of ['quality-action-enable-bps', 'quality-auto-restore', 'quality-bps-settings']) {
       expect(wrapper.find('[data-testid="' + id + '"]').exists()).toBe(false)
     }
     expect(scheduledTests.create).not.toHaveBeenCalled()
@@ -2165,23 +2200,21 @@ describe('quality operations', () => {
     wrapper.unmount()
   })
 
-  it('forces BPS observation on selection and submission even after a recovery draft', async () => {
+  it('preserves BPS recovery on selection and submission', async () => {
+    vi.mocked(accountsAPI.list).mockResolvedValue({ items: [{ id: 1, name: 'BPS account', platform: 'openai', type: 'oauth', extra: { openai_excel_bps: true } }], total: 1 } as any)
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
     vm.newRecoveryPlan(); vm.accountScope = 'manual'; await flushPromises(); vm.selectedAccounts = [1]
     await wrapper.get('[data-testid="quality-question-kind"]').setValue('candy')
     await wrapper.get('[data-testid="quality-test-channel"]').setValue('bps')
-    expect(vm.isRecovery).toBe(false)
-    expect(vm.form.pelican_config.quality).toMatchObject({ action_on: 'failed', action: 'observe_only', auto_restore: false, recovery_probe_enabled: false })
-    Object.assign(vm.form.pelican_config.quality, { action: 'enable_bps', auto_restore: true, recovery_probe_enabled: true,
-      remove_group_ids: [21], move_group_ids: [21], judge: { group_id: 21, model_id: 'judge', prompt: 'Grade the answer' } })
-    vm.form.auto_recover = true
+    expect(vm.isRecovery).toBe(true)
+    expect(vm.form.pelican_config.quality).toMatchObject({ action_on: 'passed', action: 'move_groups', auto_restore: false, recovery_probe_enabled: true })
+    vm.form.pelican_config.quality.move_group_ids = [21]
+    vm.selectedAccounts = [1]
     await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
     const body = vi.mocked(scheduledTests.create).mock.calls[0][0]
     expect(body.auto_recover).toBe(false)
-    expect(body.pelican_config!.quality).toMatchObject({ action: 'observe_only', auto_restore: false, remove_group_ids: [] })
-    for (const field of ['action_on', 'bps', 'move_group_ids', 'recovery_probe_enabled', 'recovery_probe_interval_minutes', 'recovery_confirmation_minutes']) {
-      expect(body.pelican_config!.quality).not.toHaveProperty(field)
-    }
+    expect(body.pelican_config!.quality).toMatchObject({ action_on: 'passed', action: 'move_groups', move_group_ids: [21], auto_restore: false, recovery_probe_enabled: true, recovery_probe_interval_minutes: 60, recovery_confirmation_minutes: 5 })
+    expect(body.pelican_config!.quality).not.toHaveProperty('bps')
     wrapper.unmount()
   })
 
@@ -2203,7 +2236,9 @@ describe('quality operations', () => {
 
   it('creates a candy BPS observation without group or lifecycle settings', async () => {
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
-    vm.newPlan(); vm.accountScope = 'manual'; await flushPromises(); vm.selectedAccounts = [1]
+    vm.newPlan(); vm.accountScope = 'manual'; await flushPromises()
+    await wrapper.get('[data-testid="quality-action-observe-only"]').setValue(true)
+    vm.selectedAccounts = [1]
     await wrapper.get('[data-testid="quality-test-channel"]').setValue('bps')
     expect(wrapper.find('[data-testid="quality-action-enable-bps"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="quality-auto-restore"]').exists()).toBe(false)
@@ -2224,6 +2259,7 @@ describe('quality operations', () => {
     vi.mocked(accountsAPI.list).mockResolvedValue({ items: [1, 2, 3].map(id => ({ id, name: 'Account', platform: 'openai', type: 'oauth' })), total: 3 } as any)
     const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
     vm.newPlan(); vm.accountScope = 'manual'; await flushPromises()
+    await wrapper.get('[data-testid="quality-action-observe-only"]').setValue(true)
     await wrapper.get('[data-testid="quality-test-channel"]').setValue('bps')
     await wrapper.get('[data-testid="quality-select-page"]').trigger('click')
     expect(vm.selectedAccounts).toEqual([1, 2])

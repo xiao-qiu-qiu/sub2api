@@ -313,8 +313,8 @@ func openAICodexStateProbeUnsupportedReason(account *Account, requestedModel str
 		return "测试数据账号不向上游发真实请求，探针不适用"
 	case account.IsOpenAIAgentIdentity():
 		return "Agent Identity 账号不使用门票，探针不适用"
-	case !ignoreBPS && account.IsExcelBPSEnabledForModel(requestedModel):
-		return "该账号的这个模型走 Excel/BPS 通道，不经过门票，探针不适用"
+	case !ignoreBPS && account.IsExcelBPSEnabled():
+		return "该账号已开启 Excel/BPS，普通门票探针不适用"
 	}
 	return ""
 }
@@ -334,6 +334,7 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 	}
 	applyOpenAICodexTicketHarvestIdentity(headers, model)
 	return fireOpenAICodexStateShotRequest(ctx, headers, model, turnState, cookie, func(req *http.Request) (*http.Response, error) {
+		recordQualityTestRoute(ctx, "openai:account", model)
 		return s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
 	})
 }

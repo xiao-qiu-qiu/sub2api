@@ -80,6 +80,9 @@ func (r *scheduledTestPlanRepository) applyImmediateQuality5xx(ctx context.Conte
 			return false, err
 		}
 	}
+	if matching, matchErr := qualityProbeRouteMatchesTx(ctx, tx, plan, &state); matchErr != nil || !matching {
+		return false, matchErr
+	}
 	if policy.RecoveryProbeActive() {
 		if !qualityRecoveryProbeOwns(&state) {
 			return false, nil

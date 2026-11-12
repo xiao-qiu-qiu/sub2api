@@ -4,7 +4,7 @@
       <QualityTabs />
       <div class="workspace-heading">
         <div><h2>{{ t('qualityOps.workspaceTitle') }}</h2></div>
-        <div class="heading-actions"><span class="updated-label" aria-live="polite">{{ store.updatedAt ? t('qualityOps.updatedAt', { time: clock(store.updatedAt) }) : t('qualityOps.loading') }}</span><button class="btn btn-secondary" :disabled="refreshing" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': refreshing }" />{{ t('qualityOps.refresh') }}</button><button class="btn btn-secondary" data-testid="quality-create-bps-candy" @click="newBPSCandyPlan"><Icon name="play" size="sm" />{{ t('qualityOps.bpsCandy') }}</button><button class="btn btn-secondary" data-testid="quality-create-recovery" @click="newRecoveryPlan"><Icon name="sync" size="sm" />{{ t('qualityOps.recoveryQuickSetup') }}</button><button class="btn btn-primary" data-testid="quality-create-rule" @click="newPlan"><Icon name="plus" size="sm" />{{ t('qualityOps.create') }}</button></div>
+        <div class="heading-actions"><span class="updated-label" aria-live="polite">{{ store.updatedAt ? t('qualityOps.updatedAt', { time: clock(store.updatedAt) }) : t('qualityOps.loading') }}</span><button class="btn btn-secondary" :disabled="refreshing" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': refreshing }" />{{ t('qualityOps.refresh') }}</button><button class="btn btn-secondary" data-testid="quality-create-bps-candy" @click="newBPSCandyPlan"><Icon name="play" size="sm" />{{ t('qualityOps.bpsCandy') }}</button><button class="btn btn-secondary" data-testid="quality-create-recovery" @click="newRecoveryPlan()"><Icon name="sync" size="sm" />{{ t('qualityOps.recoveryQuickSetup') }}</button><button class="btn btn-primary" data-testid="quality-create-rule" @click="newPlan"><Icon name="plus" size="sm" />{{ t('qualityOps.create') }}</button></div>
       </div>
       <div v-if="error || notice" class="workspace-message" :class="error ? 'message-error' : 'message-success'" :role="error ? 'alert' : 'status'">{{ error || notice }}<button :aria-label="t('qualityOps.dismiss')" @click="error = ''; notice = ''"><Icon name="x" size="sm" /></button></div>
       <QualityProbeTabs :probes="probeTabs" :selected-id="store.selectedTemplateId" :standalone-selected="store.unassignedOnly || !templates.length" :standalone-count="standalonePlans.length" :disabled="busy" @select="selectProbe" @configure="configureProbe" />
@@ -114,7 +114,7 @@
         <label v-if="!bulkEditing && !savingPreset" class="block space-y-1"><span>{{ t('qualityOps.ruleName') }}</span><input v-model.trim="form.pelican_config.rule_name" maxlength="100" class="input" data-testid="quality-rule-name-input" /></label>
         <p v-if="editingTemplate" class="template-hint" data-testid="quality-template-edit-hint">{{ t('qualityOps.templateEditHint', { count: editingTemplateRecord?.plan_ids.length ?? 0 }) }}</p>
         <p v-else-if="editing && planTemplate[editing]" class="template-hint" data-testid="quality-plan-template-hint">{{ t('qualityOps.planFromTemplate', { id: planTemplate[editing] }) }}</p>
-        <label v-if="editsField('action') && !isBPSObservation" class="block space-y-1"><span>{{ t('qualityOps.actionCondition') }}</span><select v-model="form.pelican_config.quality.action_on" class="input" data-testid="quality-action-on" @change="selectActionCondition"><option value="failed">{{ t('qualityOps.actionOnFailed') }}</option><option value="passed">{{ t('qualityOps.actionOnPassed') }}</option></select></label>
+        <label v-if="editsField('action')" class="block space-y-1"><span>{{ t('qualityOps.actionCondition') }}</span><select v-model="form.pelican_config.quality.action_on" class="input" data-testid="quality-action-on" @change="selectActionCondition"><option value="failed">{{ t('qualityOps.actionOnFailed') }}</option><option value="passed">{{ t('qualityOps.actionOnPassed') }}</option></select></label>
         <QualityAccountSelector v-if="!editing && !savingPreset" v-model="pickerAccountIds" v-model:search="search" v-model:group="accountGroup" v-model:type="accountType" data-testid="quality-account-picker"
           v-model:statuses="accountStatuses" v-model:scope="accountScope"
           :accounts="accounts" :groups="groups" :accounts-loading="accountsLoading" :selecting-accounts="selectingAccounts" :accounts-error="accountsError"
@@ -178,7 +178,7 @@
           <p class="text-sm text-gray-500">{{ t(form.pelican_config.quality.judge.kind === 'exact' ? 'qualityOps.exactGrading' : form.pelican_config.quality.judge.kind === 'jev' ? 'qualityOps.jevGrading' : 'qualityOps.grading') }}</p>
         </fieldset>
         </template>
-        <fieldset v-if="editsField('action') && form.pelican_config.test_channel !== 'bps'" class="space-y-3 rounded-lg border p-4 dark:border-dark-600">
+        <fieldset v-if="editsField('action')" class="space-y-3 rounded-lg border p-4 dark:border-dark-600">
           <legend class="px-2 font-medium">{{ t(isRecovery ? 'qualityOps.healthyAction' : isProbe ? 'qualityOps.probeFailureAction' : 'qualityOps.failureAction') }}</legend>
           <label class="flex items-center gap-2"><input v-model="form.pelican_config.quality.action" type="radio" value="observe_only" data-testid="quality-action-observe-only" />{{ t('qualityOps.observeOnly') }}</label>
           <label v-if="!isRecovery" class="flex items-center gap-2"><input v-model="form.pelican_config.quality.action" type="radio" value="remove_groups" data-testid="quality-action-remove-groups" />{{ t('qualityOps.removeGroups') }}</label>
@@ -388,6 +388,7 @@ function accountDisabledReason(account: AccountListItem) {
   if (editingTemplate.value && editingTemplateRecord.value?.excluded_account_ids?.includes(account.id) && !form.value.enabled) return t('qualityOps.reincludeReasons.template_disabled')
   if (!copying.value && !editingTemplate.value && accountScope.value !== 'all' && existingAccountIds.value.has(account.id)) return t('qualityOps.accountHasRule')
   if (isProbe.value && !supportsStateProbeAccount(account)) return t('qualityOps.probeAccountUnsupported')
+  if (isBPSObservation.value && form.value.pelican_config.quality.action !== 'observe_only' && !usesBPSAccount(account)) return t('qualityOps.bpsActionAccountUnsupported')
   return ''
 }
 function toggleReincludeAccount(accountId: number) {
@@ -402,7 +403,15 @@ function toggleReincludeAccount(accountId: number) {
   }
 }
 function supportsStateProbeAccount(account: AccountListItem) {
-  return account.platform === 'openai' && ['oauth', 'setup-token'].includes(account.type) && account.extra?.synthetic_ui_test !== true
+  return account.platform === 'openai' && ['oauth', 'setup-token'].includes(account.type) && account.extra?.synthetic_ui_test !== true && (form.value.pelican_config.quality.action === 'enable_bps' || !usesBPSAccount(account))
+}
+function usesBPSAccount(account: AccountListItem) {
+  const auth = String(account.credentials?.auth_mode || '').trim().toLowerCase()
+  const legacyAuth = String(account.credentials?.openai_auth_mode || '').trim().toLowerCase()
+  return account.platform === 'openai' && account.type === 'oauth' && account.parent_account_id == null &&
+    account.extra?.openai_excel_bps === true && account.extra?.openai_excel_bps_authorization_pending !== true && account.extra?.openai_siwc !== true &&
+    String(account.credentials?.plan_type || '').trim().toLowerCase() !== 'free' &&
+    !['agentidentity', 'personalaccesstoken', 'personal_access_token'].includes(auth) && !['personalaccesstoken', 'personal_access_token'].includes(legacyAuth)
 }
 const knownAccounts = new Map<number, AccountListItem>()
 function rememberAccounts(items: AccountListItem[]) { for (const account of items) knownAccounts.set(account.id, account) }
@@ -788,6 +797,7 @@ function newBPSCandyPlan() {
   newPlan()
   form.value.pelican_config.rule_name = t('qualityOps.bpsCandy')
   form.value.pelican_config.test_channel = 'bps'
+  form.value.pelican_config.quality.action = 'observe_only'
   selectTestChannel()
   initialForm.value = formSnapshot()
 }
@@ -804,14 +814,15 @@ function selectActionCondition() {
   }
   selectedAccounts.value = selectedAccounts.value.filter(id => !existingAccountIds.value.has(id))
 }
-function newRecoveryPlan() {
+function newRecoveryPlan(bps = false) {
   if (busy.value) return
   newPlan()
   form.value.pelican_config.quality.action_on = 'passed'
   form.value.pelican_config.quality.action = 'move_groups'
-  form.value.pelican_config.rule_name = t('qualityOps.recoveryPresetName')
-  form.value.pelican_config.question_kind = STATE_PROBE_QUESTION
-  form.value.model_id = 'gpt-6.1-sol'
+  form.value.pelican_config.rule_name = t(bps ? 'qualityOps.bpsRecoveryScope' : 'qualityOps.recoveryPresetName')
+  form.value.pelican_config.question_kind = bps ? 'candy' : STATE_PROBE_QUESTION
+  form.value.pelican_config.test_channel = bps ? 'bps' : 'account'
+  form.value.model_id = bps ? 'gpt-6-astra' : 'gpt-6.1-sol'
   selectActionCondition()
   selectQuestionKind()
   accountStatuses.value = []
@@ -948,7 +959,7 @@ watch(() => form.value.pelican_config.quality.action, (next, prev) => {
   if (applyingReuse.value || copying.value || savingPreset.value || editing.value || editingTemplate.value || bulkEditing.value) return
   if (next === 'enable_bps' || prev === 'enable_bps') form.value.pelican_config.quality.auto_restore = next === 'enable_bps'
   if (next === 'observe_only') form.value.pelican_config.quality.auto_restore = false
-  selectedAccounts.value = selectedAccounts.value.filter(id => !existingAccountIds.value.has(id))
+  selectedAccounts.value = selectedAccounts.value.filter(id => { const account = knownAccounts.get(id); return !existingAccountIds.value.has(id) && (!account || !accountDisabledReason(account)) })
 }, { flush: 'sync' })
 function useCandy() { form.value.pelican_config.prompt = CANDY_PROMPT; form.value.pelican_config.quality.expected_answer = '21' }
 function selectQuestionKind() {
@@ -975,12 +986,15 @@ function selectQuestionKind() {
 }
 function selectTestChannel() {
   if (form.value.pelican_config.test_channel !== 'bps') return
-  form.value.pelican_config.quality.action_on = 'failed'
-  form.value.pelican_config.quality.action = 'observe_only'
-  form.value.pelican_config.quality.auto_restore = false
-  form.value.pelican_config.quality.recovery_probe_enabled = false
-  form.value.auto_recover = false
-  if (bulkEditing.value) bulkFields.value = [...new Set<QualityRuleField>([...bulkFields.value, 'action', 'restore'])]
+  const policy = form.value.pelican_config.quality
+  if (policy.action === 'enable_bps' || policy.action === 'openai_two_fa_admission') {
+    policy.action_on = 'failed'
+    policy.action = 'observe_only'
+    policy.auto_restore = false
+    policy.recovery_probe_enabled = false
+    if (bulkEditing.value) bulkFields.value = [...new Set<QualityRuleField>([...bulkFields.value, 'action', 'restore'])]
+  }
+  selectedAccounts.value = selectedAccounts.value.filter(id => { const account = knownAccounts.get(id); return !account || !accountDisabledReason(account) })
 }
 // 探针规则不发题目、不走判题模型：提交前去掉题目、参考答案和判题配置，并行固定为 1。
 // BPS 设置只随「开启 BPS」提交。
@@ -1348,9 +1362,10 @@ onMounted(() => {
     if (target && operationsRoute?.query.edit === '1') edit(target)
     else if (target && operationsRoute?.query.history === '1') void history(target)
     else if (operationsRoute?.query.recovery === '1') {
-      newRecoveryPlan()
+      newRecoveryPlan(operationsRoute?.query.channel === 'bps')
     } else if (operationsRoute?.query.create === '1') {
-      newPlan()
+      if (operationsRoute?.query.channel === 'bps') newBPSCandyPlan()
+      else newPlan()
     } else if (operationsRoute?.query.create_account) {
       const accountId = Number(operationsRoute.query.create_account)
       if (Number.isSafeInteger(accountId) && accountId > 0) {

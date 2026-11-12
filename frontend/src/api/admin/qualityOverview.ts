@@ -11,6 +11,7 @@ export interface QualityHistoryPoint {
   model_ids?: string[]
   question_kind: string
   quality_action: string
+  route_evidence_missing?: boolean
 }
 export interface QualityOverviewPlan {
   id: number

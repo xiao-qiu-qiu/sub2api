@@ -917,7 +917,11 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 
 // testOpenAIAccountConnection tests an OpenAI account's connection
 func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account *Account, modelID string, prompt string, mode string, opts ...AccountTestOptions) error {
-	recordQualityBatchRoute(c, account, modelID, "openai:account")
+	routeModel := strings.TrimSpace(modelID)
+	if routeModel == "" {
+		routeModel = openai.DefaultTestModel
+	}
+	recordQualityBatchRoute(c, account, routeModel, "openai:account")
 	ctx := c.Request.Context()
 	mode = normalizeAccountTestMode(mode)
 	if account.IsExcelOAuth() {
@@ -931,7 +935,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	if account.IsSIWCEnabled() {
-		recordQualityBatchRoute(c, account, modelID, "openai:siwc")
+		recordQualityBatchRoute(c, account, routeModel, "openai:siwc")
 		if s.openaiGatewayService == nil {
 			return s.sendErrorAndEnd(c, "SIWC gateway is unavailable")
 		}
@@ -967,7 +971,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		bpsEnabled = account.IsExcelBPSEnabledForModel(bpsTestModel)
 	}
 	if bpsEnabled && s.openaiGatewayService != nil && s.openaiGatewayService.excelBPSGloballyEnabled(ctx) && !isOpenAIImageModel(account.GetMappedModel(bpsTestModel)) {
-		recordQualityBatchRoute(c, account, modelID, "openai:bps")
+		testRoute := "openai:account"
+		if account.IsExcelBPSEnabledForModel(routeModel) {
+			testRoute = "openai:bps"
+		}
+		recordQualityBatchRoute(c, account, routeModel, testRoute)
 		return s.testExcelBPSAccountConnection(c, account, modelID, prompt, bpsOpts...)
 	}
 
@@ -1193,7 +1201,8 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 	prompt = promptOrDefault(prompt)
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: model})
 
-	body, err := buildExcelBPSAccountTestBody(model, prompt)
+	pelicanOptions, _ := pelicanTestOptionsFromContext(c.Request.Context())
+	body, err := buildExcelBPSAccountTestBody(model, prompt, pelicanOptions.reasoningEffort)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create Excel BPS test payload")
 	}
@@ -1217,6 +1226,11 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 	result, err := s.openaiGatewayService.Forward(probeCtx.Request.Context(), probeCtx, account, body)
 	recordPelicanTestSSE(c.Request.Context(), "openai", model, probe.Body.Bytes())
 	if err != nil {
+		// A stream can explicitly refuse before the gateway detects truncation.
+		// Preserve that evidence without replacing unrelated forwarding errors.
+		if _, answerErr := responsesGatewayAccountTestAnswer(probe.Body.String()); errors.Is(answerErr, errResponsesTestRefused) {
+			return s.sendErrorAndEnd(c, answerErr.Error())
+		}
 		// A single-account test has no other account to fail over to.
 		var failover *UpstreamFailoverError
 		if errors.As(err, &failover) && failover.ClientMessage != "" {
@@ -1236,46 +1250,31 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 
-	answer := strings.Builder{}
-	completed := false
-	for _, line := range strings.Split(probe.Body.String(), "\n") {
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		var event map[string]any
-		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event) != nil {
-			continue
-		}
-		switch event["type"] {
-		case "response.output_text.delta":
-			if delta, ok := event["delta"].(string); ok {
-				_, _ = answer.WriteString(delta)
-				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
-			}
-		case "response.completed":
-			completed = true
-		}
-	}
 	if result == nil || result.ClientDisconnect {
 		return s.sendErrorAndEnd(c, "Responses gateway test response was interrupted")
 	}
-	if !completed {
-		return s.sendErrorAndEnd(c, "Responses gateway test response ended before completion")
+	answer, err := responsesGatewayAccountTestAnswer(probe.Body.String())
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
-	if strings.TrimSpace(answer.String()) == "" {
-		return s.sendErrorAndEnd(c, "Responses gateway returned empty output")
-	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: answer})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
 }
 
-func buildExcelBPSAccountTestBody(model, prompt string) ([]byte, error) {
+func buildExcelBPSAccountTestBody(model, prompt string, reasoningEffort ...string) ([]byte, error) {
+	effort := "medium"
+	if len(reasoningEffort) > 0 {
+		if selected := normalizePelicanReasoningEffort(reasoningEffort[0]); selected != "" {
+			effort = selected
+		}
+	}
 	return json.Marshal(map[string]any{
 		"model": model, "stream": true, "store": false,
 		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{
 			map[string]any{"type": "input_text", "text": promptOrDefault(prompt)},
 		}}},
-		"reasoning": map[string]any{"effort": "medium"},
+		"reasoning": map[string]any{"effort": effort},
 	})
 }
 

@@ -209,6 +209,10 @@ func TestQualityOverviewIntegrationPlanChannels(t *testing.T) {
 			name := "-" + tc.kind + "-" + tc.configured + "-end"
 			account := f.account(name)
 			plan := f.plan(account, tc.configured)
+			if tc.want == "bps" {
+				_, err := integrationDB.Exec(`UPDATE accounts SET extra='{"openai_excel_bps":true}'::jsonb WHERE id=$1`, account)
+				require.NoError(t, err)
+			}
 			_, err := integrationDB.Exec(`UPDATE scheduled_test_plans SET pelican_config=jsonb_set(pelican_config,'{question_kind}',to_jsonb($2::text)) WHERE id=$1`, plan, tc.kind)
 			require.NoError(t, err)
 			for _, channel := range []string{"account", "bps"} {
@@ -344,6 +348,8 @@ func TestQualityOverviewIntegrationProbeScopeMembershipAndPagination(t *testing.
 	_, err = integrationDB.Exec(`UPDATE scheduled_test_plans SET pelican_config=jsonb_set(pelican_config,'{quality,action}','"openai_two_fa_admission"'::jsonb) WHERE id=$1`, admissionPlan)
 	require.NoError(t, err)
 	bpsOnly := f.account("-bps")
+	_, err = integrationDB.Exec(`UPDATE accounts SET extra='{"openai_excel_bps":true}'::jsonb WHERE id=$1`, bpsOnly)
+	require.NoError(t, err)
 	bpsPlan := f.plan(bpsOnly, "bps")
 	_, err = integrationDB.Exec(`UPDATE scheduled_test_plans SET pelican_config=jsonb_set(pelican_config,'{question_kind}','"candy"'::jsonb) WHERE id=$1`, bpsPlan)
 	require.NoError(t, err)
@@ -455,10 +461,14 @@ func TestQualityOverviewIntegrationProbeScopeRechecksTemplateFilters(t *testing.
 func TestQualityOverviewIntegrationProbeScopeKeepsChannelsSeparate(t *testing.T) {
 	f := newQualityOverviewFixture(t)
 	account := f.account("-two-channels")
+	_, err := integrationDB.Exec(`UPDATE accounts SET extra='{"openai_excel_bps":true}'::jsonb WHERE id=$1`, account)
+	require.NoError(t, err)
 	nativePlan := f.plan(account, "account")
+	_, err = integrationDB.Exec(`UPDATE scheduled_test_plans SET pelican_config=jsonb_set(pelican_config,'{quality,action}','"enable_bps"') WHERE id=$1`, nativePlan)
+	require.NoError(t, err)
 	var bpsPlan int64
 	require.NoError(t, integrationDB.QueryRow(`INSERT INTO scheduled_test_plans(account_id,model_id,pelican_config,enabled)
- VALUES($1,'test-a','{"question_kind":"candy","test_channel":"bps","quality":{"action":"enable_bps"}}'::jsonb,true) RETURNING id`, account).Scan(&bpsPlan))
+ VALUES($1,'test-a','{"question_kind":"candy","test_channel":"bps","quality":{"action":"observe_only"}}'::jsonb,true) RETURNING id`, account).Scan(&bpsPlan))
 	native := &service.PelicanTestConfig{QuestionKind: "state_probe", ParallelCount: 1, ModelIDs: []string{"test-a"}}
 	bps := &service.PelicanTestConfig{QuestionKind: "candy", TestChannel: "bps", ParallelCount: 1, ModelIDs: []string{"test-a"},
 		QualityBatch: &service.QualityBatchEvidence{Route: "openai:bps"}}

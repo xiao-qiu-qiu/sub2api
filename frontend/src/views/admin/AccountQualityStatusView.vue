@@ -20,8 +20,8 @@
         </div>
       </section>
       <div v-if="notice" class="status-message notice" role="status">{{ notice }}<button :aria-label="t('qualityOps.dismiss')" @click="notice = ''"><Icon name="x" size="sm" /></button></div>
-      <section v-for="section in sections" :key="section.scope" class="status-panel" :data-probe-scope="section.scope" :aria-label="t(section.scope === 'main' ? 'qualityOps.mainProbeScope' : 'qualityOps.recoveryProbeScope')">
-        <header class="scope-heading"><div><span class="scope-icon" :class="section.scope"><Icon :name="section.scope === 'main' ? 'shield' : 'sync'" size="sm" /></span><h2>{{ t(section.scope === 'main' ? 'qualityOps.mainProbeScope' : 'qualityOps.recoveryProbeScope') }}</h2><span class="scope-count">{{ section.loaded ? section.total : '—' }}</span></div><RouterLink class="scope-configure" :to="{ path: '/admin/account-quality', query: section.scope === 'recovery' ? { recovery: '1' } : { create: '1' } }"><Icon name="plus" size="xs" />{{ t(section.scope === 'recovery' ? 'qualityOps.recoveryQuickSetup' : 'qualityOps.create') }}</RouterLink></header>
+      <section v-for="section in sections" :key="section.scope" class="status-panel" :data-probe-scope="section.scope" :aria-label="scopeTitle(section.scope)">
+        <header class="scope-heading"><div><span class="scope-icon" :class="section.scope"><Icon :name="section.scope === 'main' ? 'shield' : 'sync'" size="sm" /></span><h2>{{ scopeTitle(section.scope) }}</h2><span class="scope-count">{{ section.loaded ? section.total : '—' }}</span></div><RouterLink class="scope-configure" :to="configureRoute(section.scope)"><Icon name="plus" size="xs" />{{ t(section.scope === 'recovery' ? 'qualityOps.recoveryQuickSetup' : 'qualityOps.create') }}</RouterLink></header>
         <div v-if="section.error" class="status-message error" role="alert">{{ section.error }}<button @click="load(section.scope)">{{ t('qualityOps.retry') }}</button></div>
         <div class="list-caption"><span>{{ t('qualityOps.statusHistory') }}</span><div class="legend"><span v-for="status in statuses.slice(0, 3)" :key="status"><i :class="`bar-${status}`" />{{ label(status) }}</span></div></div>
         <div :aria-busy="section.loading" class="account-list">
@@ -39,13 +39,14 @@
             <div class="rate-cell" :title="t('qualityOps.statusRateHelp')"><strong :class="{ 'rate-healthy': account.healthy_rate === 100 }">{{ account.healthy_rate === null ? '—' : `${Math.round(account.healthy_rate)}%` }}</strong><span>{{ t('qualityOps.statusHealthyRate') }}</span></div>
             <div class="row-actions"><button class="probe-button" :disabled="!runnablePlan(account) || !!pending[runnablePlan(account)?.id || 0]" :title="account.plans.length ? undefined : t('qualityOps.statusNoRule')" @click="probe(account)"><Icon name="play" size="xs" />{{ pending[runnablePlan(account)?.id || 0] ? t('qualityOps.statusQueued') : t('qualityOps.statusProbe') }}</button><button class="rule-button" :aria-label="`${t('qualityOps.statusConfigure')} · ${account.account_name}`" @click="openRules(account, true)"><Icon name="cog" size="sm" /></button></div>
           </article>
-          <div v-if="section.loaded && !section.accounts.length" class="empty-state"><Icon name="search" size="lg" /><p>{{ t(section.scope === 'recovery' ? 'qualityOps.noRecoveryScope' : 'qualityOps.noMainScope') }}</p></div>
+          <div v-if="section.loaded && !section.accounts.length" class="empty-state"><Icon name="search" size="lg" /><p>{{ emptyScopeMessage(section.scope) }}</p></div>
         </div>
         <footer class="list-footer"><span>{{ t('qualityOps.statusTotal', { count: section.total }) }}</span><div><button :disabled="section.page <= 1 || section.loading" :aria-label="t('qualityOps.statusPrev')" @click="section.page--; load(section.scope)"><Icon name="chevronLeft" size="sm" /></button><span>{{ t('qualityOps.statusPage', { page: section.page, pages: pages(section) }) }}</span><button :disabled="section.page >= pages(section) || section.loading" :aria-label="t('qualityOps.statusNextPage')" @click="section.page++; load(section.scope)"><Icon name="chevronRight" size="sm" /></button></div></footer>
       </section>
     </div>
 
     <BaseDialog :show="!!selected" :title="t('qualityOps.statusEvidence')" @close="selected = null">
+      <p v-if="selected?.point.route_evidence_missing" class="mb-4 text-sm text-gray-500" data-testid="quality-missing-route">{{ t('qualityOps.statusMissingRouteEvidence') }}</p>
       <template v-if="selected"><div class="evidence-account">{{ selected.account.account_name }}<span class="state-label" :class="`text-${selected.point.status}`">{{ label(selected.point.status) }}</span></div><dl class="evidence-details"><div><dt>{{ t('qualityOps.statusSampleAt') }}</dt><dd>{{ new Date(selected.point.started_at).toLocaleString() }}</dd></div><div><dt>{{ t('qualityOps.statusSampleModel') }}</dt><dd>{{ selected.point.model_ids?.join(' / ') || selected.point.model_id }}</dd></div><div><dt>{{ t('qualityOps.statusSampleMethod') }}</dt><dd>{{ t(selected.point.question_kind === 'state_probe' ? 'qualityOps.questionStateProbe' : selected.point.question_kind === 'random_reasoning' ? 'qualityOps.questionRandom' : 'qualityOps.questionCandy') }}</dd></div><div><dt>{{ t('qualityOps.statusSampleAction') }}</dt><dd>{{ actionLabel(selected.point.quality_action) }}</dd></div></dl><RouterLink class="btn btn-primary inline-flex items-center gap-2" :to="{ path: '/admin/account-quality', query: { plan_id: selected.point.plan_id, history: '1' } }">{{ t('qualityOps.statusViewHistory') }}<Icon name="arrowRight" size="sm" /></RouterLink></template>
     </BaseDialog>
   </AppLayout>
@@ -80,6 +81,12 @@ let alive = true
 const requests = { main: 0, recovery: 0 }, controllers: Partial<Record<QualityProbeScope, AbortController>> = {}
 let poll: ReturnType<typeof setInterval> | undefined, debounce: ReturnType<typeof setTimeout> | undefined
 const statusKeys = { healthy: 'statusHealthy', degraded: 'statusDegraded', unknown: 'statusUnknown', untested: 'statusUntested' }
+const scopeTitle = (scope: QualityProbeScope) => t(channel.value === 'bps' ? (scope === 'main' ? 'qualityOps.bpsProbeScope' : 'qualityOps.bpsRecoveryScope') : (scope === 'main' ? 'qualityOps.mainProbeScope' : 'qualityOps.recoveryProbeScope'))
+const emptyScopeMessage = (scope: QualityProbeScope) => t(channel.value === 'bps' ? (scope === 'main' ? 'qualityOps.noBpsProbeScope' : 'qualityOps.noBpsRecoveryScope') : (scope === 'main' ? 'qualityOps.noMainScope' : 'qualityOps.noRecoveryScope'))
+function configureRoute(scope: QualityProbeScope) {
+  if (channel.value === 'bps') return { path: '/admin/account-quality', query: scope === 'main' ? { create: '1', channel: 'bps' } : { recovery: '1', channel: 'bps' } }
+  return { path: '/admin/account-quality', query: scope === 'recovery' ? { recovery: '1' } : { create: '1' } }
+}
 const label = (status: QualityStatus) => t(`qualityOps.${statusKeys[status]}`)
 const date = (value: string) => new Date(value).toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 const time = (value: string) => new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })

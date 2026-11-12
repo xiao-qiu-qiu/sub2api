@@ -69,10 +69,12 @@ type QualityRuleTemplate struct {
 
 // QualityTemplateAccount is the account data a template sync needs.
 type QualityTemplateAccount struct {
-	Extra    map[string]any
-	Platform string
-	Type     string
-	ID       int64
+	Credentials     map[string]any
+	ParentAccountID *int64
+	Extra           map[string]any
+	Platform        string
+	Type            string
+	ID              int64
 }
 
 // QualityTemplateUpdate reports how an edit reached the template's existing rules.
@@ -216,12 +218,28 @@ func qualityRuleScope(cfg *PelicanTestConfig) string {
 }
 
 // Same rule as the quality-ops account picker: probes only run on real OpenAI OAuth accounts.
-func qualityProbeSupportsAccount(account QualityTemplateAccount) bool {
+func qualityProbeSupportsAccount(account QualityTemplateAccount, configs ...*PelicanTestConfig) bool {
 	if account.Platform != PlatformOpenAI || (account.Type != AccountTypeOAuth && account.Type != AccountTypeSetupToken) {
 		return false
 	}
 	synthetic, _ := account.Extra["synthetic_ui_test"].(bool)
-	return !synthetic
+	if synthetic {
+		return false
+	}
+	cfg := &PelicanTestConfig{QuestionKind: OpenAICodexStateProbeQuestionKind}
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+	return QualityStateProbeMatchesAccount(&Account{Platform: account.Platform, Type: account.Type,
+		Credentials: account.Credentials, Extra: account.Extra, ParentAccountID: account.ParentAccountID}, cfg)
+}
+
+func qualityTemplateSupportsAccount(account QualityTemplateAccount, cfg *PelicanTestConfig) bool {
+	if isOpenAICodexStateProbePlan(cfg) {
+		return qualityProbeSupportsAccount(account, cfg)
+	}
+	return QualityProbeMatchesAccount(&Account{Platform: account.Platform, Type: account.Type,
+		Credentials: account.Credentials, Extra: account.Extra, ParentAccountID: account.ParentAccountID}, cfg)
 }
 
 // Every plan gets its own copy: validation writes the model into the config.
@@ -440,7 +458,7 @@ func (s *ScheduledTestService) reincludeQualityTemplateAccount(ctx context.Conte
 		return failed
 	}
 	entry, err := repo.ReincludeAccount(ctx, t, accountID, func(ctx context.Context, account QualityTemplateAccount) (*ScheduledTestPlan, string) {
-		if isOpenAICodexStateProbePlan(t.PelicanConfig) && !qualityProbeSupportsAccount(account) {
+		if !qualityTemplateSupportsAccount(account, t.PelicanConfig) {
 			return nil, "unsupported_account"
 		}
 		plan := t.planFor(accountID)
@@ -542,7 +560,7 @@ func (s *ScheduledTestService) syncQualityTemplate(ctx context.Context, t *Quali
 		if _, ok := linked[account.ID]; ok {
 			continue
 		}
-		if isOpenAICodexStateProbePlan(t.PelicanConfig) && !qualityProbeSupportsAccount(account) {
+		if !qualityTemplateSupportsAccount(account, t.PelicanConfig) {
 			issues[account.ID] = "unsupported_account"
 			continue
 		}
@@ -668,7 +686,7 @@ func DescribeQualityTemplate(t *QualityRuleTemplate, accounts []QualityTemplateA
 		if covered[a.ID] || excluded[a.ID] {
 			continue
 		}
-		if isOpenAICodexStateProbePlan(t.PelicanConfig) && !qualityProbeSupportsAccount(a) {
+		if !qualityTemplateSupportsAccount(a, t.PelicanConfig) {
 			addIssue("unsupported_account")
 			continue
 		}

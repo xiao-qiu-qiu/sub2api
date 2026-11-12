@@ -115,6 +115,9 @@ func computeNextRun(cronExpr string, from time.Time) (time.Time, error) {
 
 func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 	if cfg := plan.PelicanConfig; cfg != nil {
+		if cfg.TestRoute != "" || cfg.TestMappedModel != "" {
+			return time.Time{}, fmt.Errorf("test_route is runtime result evidence, not a rule input")
+		}
 		cfg.RuleName = strings.TrimSpace(cfg.RuleName)
 		if utf8.RuneCountInString(cfg.RuleName) > 100 {
 			return time.Time{}, fmt.Errorf("rule name must be at most 100 characters")
@@ -135,8 +138,13 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		if cfg.TestChannel != "" && cfg.TestChannel != "account" && cfg.TestChannel != "bps" {
 			return time.Time{}, fmt.Errorf("invalid test channel")
 		}
-		if cfg.TestChannel == "bps" && (!isQualityAnswerQuestion(cfg.QuestionKind) || cfg.Quality == nil || cfg.Quality.Action != QualityActionObserveOnly) {
-			return time.Time{}, fmt.Errorf("BPS channel tests require an answer question and observation-only policy")
+		if cfg.TestChannel == "bps" {
+			if !isQualityAnswerQuestion(cfg.QuestionKind) || cfg.Quality == nil {
+				return time.Time{}, fmt.Errorf("BPS channel tests require an answer question and a quality policy")
+			}
+			if cfg.Quality.Action == QualityActionEnableBPS || cfg.Quality.Action == QualityActionOpenAITwoFAAdmission {
+				return time.Time{}, fmt.Errorf("BPS channel tests cannot use native-only quality actions")
+			}
 		}
 		if len(cfg.ModelIDs) > 0 {
 			if cfg.Quality == nil {

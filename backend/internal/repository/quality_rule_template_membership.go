@@ -31,6 +31,9 @@ const legacyOwnedRecoverySQL = `(COALESCE(pelican_config->'quality'->>'action_on
  ON t.id=l.template_id WHERE l.plan_id=scheduled_test_plans.id AND NOT t.enabled))`
 
 func legacyQualityRecoveryTx(ctx context.Context, tx *sql.Tx, plan *service.ScheduledTestPlan, state *qualityState) (bool, error) {
+	if matching, err := qualityProbeRouteMatchesTx(ctx, tx, plan, state); err != nil || !matching {
+		return false, err
+	}
 	q := plan.PelicanConfig.Quality
 	if q == nil || q.RunsOnPassed() || !q.AutoRestore || !qualityRecoveryProbeOwns(state) {
 		return false, nil
@@ -77,6 +80,26 @@ func legacyQualityRecoveryTx(ctx context.Context, tx *sql.Tx, plan *service.Sche
 // The caller holds the plan lock and account lock. Use exactly the selector's
 // predicates, on this transaction, instead of trusting an earlier sync snapshot.
 func qualityTemplatePlanMatchesTx(ctx context.Context, tx *sql.Tx, planID, accountID int64) (bool, error) {
+	// Route isolation also applies to standalone plans and legacy recovery.
+	var config []byte
+	if err := tx.QueryRowContext(ctx, `SELECT pelican_config FROM scheduled_test_plans WHERE id=$1`, planID).Scan(&config); err != nil {
+		return false, err
+	}
+	var cfg *service.PelicanTestConfig
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &cfg); err != nil {
+			return false, err
+		}
+	}
+	if cfg != nil && (cfg.QuestionKind == service.OpenAICodexStateProbeQuestionKind || cfg.TestChannel == "bps") {
+		state, err := readQualityState(ctx, tx, planID)
+		if err != nil {
+			return false, err
+		}
+		if matching, err := qualityProbeRouteMatchesTx(ctx, tx, &service.ScheduledTestPlan{ID: planID, AccountID: accountID, PelicanConfig: cfg}, &state); err != nil || !matching {
+			return false, err
+		}
+	}
 	var raw []byte
 	var enabled bool
 	err := tx.QueryRowContext(ctx, `SELECT t.account_filter,t.enabled FROM quality_rule_template_accounts l
@@ -138,7 +161,7 @@ func (r *qualityRuleTemplateRepository) SyncMembership(ctx context.Context, t *s
 		matching[id] = true
 	}
 	for _, m := range members {
-		if m.suspended == !matching[m.accountID] {
+		if m.suspended == !matching[m.accountID] && (t.PelicanConfig == nil || t.PelicanConfig.QuestionKind != service.OpenAICodexStateProbeQuestionKind && t.PelicanConfig.TestChannel != "bps") {
 			continue
 		}
 		if err := r.syncMember(ctx, t, m.planID); err != nil {

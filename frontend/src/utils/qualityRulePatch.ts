@@ -264,8 +264,10 @@ export function buildQualityRulePatch(
     config.quality.recovery_probe_interval_minutes = source.quality.recovery_probe_interval_minutes ?? 60
   }
 
-  // Explicit BPS observation includes giving up this rule's account actions.
-  if (config.test_channel === 'bps') config.quality.action = 'observe_only'
+  // The selected channel does not replace the independently configured action.
+  // Converting the native BPS lifecycle policy to a BPS answer test relinquishes
+  // that native-only action; other explicit account actions remain unchanged.
+  if (config.test_channel === 'bps' && config.quality.action === 'enable_bps') config.quality.action = 'observe_only'
   if (config.quality.action !== 'move_groups') delete config.quality.move_group_ids
   if (config.quality.action === 'observe_only') {
     config.quality.remove_group_ids = []

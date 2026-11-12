@@ -18,6 +18,7 @@ const QualityModelIsolationKey = "quality_model_isolation"
 // SetQualityProbeFinishedAt freezes the latest actual sample completion. Shared
 // comparison batches may be finalized later, but never move this boundary.
 func SetQualityProbeFinishedAt(plan *ScheduledTestPlan, results []*ScheduledTestResult) {
+	setQualityProbeModels(plan, results)
 	plan.QualityProbeFinishedAt = nil
 	plan.QualityProbeStartedAt = nil
 	plan.QualityProbeAdmissionChecked = len(results) > 0
