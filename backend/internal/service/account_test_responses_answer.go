@@ -52,7 +52,7 @@ type responsesTestEvent struct {
 // deltas must never reach Pelican's answer judge when the final output differs.
 func responsesGatewayAccountTestAnswer(wire string) (string, error) {
 	fail := func(reason string) error {
-		return fmt.Errorf("Responses gateway test response %s", reason)
+		return fmt.Errorf("responses gateway test response %s", reason)
 	}
 	var textEvents []responsesTestEvent
 	var completed *responsesTestEvent
@@ -180,7 +180,7 @@ func responsesGatewayAccountTestAnswer(wire string) (string, error) {
 				return "", fail("contains a final text part without text")
 			}
 			finalTexts[partKey{index, contentIndex}] = *part.Text
-			answer.WriteString(*part.Text)
+			_, _ = answer.WriteString(*part.Text)
 		}
 	}
 	type observedText struct {
@@ -231,7 +231,7 @@ func responsesGatewayAccountTestAnswer(wire string) (string, error) {
 				return "", fail("contains text deltas after text completion")
 			}
 			part.hasDelta = true
-			part.delta.WriteString(*event.Delta)
+			_, _ = part.delta.WriteString(*event.Delta)
 		} else {
 			if part.done != nil {
 				return "", fail("repeats text completion")

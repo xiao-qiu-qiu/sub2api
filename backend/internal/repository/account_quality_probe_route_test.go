@@ -32,7 +32,7 @@ func TestQualityProbeRouteMatchesPersistedAccountAndOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if tc.credentials == "" {
 				tc.credentials = `{}`
 			}
@@ -83,7 +83,7 @@ func TestQualityApplyOutcomeRejectsAccountRouteChangeUnderLock(t *testing.T) {
 func TestQualityTemplateMatchRejectsRouteBeforeStandaloneBypass(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectBegin()
 	tx, err := db.Begin()
 	require.NoError(t, err)
