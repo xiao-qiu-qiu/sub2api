@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 import source from '@/views/admin/SettingsView.vue?raw'
 import smartOpsSidebarSource from '@/components/settings/SmartOpsSidebarSettings.vue?raw'
+import excelBPSClientInstructionsSource from '@/views/admin/settings/ExcelBPSClientInstructions.vue?raw'
 import zh from '@/i18n/locales/zh'
 import en from '@/i18n/locales/en'
 import { buildFeatureSearchEntries, searchFeatures } from '../featureSearch'
@@ -33,6 +34,7 @@ describe('settings feature search', () => {
   it('keeps every indexed heading in its actual settings tab with a unique anchor', () => {
     const root = parse(source).descriptor.template!.ast!
     const smartOpsSidebarRoot = parse(smartOpsSidebarSource).descriptor.template!.ast!
+    const excelBPSClientInstructionsRoot = parse(excelBPSClientInstructionsSource).descriptor.template!.ast!
     type Node = typeof root.children[number]
     const anchors = new Map<string, string>()
     function visit(node: Node, tab = '') {
@@ -47,6 +49,9 @@ describe('settings feature search', () => {
       for (const child of node.children) visit(child, tab)
       if (node.tag === 'SmartOpsSidebarSettings') {
         for (const child of smartOpsSidebarRoot.children) visit(child, tab)
+      }
+      if (node.tag === 'ExcelBPSClientInstructions') {
+        for (const child of excelBPSClientInstructionsRoot.children) visit(child, tab)
       }
     }
     for (const child of root.children) visit(child)
