@@ -186,13 +186,24 @@ func TestExcelBPSImagePolicySettings(t *testing.T) {
 }
 
 func TestExcelBPSImagePolicyForwardCompactAndContinue(t *testing.T) {
-	for _, mode := range []string{"native", "relay"} {
+	for _, tt := range []struct {
+		name, mode, clientInstructions string
+	}{
+		{name: "native", mode: "native"},
+		{name: "relay", mode: "relay"},
+		{name: "native/custom_instructions", mode: "native", clientInstructions: "Use client context.\n\nKeep image descriptions concise."},
+		{name: "relay/custom_instructions", mode: "relay", clientInstructions: "Use client context.\n\nKeep image descriptions concise."},
+	} {
+		expectedInstructions := tt.clientInstructions
+		if expectedInstructions == "" {
+			expectedInstructions = basispoints.DefaultClientInstructions
+		}
 		for _, stream := range []bool{false, true} {
 			for _, failure := range []string{"", "compact_reject", "compact_failed", "compact_eof", "generation_reject", "invalid_compaction"} {
-				t.Run(fmt.Sprintf("%s/stream=%v/%s", mode, stream, failure), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/stream=%v/%s", tt.name, stream, failure), func(t *testing.T) {
 					svc := openAIClientToolsTestService(nil)
 					svc.cache = newImagePolicyMemoryCache()
-					repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeyExcelBPSImageRelayEnabled: "true", SettingKeyExcelBPSImageMode: mode, SettingKeyExcelBPSImageBaseURL: "https://images.example", SettingKeyExcelBPSImageLimitPolicy: "auto_compact"}}
+					repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeyExcelBPSImageRelayEnabled: "true", SettingKeyExcelBPSImageMode: tt.mode, SettingKeyExcelBPSImageBaseURL: "https://images.example", SettingKeyExcelBPSImageLimitPolicy: "auto_compact", SettingKeyExcelBPSClientInstructions: tt.clientInstructions}}
 					svc.settingService = NewSettingService(repo, svc.cfg)
 					_, pixels := nativeGatewayBody(t)
 					raw := bytes.ReplaceAll(imagePolicyRequest(t, 19, 2), []byte("data:image/png;base64,synthetic"), []byte("data:image/png;base64,"+base64.StdEncoding.EncodeToString(pixels)))
@@ -211,10 +222,15 @@ func TestExcelBPSImagePolicyForwardCompactAndContinue(t *testing.T) {
 							return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{\"openai_file_id\":\"file-policy\"}"))}, nil
 						}
 						phase++
+						protocol := gjson.GetBytes(b, "input.0.content.0.text").String()
+						require.Equal(t, "developer", gjson.GetBytes(b, "input.0.role").String())
+						require.Contains(t, protocol, expectedInstructions+"\n\n", "phase %d must preserve configured client instructions", phase)
+						if tt.clientInstructions != "" {
+							require.NotContains(t, protocol, basispoints.DefaultClientInstructions)
+						}
 						response := map[string]any{"id": "resp-policy", "status": "completed", "model": "gpt-6-astra", "output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "continued"}}}}, "usage": map[string]any{"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}
 						if phase == 1 {
 							require.Contains(t, string(b), "compaction_trigger")
-							require.Contains(t, gjson.GetBytes(b, "input.0.content.0.text").String(), "Do not call Excel, Office, workbook or connector tools.")
 							count := 0
 							for _, v := range gjson.GetBytes(b, "input").Array() {
 								for _, part := range v.Get("content").Array() {

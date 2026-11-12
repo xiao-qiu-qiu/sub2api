@@ -5,6 +5,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -28,6 +30,8 @@ import (
 
 func TestAPIContracts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	defaultClientInstructionsJSON, err := json.Marshal(basispoints.DefaultClientInstructions)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name       string
@@ -898,6 +902,8 @@ func TestAPIContracts(t *testing.T) {
 					"default_subscriptions": [],
 					"enable_model_fallback": false,
 					"excel_bps_enabled": true,
+					"excel_bps_client_instructions": ` + string(defaultClientInstructionsJSON) + `,
+					"excel_bps_default_client_instructions": ` + string(defaultClientInstructionsJSON) + `,
 					"excel_bps_image_mode": "native",
 					"excel_bps_image_base_url": "",
  "excel_bps_image_max_image_mib": 20,
@@ -1299,6 +1305,8 @@ func TestAPIContracts(t *testing.T) {
 					"default_subscriptions": [],
 					"enable_model_fallback": false,
 					"excel_bps_enabled": true,
+					"excel_bps_client_instructions": ` + string(defaultClientInstructionsJSON) + `,
+					"excel_bps_default_client_instructions": ` + string(defaultClientInstructionsJSON) + `,
 					"excel_bps_image_mode": "native",
 					"excel_bps_image_base_url": "",
  "excel_bps_image_max_image_mib": 20,

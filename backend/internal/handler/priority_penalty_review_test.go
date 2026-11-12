@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -52,9 +53,9 @@ func TestPriorityPenaltyReviewHandlerFailover(t *testing.T) {
 				repo.accounts = append(repo.accounts, service.Account{ID: id, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, GroupIDs: []int64{3131}, Priority: int(id), Concurrency: 1, Credentials: map[string]any{"access_token": fmt.Sprintf("test-token-%d", id), "chatgpt_account_id": fmt.Sprintf("test-account-%d", id)}, Extra: map[string]any{"openai_excel_bps": true}})
 			}
 			upstream := &excelBPSFailoverUpstream{answer: func(int) *http.Response {
-				// Both ingress routes use BPS's explicit rate-limit failover
-				// classification, rather than native Chat retry semantics.
-				response := excelBPS429("1")
+				// Keep the first account cooling beyond the shared wait budget so
+				// both ingress routes reach failover after the required 30s wait.
+				response := excelBPS429("60")
 				response.Body = io.NopCloser(strings.NewReader(`{"error":{"code":"basispoints_rate_limited","message":"previous synthetic supplier failure"}}`))
 				return response
 			}, onDo: func(int) { slots.failed = true }}
@@ -76,30 +77,35 @@ func TestPriorityPenaltyReviewHandlerFailover(t *testing.T) {
 				snapshot := gateway.PrioritySchedulingSnapshot()
 				return snapshot != nil && snapshot.HistoryReady
 			}, time.Second, time.Millisecond)
-			slots.beforeSecond = func() {
-				hard := penalty
-				hard.LatencyPenaltyMode = service.PriorityLatencyStop
-				require.NoError(t, settings.SavePrioritySchedulingConfig(context.Background(), hard))
-			}
-			requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			c, rec := newExcelBPSFailoverTestContext(requestCtx, false)
-			if chat {
-				body := `{"model":"gpt-6-astra","messages":[{"role":"user","content":"synthetic"}],"stream":false}`
-				c.Request.Body = io.NopCloser(strings.NewReader(body))
-				c.Request.ContentLength = int64(len(body))
-				c.Request.URL.Path = "/v1/chat/completions"
-				h.ChatCompletions(c)
-			} else {
-				h.Responses(c)
-			}
-			require.Contains(t, slots.acquired, int64(2), "precondition: first supplier failure must enter second account acquisition")
-			require.Equal(t, http.StatusServiceUnavailable, rec.Code, "late policy rejection must replace previous supplier error: %s", rec.Body.String())
-			require.Contains(t, rec.Body.String(), "temporarily_unavailable", "late policy rejection must replace previous supplier error")
-			require.NotContains(t, rec.Body.String(), "previous synthetic supplier failure")
-			require.Equal(t, "5", rec.Header().Get("Retry-After"))
-			require.Equal(t, []int64{1}, upstream.calls(), "second stopped account must never receive an upstream request")
-			require.Contains(t, slots.released, int64(2), "second account slot must be released")
+			// Keep gateway background workers outside the request's fake clock.
+			synctest.Test(t, func(t *testing.T) {
+				slots.beforeSecond = func() {
+					hard := penalty
+					hard.LatencyPenaltyMode = service.PriorityLatencyStop
+					require.NoError(t, settings.SavePrioritySchedulingConfig(context.Background(), hard))
+				}
+				requestCtx, cancel := context.WithTimeout(context.Background(), service.OpenAIAccountCooldownWait+5*time.Second)
+				defer cancel()
+				c, rec := newExcelBPSFailoverTestContext(requestCtx, false)
+				started := time.Now()
+				if chat {
+					body := `{"model":"gpt-6-astra","messages":[{"role":"user","content":"synthetic"}],"stream":false}`
+					c.Request.Body = io.NopCloser(strings.NewReader(body))
+					c.Request.ContentLength = int64(len(body))
+					c.Request.URL.Path = "/v1/chat/completions"
+					h.ChatCompletions(c)
+				} else {
+					h.Responses(c)
+				}
+				require.GreaterOrEqual(t, time.Since(started), service.OpenAIAccountCooldownWait, "failover must honor the original account's cooldown wait")
+				require.Contains(t, slots.acquired, int64(2), "precondition: first supplier failure must enter second account acquisition")
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code, "late policy rejection must replace previous supplier error: %s", rec.Body.String())
+				require.Contains(t, rec.Body.String(), "temporarily_unavailable", "late policy rejection must replace previous supplier error")
+				require.NotContains(t, rec.Body.String(), "previous synthetic supplier failure")
+				require.Equal(t, "5", rec.Header().Get("Retry-After"))
+				require.Equal(t, []int64{1}, upstream.calls(), "second stopped account must never receive an upstream request")
+				require.Contains(t, slots.released, int64(2), "second account slot must be released")
+			})
 		})
 	}
 }

@@ -81,7 +81,9 @@ func TestClientInstructionsPreserveMandatoryConstraints(t *testing.T) {
 			source := object{"model": "gpt-6-astra", "input": "Continue",
 				"tools": []any{object{"type": "web_search"}}, "text": object{"format": testStructuredFormat()}}
 			if withTools {
-				source["tools"] = append(source["tools"].([]any), exampleFunction("read_workbook", "range"))
+				tools, ok := source["tools"].([]any)
+				require.True(t, ok)
+				source["tools"] = append(tools, exampleFunction("read_workbook", "range"))
 			}
 			raw, err := json.Marshal(source)
 			require.NoError(t, err)
@@ -130,7 +132,9 @@ func TestClientInstructionsSkipAllInjectedInstructions(t *testing.T) {
 			source := object{"model": "gpt-6-astra", "instructions": "Request instructions", "input": clientHistory,
 				"tools": []any{object{"type": "web_search"}}, "text": object{"format": testStructuredFormat()}}
 			if withTools {
-				source["tools"] = append(source["tools"].([]any), exampleFunction("read_workbook", "range"))
+				tools, ok := source["tools"].([]any)
+				require.True(t, ok)
+				source["tools"] = append(tools, exampleFunction("read_workbook", "range"))
 			}
 			raw, err := json.Marshal(source)
 			require.NoError(t, err)

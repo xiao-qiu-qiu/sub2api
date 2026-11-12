@@ -70,7 +70,10 @@ func (s *SettingService) GetExcelBPSClientInstructions(ctx context.Context) stri
 		s.excelBPSClientInstructionsMu.Lock()
 		defer s.excelBPSClientInstructionsMu.Unlock()
 		if generation != s.excelBPSClientInstructionsGen {
-			return s.excelBPSClientInstructionsCache.Load().(*cachedExcelBPSClientInstructions).value, nil
+			if cached, ok := s.excelBPSClientInstructionsCache.Load().(*cachedExcelBPSClientInstructions); ok {
+				return cached.value, nil
+			}
+			return basispoints.DefaultClientInstructions, nil
 		}
 		ttl := excelBPSClientInstructionsCacheTTL
 		if err != nil && !errors.Is(err, ErrSettingNotFound) {
@@ -84,7 +87,11 @@ func (s *SettingService) GetExcelBPSClientInstructions(ctx context.Context) stri
 		s.storeExcelBPSClientInstructionsCache(value, ttl)
 		return value, nil
 	})
-	return result.(string)
+	value, ok := result.(string)
+	if !ok {
+		return basispoints.DefaultClientInstructions
+	}
+	return value
 }
 
 // persistSystemSettingsUpdates keeps the prompt cache ordered with successful writes.

@@ -271,9 +271,10 @@ func TestManualAccountTestSkipsPriorityLatencyAdmissionReads(t *testing.T) {
 			s := priorityGateway(cfg, &priorityReaderStub{})
 			s.accountRepo = repo
 			ctx := WithPrioritySchedulingObservation(context.Background(), &groupID, model, "/v1/responses")
-			if kind == "manual" {
+			switch kind {
+			case "manual":
 				ctx = WithManualAccountTest(ctx)
-			} else if kind == "quality_probe_only" {
+			case "quality_probe_only":
 				ctx = context.WithValue(ctx, qualityProbeContextKey{}, true)
 			}
 			got, err := s.beginPriorityLatencyTurn(ctx, nil, account, model)

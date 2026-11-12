@@ -46,11 +46,11 @@ func newExcelBPSClientInstructionsService(values map[string]string) (*SettingSer
 
 func TestExcelBPSClientInstructionsDefaults(t *testing.T) {
 	var nilService *SettingService
-	require.Equal(t, basispoints.DefaultClientInstructions, nilService.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, basispoints.DefaultClientInstructions, nilService.GetExcelBPSClientInstructions(context.Background()))
 	require.Equal(t, basispoints.DefaultClientInstructions, (&SettingService{}).GetExcelBPSClientInstructions(context.Background()))
 	for _, stored := range []string{"", " \n\t　", basispoints.DefaultClientInstructions, strings.Repeat("界", ExcelBPSClientInstructionsMaxLength+1)} {
 		svc, _ := newExcelBPSClientInstructionsService(map[string]string{SettingKeyExcelBPSClientInstructions: stored})
-		require.Equal(t, basispoints.DefaultClientInstructions, svc.GetExcelBPSClientInstructions(nil))
+		require.Equal(t, basispoints.DefaultClientInstructions, svc.GetExcelBPSClientInstructions(context.Background()))
 		settings, err := svc.GetAllSettings(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, basispoints.DefaultClientInstructions, settings.ExcelBPSClientInstructions)
@@ -59,7 +59,7 @@ func TestExcelBPSClientInstructionsDefaults(t *testing.T) {
 	for _, readErr := range []error{ErrSettingNotFound, errors.New("database unavailable")} {
 		svc, repo := newExcelBPSClientInstructionsService(nil)
 		repo.read = func(context.Context) (string, error) { return "", readErr }
-		require.Equal(t, basispoints.DefaultClientInstructions, svc.GetExcelBPSClientInstructions(nil))
+		require.Equal(t, basispoints.DefaultClientInstructions, svc.GetExcelBPSClientInstructions(context.Background()))
 	}
 }
 
@@ -119,16 +119,16 @@ func TestExcelBPSClientInstructionsRuntimeCacheRefreshAndFailure(t *testing.T) {
 	require.EqualValues(t, 1, repo.reads.Load())
 	svc.storeExcelBPSClientInstructionsCache("old prompt", -time.Second)
 	repo.read = func(context.Context) (string, error) { return "remote update", nil }
-	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(context.Background()))
 	svc.storeExcelBPSClientInstructionsCache("remote update", -time.Second)
 	repo.read = func(context.Context) (string, error) { return "", errors.New("read failed") }
-	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(context.Background()))
 	require.EqualValues(t, 3, repo.reads.Load())
-	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(context.Background()))
 	require.EqualValues(t, 3, repo.reads.Load(), "errors should use a short retry cache")
 	repo.writeErr = errors.New("write failed")
 	require.Error(t, svc.UpdateSettings(context.Background(), &SystemSettings{ExcelBPSClientInstructions: "unsaved"}))
-	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, "remote update", svc.GetExcelBPSClientInstructions(context.Background()))
 	require.Equal(t, "old prompt", repo.values[SettingKeyExcelBPSClientInstructions])
 }
 
@@ -165,5 +165,5 @@ func TestExcelBPSClientInstructionsSaveSupersedesInflightRead(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("runtime read did not complete")
 	}
-	require.Equal(t, "fresh", svc.GetExcelBPSClientInstructions(nil))
+	require.Equal(t, "fresh", svc.GetExcelBPSClientInstructions(context.Background()))
 }
