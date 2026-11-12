@@ -72,10 +72,10 @@ func openAIImageRequestRejection(ctx context.Context, account *Account, requeste
 	if model == "" {
 		return ""
 	}
-	if !account.IsModelSupported(model) || account.modelCapabilityRejectedForRequest(ctx, model) {
+	if !account.IsModelSupported(model) || (!isManualAccountTest(ctx) && account.modelCapabilityRejectedForRequest(ctx, model)) {
 		return "image_model_not_supported"
 	}
-	if account.isModelRateLimitedWithContext(WithOpenAIImageGenerationIntent(ctx), model) {
+	if !isManualAccountTest(ctx) && account.isModelRateLimitedWithContext(WithOpenAIImageGenerationIntent(ctx), model) {
 		return "image_model_rate_limited"
 	}
 	return ""

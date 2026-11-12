@@ -1451,6 +1451,7 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	}
 
 	// Use AccountTestService to test the account with SSE streaming
+	c.Request = c.Request.WithContext(service.WithManualAccountTest(c.Request.Context()))
 	if err := h.accountTestService.TestAccountConnection(c, accountID, req.ModelID, req.Prompt, req.Mode, opts); err != nil {
 		// Error already sent via SSE, just log
 		return
@@ -1477,6 +1478,7 @@ func (h *AccountHandler) PelicanTest(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	c.Request = c.Request.WithContext(service.WithManualAccountTest(c.Request.Context()))
 	if err := h.accountTestService.TestPelicanAccountConnection(c, accountID, req.ModelID, req.Prompt, req.ReasoningEffort); err != nil {
 		return
 	}

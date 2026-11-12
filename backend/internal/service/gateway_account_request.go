@@ -17,7 +17,8 @@ func beginAccountGatewayRequest(ctx context.Context, account *Account) (context.
 		ctx = turns.bind(ctx)
 	}
 	ctx = withGatewayRequestStart(ctx)
-	if account == nil {
+	// Manual diagnostics remain usable while business requests are isolated.
+	if account == nil || isManualAccountTest(ctx) {
 		return ctx, func() {}
 	}
 	return accountrequest.Default.Track(ctx, account.ID)

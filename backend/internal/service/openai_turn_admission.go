@@ -318,11 +318,11 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 		return nil, denyOpenAITurn("account_binding_changed")
 	}
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	if authoritativeRead && !latest.IsSchedulableWithContext(ctx) {
+	if authoritativeRead && !isManualAccountTest(ctx) && !latest.IsSchedulableWithContext(ctx) {
 		return nil, denyOpenAITurn("account_ineligible")
 	}
 	if authoritativeRead && latest.IsShadow() && (parent == nil || parent.IsShadow() ||
-		!parent.IsOpenAIOAuth() || !parent.IsCredentialUsableForShadow()) {
+		!parent.IsOpenAIOAuth() || (!isManualAccountTest(ctx) && !parent.IsCredentialUsableForShadow())) {
 		return nil, denyOpenAITurn("credential_parent_ineligible")
 	}
 	// Simple mode deliberately schedules across the whole platform and does
@@ -338,7 +338,7 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 	}
 	// A new local block installed before its DB write must not be cleared by an
 	// older snapshot. Unlike the scheduler fast path, this is a pure read.
-	if raw, ok := s.openaiAccountRuntimeBlockUntil.Load(latest.ID); ok {
+	if raw, ok := s.openaiAccountRuntimeBlockUntil.Load(latest.ID); ok && !isManualAccountTest(ctx) {
 		if until, valid := raw.(time.Time); valid && time.Now().Before(until) {
 			return nil, denyOpenAITurn("account_runtime_blocked")
 		}
@@ -412,19 +412,19 @@ func (s *OpenAIGatewayService) admitOpenAITurnWithGroup(
 	}
 	// Preserve the cause of a model-not-found cooldown before the generic
 	// runtime/rate-limit checks erase it.
-	if latest.qualityModelBlocked(ctx, outboundModel) {
+	if !isManualAccountTest(ctx) && latest.qualityModelBlocked(ctx, outboundModel) {
 		return nil, denyOpenAITurn("model_runtime_blocked")
 	}
-	if latest.modelCapabilityRejected(outboundModel) {
+	if !isManualAccountTest(ctx) && latest.modelCapabilityRejected(outboundModel) {
 		return nil, denyOpenAITurn("model_not_supported")
 	}
 	if reason := openAIImageRequestRejection(ctx, latest, outboundModel); reason != "" {
 		return nil, denyOpenAITurn(reason)
 	}
-	if s.getOpenAIAccountModelTransientState().isBlocked(latest.ID, openAIAccountModelTransientModel(outboundModel), time.Now()) {
+	if !isManualAccountTest(ctx) && s.getOpenAIAccountModelTransientState().isBlocked(latest.ID, openAIAccountModelTransientModel(outboundModel), time.Now()) {
 		return nil, denyOpenAITurn("model_runtime_blocked")
 	}
-	if latest.IsOpenAI() && (latest.isRateLimitActiveForKey(outboundModel) ||
+	if !isManualAccountTest(ctx) && latest.IsOpenAI() && (latest.isRateLimitActiveForKey(outboundModel) ||
 		(openAIImageGenerationRateLimitApplies(ctx, outboundModel, outboundModel) &&
 			latest.isRateLimitActiveForKey(openAIImageGenerationRateLimitKey))) {
 		return nil, denyOpenAITurn("model_rate_limited")

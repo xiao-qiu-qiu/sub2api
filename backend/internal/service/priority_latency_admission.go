@@ -285,6 +285,9 @@ func (s *OpenAIGatewayService) CheckPriorityLatencySelection(ctx context.Context
 // retries retain the marker; a penalty learned after output starts cannot abort
 // or replay that already admitted turn. A new WS turn explicitly checks again.
 func (s *OpenAIGatewayService) beginPriorityLatencyTurn(ctx context.Context, c *gin.Context, account *Account, model string) (context.Context, error) {
+	if isManualAccountTest(ctx) {
+		return ctx, nil
+	}
 	if turn, ok := ctx.Value(priorityLatencyTurnKey{}).(*priorityLatencyTurn); ok && turn != nil && account != nil && turn.accountID == account.ID {
 		turn.mu.Lock()
 		defer turn.mu.Unlock()

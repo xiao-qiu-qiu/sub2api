@@ -149,6 +149,8 @@ English protocol details and client constraints:
 
 ### 连接测试提示词
 
+管理员手动运行「测试账号连接」（含 BPS 工具往返）或 Pelican 测试时，忽略账号停调、过期、配额/过载冷却、临时停调，以及本地模型限流和质量隔离，直接验证所选账号的上游响应。测试不会仅因绕过这些状态就重新开启账号调度。定时探针和业务请求仍按原有准入规则执行；账号与授权必须存在，实际协议路由和上游错误仍如实校验。
+
 账号管理的「测试账号连接」在常规文本模式提供「注入内置提示词」开关，默认关闭。BPS 关闭时只发送填写的测试文本；开启时加入要求返回文本、不要调用 Excel / Office / 工作簿或连接器工具的协议说明。重新打开测试窗口或更换账号会恢复关闭。正常 BPS 转发、工具往返测试和未传入测试选项的后台探测保持原有行为。
 
 普通 Codex 测试开启此选项时，使用 [Codex CLI 0.167.1](https://github.com/openai/codex/releases/tag/rust-v0.167.1) 内置默认代理 `gpt-6.1-sol` 的完整提示词。来源为该版本 `models.json` 的 `model_messages.instructions_template`，已与仓库快照逐字核对，并以 SHA-256 回归测试固定；关闭时仍发送空 `instructions`。
