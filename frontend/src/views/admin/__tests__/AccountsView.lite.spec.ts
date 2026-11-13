@@ -3,6 +3,8 @@ import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 
 import AccountsView from '../AccountsView.vue'
+import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import CapacityBadge from '@/components/account/CapacityBadge.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 
@@ -19,6 +21,7 @@ const {
   getAllProxies,
   getAllGroups,
   refreshCredentials,
+  translate,
   showError,
   showWarning
 } = vi.hoisted(() => ({
@@ -34,6 +37,7 @@ const {
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn(),
   refreshCredentials: vi.fn(),
+  translate: vi.fn((key: string, _values?: Record<string, unknown>) => key),
   showError: vi.fn(),
   showWarning: vi.fn()
 }))
@@ -71,7 +75,7 @@ vi.mock('@/stores/auth', () => ({
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
-  return { ...actual, useI18n: () => ({ t: (key: string) => key }) }
+  return { ...actual, useI18n: () => ({ t: translate }) }
 })
 
 const DataTableStub = defineComponent({
@@ -189,6 +193,7 @@ describe('admin AccountsView lite account list', () => {
     getUpstreamBillingRatesWithEtag.mockReset().mockResolvedValue({ notModified: true, data: null })
     probeUpstreamBilling.mockReset()
     refreshCredentials.mockReset()
+    translate.mockReset().mockImplementation(key => key)
     showError.mockReset()
     showWarning.mockReset()
   })
@@ -365,6 +370,52 @@ describe('admin AccountsView lite account list', () => {
       sort_by: 'current_concurrency', sort_order: 'desc', lite: '1'
     }), expect.objectContaining({ etag: null }))
     expect(wrapper.getComponent(DataTableStub).props('data')).toEqual([refreshed])
+    wrapper.unmount()
+  })
+
+  it('refreshes capacity congestion and queue counts even when concurrency stays unchanged', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
+    const queueLabel = 'admin.accounts.capacity.queuedRequests'
+    translate.mockImplementation((key, values) => key === queueLabel ? `${key}: ${values?.count}` : key)
+    const row = { ...listRow, current_concurrency: 2, current_waiting: 0 }
+    listAccounts.mockResolvedValue({ items: [row], total: 1, page: 1, page_size: 20, pages: 1 })
+    for (const [index, refreshed] of [
+      { ...row, current_waiting: 3 },
+      { ...row, current_waiting: 0 },
+      { ...row, current_concurrency: 1, current_waiting: 3 }
+    ].entries()) {
+      listWithEtag.mockResolvedValueOnce({ notModified: false, etag: `queue-${index}`, data: {
+        items: [refreshed], total: 1, page: 1, page_size: 20, pages: 1
+      } })
+    }
+    const wrapper = mountView()
+    await flushPromises()
+    const capacity = () => wrapper.getComponent(AccountCapacityCell)
+    const badge = () => capacity().getComponent(CapacityBadge)
+    expect(badge().classes()).toContain('bg-yellow-100')
+    expect(capacity().text()).not.toContain(queueLabel)
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+    expect(listWithEtag).toHaveBeenCalledTimes(1)
+    expect(badge().classes()).toContain('bg-red-100')
+    expect(capacity().text()).toContain(`${queueLabel}: 3`)
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+    expect(listWithEtag).toHaveBeenCalledTimes(2)
+    expect(badge().classes()).toContain('bg-yellow-100')
+    expect(badge().classes()).not.toContain('bg-red-100')
+    expect(capacity().text()).not.toContain(queueLabel)
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+    expect(listWithEtag).toHaveBeenCalledTimes(3)
+    expect(badge().classes()).toContain('bg-yellow-100')
+    expect(badge().classes()).not.toContain('bg-red-100')
+    expect(capacity().text()).not.toContain(queueLabel)
     wrapper.unmount()
   })
 

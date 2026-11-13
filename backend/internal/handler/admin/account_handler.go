@@ -229,6 +229,7 @@ type AccountWithConcurrency struct {
 	*dto.Account
 	simpleMode         bool                          `json:"-"`
 	CurrentConcurrency int                           `json:"current_concurrency"`
+	CurrentWaiting     int                           `json:"current_waiting"`
 	AccountRotation    *service.AccountRotationState `json:"account_rotation,omitempty"`
 	SchedulerScore     *AccountSchedulerScore        `json:"scheduler_score,omitempty"`
 	SchedulerScores    []AccountSchedulerGroupScore  `json:"scheduler_scores,omitempty"`
@@ -246,6 +247,7 @@ type AccountWithConcurrency struct {
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
 	CurrentConcurrency int                           `json:"current_concurrency"`
+	CurrentWaiting     int                           `json:"current_waiting"`
 	AccountRotation    *service.AccountRotationState `json:"account_rotation,omitempty"`
 	SchedulerScore     *AccountSchedulerScore        `json:"scheduler_score,omitempty"`
 	SchedulerScores    []AccountSchedulerGroupScore  `json:"scheduler_scores,omitempty"`
@@ -424,8 +426,11 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	}
 
 	if h.concurrencyService != nil {
-		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
-			item.CurrentConcurrency = counts[account.ID]
+		if loads, err := h.concurrencyService.GetAccountsLoadBatch(ctx, []service.AccountWithConcurrency{{ID: account.ID, MaxConcurrency: account.Concurrency}}); err == nil {
+			if load := loads[account.ID]; load != nil {
+				item.CurrentConcurrency = load.CurrentConcurrency
+				item.CurrentWaiting = max(0, load.WaitingCount)
+			}
 		}
 		if states, err := h.concurrencyService.GetAccountRotationStates(ctx, []int64{account.ID}); err == nil {
 			item.AccountRotation = states[account.ID]
@@ -779,6 +784,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	}
 
 	var rotationStates map[int64]*service.AccountRotationState
+	var accountLoads map[int64]*service.AccountLoadInfo
 	var windowCosts map[int64]float64
 	var activeSessions map[int64]int
 	var rpmCounts map[int64]int
@@ -797,11 +803,21 @@ func (h *AccountHandler) List(c *gin.Context) {
 		schedulerScores, schedulerGroupScores = h.buildOpenAIAccountSchedulerScores(c.Request.Context(), accounts, schedulerFilterPool)
 	}
 
-	// 始终获取并发数（Redis ZCARD，极低开销）
+	// 一次批查当前页的并发和等待数；并发排序时保留排序用的快照。
 	if h.concurrencyService != nil {
+		loadReq := make([]service.AccountWithConcurrency, len(accounts))
+		for i := range accounts {
+			loadReq[i] = service.AccountWithConcurrency{ID: accounts[i].ID, MaxConcurrency: accounts[i].Concurrency}
+		}
+		if loads, err := h.concurrencyService.GetAccountsLoadBatch(c.Request.Context(), loadReq); err == nil {
+			accountLoads = loads
+		}
 		if concurrencyCounts == nil {
-			if cc, ccErr := h.concurrencyService.GetAccountConcurrencyBatch(c.Request.Context(), accountIDs); ccErr == nil && cc != nil {
-				concurrencyCounts = cc
+			concurrencyCounts = make(map[int64]int, len(accountLoads))
+			for id, load := range accountLoads {
+				if load != nil {
+					concurrencyCounts[id] = load.CurrentConcurrency
+				}
 			}
 		}
 		if states, err := h.concurrencyService.GetAccountRotationStates(c.Request.Context(), accountIDs); err == nil {
@@ -897,6 +913,9 @@ func (h *AccountHandler) List(c *gin.Context) {
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
 		}
+		if load := accountLoads[acc.ID]; load != nil {
+			item.CurrentWaiting = max(0, load.WaitingCount)
+		}
 
 		// 添加窗口费用（仅当启用时）
 		if windowCosts != nil {
@@ -944,6 +963,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 			compact[i] = AccountListItemWithConcurrency{
 				AccountListItem:    dto.AccountListItemFromAccount(item.Account),
 				CurrentConcurrency: item.CurrentConcurrency,
+				CurrentWaiting:     item.CurrentWaiting,
 				AccountRotation:    item.AccountRotation,
 				SchedulerScore:     item.SchedulerScore,
 				SchedulerScores:    item.SchedulerScores,

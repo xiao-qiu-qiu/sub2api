@@ -1597,6 +1597,7 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
     current.extra?.upstream_billing_rate_sync_enabled !== next.extra?.upstream_billing_rate_sync_enabled ||
     current.extra?.upstream_billing_provider !== next.extra?.upstream_billing_provider ||
     current.current_concurrency !== next.current_concurrency ||
+    current.current_waiting !== next.current_waiting ||
     JSON.stringify(current.account_rotation) !== JSON.stringify(next.account_rotation) ||
     JSON.stringify(current.extra?.auto_config_concurrency) !== JSON.stringify(next.extra?.auto_config_concurrency) ||
     current.current_window_cost !== next.current_window_cost ||
@@ -2462,6 +2463,7 @@ const accountMatchesCurrentFilters = (account: Account) => {
 const mergeRuntimeFields = (oldAccount: Account, updatedAccount: Account): Account => ({
   ...updatedAccount,
   current_concurrency: updatedAccount.current_concurrency ?? oldAccount.current_concurrency,
+  current_waiting: updatedAccount.current_waiting ?? oldAccount.current_waiting,
   current_window_cost: updatedAccount.current_window_cost ?? oldAccount.current_window_cost,
   active_sessions: updatedAccount.active_sessions ?? oldAccount.active_sessions
 })

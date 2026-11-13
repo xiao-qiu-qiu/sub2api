@@ -33,6 +33,17 @@ func (c *accountRotationAdminCache) GetAccountConcurrencyBatch(_ context.Context
 	return counts, nil
 }
 
+func (c *accountRotationAdminCache) GetAccountsLoadBatch(_ context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
+	ids := make([]int64, len(accounts))
+	loads := make(map[int64]*service.AccountLoadInfo, len(accounts))
+	for i, account := range accounts {
+		ids[i] = account.ID
+		loads[account.ID] = &service.AccountLoadInfo{AccountID: account.ID, CurrentConcurrency: 2}
+	}
+	c.concurrencyBatches = append(c.concurrencyBatches, ids)
+	return loads, nil
+}
+
 func (c *accountRotationAdminCache) CheckAccountRotationBatch(_ context.Context, ids []int64, _ service.AccountRotationPolicy) (map[int64]*service.AccountRotationState, error) {
 	c.rotationBatches = append(c.rotationBatches, append([]int64(nil), ids...))
 	return c.states, c.err

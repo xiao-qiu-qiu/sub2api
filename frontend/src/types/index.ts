@@ -1475,6 +1475,7 @@ export interface Account {
   concurrency: number
   load_factor?: number | null
   current_concurrency?: number // Real-time concurrency count from Redis
+  current_waiting?: number // Requests waiting for this account's concurrency slots
   account_rotation?: {
     phase: 'ready' | 'working' | 'draining' | 'resting'
     automatic_enabled?: boolean
