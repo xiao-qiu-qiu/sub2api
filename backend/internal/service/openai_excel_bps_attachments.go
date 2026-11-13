@@ -77,6 +77,7 @@ func (s *OpenAIGatewayService) uploadExcelBPSAttachment(ctx context.Context, acc
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		requestRejected := s.handleExcelBPSRequestRejected(ctx, account, raw)
 		if accessFailure := s.handleExcelBPSAccessState(ctx, account, resp.StatusCode, resp.Header, raw); accessFailure != nil {
 			failure := excelBPSAttachmentFailure("attachment_http", "upstream_access_state", resp.StatusCode, nil)
 			failure.status = accessFailure.ClientStatusCode
@@ -85,13 +86,18 @@ func (s *OpenAIGatewayService) uploadExcelBPSAttachment(ctx context.Context, acc
 		if resp.StatusCode == http.StatusTooManyRequests {
 			s.handleExcelBPSRateLimit(ctx, account, resp.Header.Get("Retry-After"), raw)
 		}
-		s.handleExcelBPSUnauthorized(ctx, account, resp.StatusCode, resp.Header, raw, token)
+		if !requestRejected {
+			s.handleExcelBPSUnauthorized(ctx, account, resp.StatusCode, resp.Header, raw, token)
+		}
 		status := resp.StatusCode
 		if status < 400 || status > 599 {
 			status = http.StatusBadGateway
 		}
 		failure := excelBPSAttachmentFailure("attachment_http", "upstream_http", resp.StatusCode, nil)
 		failure.status, failure.retryAfter = status, resp.Header.Get("Retry-After")
+		if requestRejected {
+			failure.kind = "upstream_request_rejected"
+		}
 		return "", failure
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))

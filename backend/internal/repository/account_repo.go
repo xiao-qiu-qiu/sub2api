@@ -104,12 +104,15 @@ func stripCodexFingerprintSeedFromExtraUpdate(extra map[string]any) map[string]a
 	_, seedExists := extra["codex_fingerprint_seed"]
 	_, admissionExists := extra[service.OpenAITwoFAAdmissionExtraKey]
 	_, recoveryExists := extra[immediateOAuthRecoveryTaskExtraKey]
-	if !seedExists && !admissionExists && !recoveryExists {
+	_, rejectionExists := extra[service.BPSRequestRejectedExtraKey]
+	_, rejectionGenerationExists := extra[service.BPSRequestRejectedGenerationExtraKey]
+	if !seedExists && !admissionExists && !recoveryExists && !rejectionExists && !rejectionGenerationExists {
 		return extra
 	}
 	stripped := make(map[string]any, len(extra)-1)
 	for key, value := range extra {
-		if key == "codex_fingerprint_seed" || key == service.OpenAITwoFAAdmissionExtraKey || key == immediateOAuthRecoveryTaskExtraKey {
+		if key == "codex_fingerprint_seed" || key == service.OpenAITwoFAAdmissionExtraKey || key == immediateOAuthRecoveryTaskExtraKey ||
+			key == service.BPSRequestRejectedExtraKey || key == service.BPSRequestRejectedGenerationExtraKey {
 			continue
 		}
 		stripped[key] = value
@@ -895,6 +898,17 @@ func lockAndMergeAccountProbeExtra(
 		extra = preserveCommittedCodexUsage(extra, currentExtra)
 	}
 	extra = service.MergeExcelBPS403Marker(extra, currentExtra)
+	// The rejection and reset generation are server-owned. Preserve the latest
+	// committed values across full saves, credential refreshes and re-logins.
+	for _, key := range []string{service.BPSRequestRejectedExtraKey, service.BPSRequestRejectedGenerationExtraKey} {
+		delete(extra, key)
+		if value, exists := currentExtra[key]; exists {
+			if extra == nil {
+				extra = make(map[string]any)
+			}
+			extra[key] = value
+		}
+	}
 	// Isolation is server-owned. A normal save must use the latest value read
 	// under this row lock, including absence after a legitimate restoration.
 	// Never revive, erase or replace it from a client/service snapshot.
@@ -2435,6 +2449,7 @@ func (r *accountRepository) schedulableAccountsQuery(now time.Time) *dbent.Accou
 		Where(
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.SchedulableEQ(true),
+			bpsRequestNotRejectedPredicate(),
 			tempUnschedulablePredicate(),
 			notExpiredPredicate(now),
 			dbaccount.Or(dbaccount.OverloadUntilIsNil(), dbaccount.OverloadUntilLTE(now)),
@@ -2493,6 +2508,7 @@ func (r *accountRepository) ListSchedulableCapacityByGroupIDs(ctx context.Contex
 			AND a.deleted_at IS NULL
 			AND a.status = $2
 			AND a.schedulable = TRUE
+			AND COALESCE(a.extra -> 'openai_bps_request_rejected' -> 'blocked', 'false'::jsonb) <> 'true'::jsonb
 			AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= $3)
 			AND (a.expires_at IS NULL OR a.expires_at > $3 OR a.auto_pause_on_expired = FALSE)
 			AND (a.overload_until IS NULL OR a.overload_until <= $3)
@@ -2541,6 +2557,7 @@ func (r *accountRepository) ListSchedulableByPlatform(ctx context.Context, platf
 			dbaccount.PlatformEQ(platform),
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.SchedulableEQ(true),
+			bpsRequestNotRejectedPredicate(),
 			tempUnschedulablePredicate(),
 			notExpiredPredicate(now),
 			dbaccount.Or(dbaccount.OverloadUntilIsNil(), dbaccount.OverloadUntilLTE(now)),
@@ -2575,6 +2592,7 @@ func (r *accountRepository) ListSchedulableByPlatforms(ctx context.Context, plat
 			dbaccount.PlatformIn(platforms...),
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.SchedulableEQ(true),
+			bpsRequestNotRejectedPredicate(),
 			tempUnschedulablePredicate(),
 			notExpiredPredicate(now),
 			dbaccount.Or(dbaccount.OverloadUntilIsNil(), dbaccount.OverloadUntilLTE(now)),
@@ -2595,6 +2613,7 @@ func (r *accountRepository) ListSchedulableUngroupedByPlatform(ctx context.Conte
 			dbaccount.PlatformEQ(platform),
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.SchedulableEQ(true),
+			bpsRequestNotRejectedPredicate(),
 			dbaccount.Not(dbaccount.HasAccountGroups()),
 			tempUnschedulablePredicate(),
 			notExpiredPredicate(now),
@@ -2619,6 +2638,7 @@ func (r *accountRepository) ListSchedulableUngroupedByPlatforms(ctx context.Cont
 			dbaccount.PlatformIn(platforms...),
 			dbaccount.StatusEQ(service.StatusActive),
 			dbaccount.SchedulableEQ(true),
+			bpsRequestNotRejectedPredicate(),
 			dbaccount.Not(dbaccount.HasAccountGroups()),
 			tempUnschedulablePredicate(),
 			notExpiredPredicate(now),
@@ -2670,6 +2690,7 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 	preds := []dbpredicate.Account{
 		dbaccount.StatusEQ(service.StatusActive),
 		dbaccount.SchedulableEQ(true),
+		bpsRequestNotRejectedPredicate(),
 		dbaccount.PlatformIn(platforms...),
 	}
 	if !includeGrouped {
@@ -3856,7 +3877,7 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 		preds = append(preds, dbaccount.PlatformIn(opts.platforms...))
 	}
 	if opts.schedulable {
-		preds = append(preds, dbaccount.SchedulableEQ(true))
+		preds = append(preds, dbaccount.SchedulableEQ(true), bpsRequestNotRejectedPredicate())
 		if !opts.ignoreTransientState {
 			now := time.Now()
 			preds = append(preds,

@@ -1437,6 +1437,11 @@ export interface Account {
   opencode_go_usage?: OpenCodeGoUsageState
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {
+    openai_bps_request_rejected?: {
+      blocked: boolean
+      blocked_at: string
+      reason: 'usage_policy' | 'invalid_request' | 'upstream_rejected'
+    }
     model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
     antigravity_credits_overages?: Record<string, { activated_at: string; active_until: string }>
     upstream_billing_provider?: 'new_api'

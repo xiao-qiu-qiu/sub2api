@@ -247,6 +247,9 @@ func (a *Account) IsSchedulableWithContext(ctx context.Context) bool {
 	if a == nil {
 		return false
 	}
+	if a.IsBPSRequestRejected() && !isManualAccountTest(ctx) {
+		return false
+	}
 	if !a.IsActive() || !a.Schedulable || a.PerformancePaused {
 		return false
 	}
@@ -285,7 +288,7 @@ func (a *Account) IsSchedulableWithContext(ctx context.Context) bool {
 // 手动 Schedulable 开关:spark 影子拥有独立 spark 配额窗口,母账号 global 429(走 RateLimitResetAt)
 // 不应连坐 spark(否则重新耦合影子架构本应解耦的两条 429 道)。nil receiver 返回 false。
 func (a *Account) IsCredentialUsableForShadow() bool {
-	if a == nil || !a.IsActive() {
+	if a == nil || !a.IsActive() || a.IsBPSRequestRejected() {
 		return false
 	}
 	now := time.Now()

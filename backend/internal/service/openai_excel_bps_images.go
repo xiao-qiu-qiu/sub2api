@@ -281,6 +281,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSImages(ctx context.Context, c *gin
 			lease.ReportUpstreamFailure()
 		}
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+		requestRejected := s.handleExcelBPSRequestRejected(ctx, account, raw)
 		upstreamMessage, upstreamDetail := s.excelBPSUpstreamErrorDetails(resp.StatusCode, raw, token, account)
 		event := OpsUpstreamErrorEvent{
 			Platform: account.Platform, AccountID: account.ID, AccountName: account.Name,
@@ -288,6 +289,11 @@ func (s *OpenAIGatewayService) forwardExcelBPSImages(ctx context.Context, c *gin
 			UpstreamStatusCode: resp.StatusCode, UpstreamRequestID: resp.Header.Get("x-request-id"),
 			UpstreamURL: upstreamURL, Kind: "http_error",
 			Message: upstreamMessage, Detail: upstreamDetail, UpstreamResponseBody: upstreamDetail,
+		}
+		if requestRejected {
+			setOpsUpstreamError(c, resp.StatusCode, upstreamMessage, upstreamDetail)
+			appendOpsUpstreamError(c, event)
+			return fail(resp.StatusCode, "request_rejected", "Excel BPS rejected this request; request was not replayed")
 		}
 		if excelBPSImagesFallbackStatus(resp.StatusCode) {
 			event.Kind = "retry"

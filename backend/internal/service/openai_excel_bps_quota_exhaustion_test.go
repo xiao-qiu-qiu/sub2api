@@ -99,8 +99,14 @@ func TestExcelBPSQuotaExhaustionUsesLatestTrustedSnapshot(t *testing.T) {
 						c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 						result, err := svc.Forward(context.Background(), c, account, []byte(fmt.Sprintf(`{"model":"gpt-6-astra","input":"test","stream":%t}`, stream)))
 						require.Error(t, err)
-						if event == "http429" {
+						if event == "http429" || event == "error" {
 							requireExcelBPSRateLimitFailover(t, err, c)
+							if event == "error" {
+								var failover *UpstreamFailoverError
+								require.ErrorAs(t, err, &failover)
+								require.True(t, failover.SkipAccountCooldownWait)
+								require.Nil(t, result)
+							}
 						} else {
 							var failover *UpstreamFailoverError
 							require.NotErrorAs(t, err, &failover, "never replay an accepted generation")

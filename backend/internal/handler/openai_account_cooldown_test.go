@@ -182,6 +182,74 @@ func TestOpenAIAccountCooldownHTTP_ReplayOnlyPreOutputBPS429(t *testing.T) {
 	}
 }
 
+func TestOpenAIAccountCooldownHTTP_InStream429SkipsWait(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions", "messages"} {
+		for _, tc := range []struct {
+			held, heartbeat bool
+		}{{false, false}, {true, false}, {false, true}, {true, true}} {
+			t.Run(fmt.Sprintf("%s/held=%t/heartbeat=%t", endpoint, tc.held, tc.heartbeat), func(t *testing.T) {
+				c, rec := oauthRecoveryHandlerRequest(t, context.Background(), endpoint)
+				queues, waits, releases, admissions := 0, 0, 0, 0
+				var slots *openAIOAuthRecoveryUserSlot
+				if tc.held {
+					slots = &openAIOAuthRecoveryUserSlot{
+						releaseFunc: func() { releases++ },
+						acquireFunc: func() (func(), bool) {
+							admissions++
+							return nil, false
+						},
+					}
+				}
+				gateway := accountCooldownHandlerGatewayStub{
+					queue: func(context.Context, int64, string) bool {
+						queues++
+						return true
+					},
+					wait: func(context.Context) (bool, error) {
+						waits++
+						return true, nil
+					},
+				}
+				failoverErr := &service.UpstreamFailoverError{
+					StatusCode:               http.StatusTooManyRequests,
+					Reason:                   service.ExcelBPSRateLimitedReason,
+					SkipAccountCooldownWait:  true,
+					SafeToFailoverAfterWrite: tc.heartbeat,
+				}
+				streamStarted := false
+				writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+				const heartbeat = ": keepalive\n\n"
+				if tc.heartbeat {
+					c.Header("Content-Type", "text/event-stream")
+					_, err := c.Writer.WriteString(heartbeat)
+					require.NoError(t, err)
+					c.Writer.Flush()
+					streamStarted = true
+					require.False(t, openAIForwardMayFailover(c, writerSizeBeforeForward, nil), "the committed comment needs the service's replay-safety flag")
+				}
+				require.True(t, openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr), "a safe comment must not block the outer failover gate")
+				// Responses and Messages pass nil at the cooldown call after the
+				// outer gate accepts SafeToFailoverAfterWrite. Either value must
+				// leave the error to the existing account-exclusion loop.
+				replaySafe := openAIForwardMayFailover(c, writerSizeBeforeForward, nil)
+				handled, retry := (&OpenAIGatewayHandler{}).retryOpenAIAccountCooldownHTTP(c, gateway, slots, &service.Account{ID: 7}, "mapped-model", nil, failoverErr, replaySafe, &streamStarted, endpoint == "messages")
+				require.False(t, handled, "the existing failover loop must exclude the failed account")
+				require.False(t, retry)
+				require.Zero(t, queues)
+				require.Zero(t, waits)
+				require.Zero(t, releases)
+				require.Zero(t, admissions)
+				require.Equal(t, tc.heartbeat, streamStarted)
+				if tc.heartbeat {
+					require.Equal(t, heartbeat, rec.Body.String())
+				} else {
+					require.Empty(t, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
 func TestOpenAIAccountCooldownHTTP_StreamWaitPropagatesHeartbeatAndErrorFormat(t *testing.T) {
 	for _, endpoint := range []string{"responses", "chat/completions", "messages"} {
 		t.Run(endpoint, func(t *testing.T) {
@@ -285,6 +353,40 @@ func TestOpenAIAccountCooldownWS_WaitPreservesCancellation(t *testing.T) {
 	require.True(t, waited)
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, strings.Contains(err.Error(), "authentication"))
+}
+
+func TestOpenAIAccountCooldownWS_InStream429SkipsWait(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		t.Run(fmt.Sprintf("held=%t", held), func(t *testing.T) {
+			c, _ := oauthRecoveryHandlerRequest(t, context.Background(), "responses")
+			queues, waits, releases := 0, 0, 0
+			var releaseSlots func()
+			if held {
+				releaseSlots = func() { releases++ }
+			}
+			gateway := accountCooldownHandlerGatewayStub{
+				queue: func(context.Context, int64, string) bool {
+					queues++
+					return true
+				},
+				wait: func(context.Context) (bool, error) {
+					waits++
+					return true, nil
+				},
+			}
+			failoverErr := &service.UpstreamFailoverError{
+				StatusCode:              http.StatusTooManyRequests,
+				Reason:                  service.ExcelBPSRateLimitedReason,
+				SkipAccountCooldownWait: true,
+			}
+			handled, err := waitForOpenAIAccountCooldownWSFailover(c.Request.Context(), c, gateway, releaseSlots, 7, "outbound-model", failoverErr, true)
+			require.NoError(t, err)
+			require.False(t, handled, "the existing failover loop must exclude the failed account")
+			require.Zero(t, queues)
+			require.Zero(t, waits)
+			require.Zero(t, releases)
+		})
+	}
 }
 
 func TestOpenAIAccountCooldownWS_FailoverReleasesSlotsAndChecksReplaySafety(t *testing.T) {

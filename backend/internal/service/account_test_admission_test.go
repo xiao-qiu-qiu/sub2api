@@ -31,6 +31,10 @@ func TestManualAccountTestContextIsExplicitAndScoped(t *testing.T) {
 	require.True(t, isManualAccountTest(manual))
 	require.True(t, isManualAccountTest(context.WithValue(manual, qualityProbeContextKey{}, true)))
 	require.Nil(t, manual.Value(qualityProbeContextKey{}), "manual admission is independent of the quality-probe marker")
+	require.True(t, BPSRequestRejectionWritesAllowed(ordinary))
+	require.True(t, BPSRequestRejectionWritesAllowed(probe))
+	require.False(t, BPSRequestRejectionWritesAllowed(manual))
+	require.False(t, BPSRequestRejectionWritesAllowed(withPelicanTestOptions(ordinary, pelicanTestOptions{observeOnly: true})))
 
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/accounts/1/test", nil)
@@ -62,6 +66,9 @@ func TestManualAccountTestAdmissionBypassesOnlyLocalGates(t *testing.T) {
 			a.TempUnschedulableUntil, a.TempUnschedulableReason = &future, "upstream_transport"
 		}, "account_ineligible", false},
 		{"performance_paused", func(a *Account, _ *OpenAIGatewayService) { a.PerformancePaused = true }, "account_ineligible", false},
+		{"bps_request_rejected", func(a *Account, _ *OpenAIGatewayService) {
+			a.Extra[BPSRequestRejectedExtraKey] = map[string]any{"blocked": true}
+		}, "account_ineligible", false},
 		{"account_runtime_block", func(a *Account, s *OpenAIGatewayService) {
 			s.openaiAccountRuntimeBlockUntil.Store(a.ID, future)
 		}, "account_runtime_blocked", false},

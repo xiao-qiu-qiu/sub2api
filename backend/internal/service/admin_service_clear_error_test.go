@@ -18,6 +18,17 @@ type accountRepoStubForClearAccountError struct {
 	clearAntigravityCalls    int
 	clearModelRateLimitCalls int
 	clearTempUnschedCalls    int
+	resetBPSRejectionCalls   int
+}
+
+func (r *accountRepoStubForClearAccountError) ResetBPSRequestRejected(ctx context.Context, id int64) error {
+	r.resetBPSRejectionCalls++
+	delete(r.account.Extra, BPSRequestRejectedExtraKey)
+	if r.account.Extra == nil {
+		r.account.Extra = make(map[string]any)
+	}
+	r.account.Extra[BPSRequestRejectedGenerationExtraKey] = "reset-generation"
+	return nil
 }
 
 func (r *accountRepoStubForClearAccountError) GetByID(ctx context.Context, id int64) (*Account, error) {
@@ -60,11 +71,15 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 	resetAt := time.Now().Add(5 * time.Minute)
 	repo := &accountRepoStubForClearAccountError{
 		account: &Account{
-			ID:                      31,
-			Platform:                PlatformOpenAI,
-			Type:                    AccountTypeOAuth,
-			Status:                  StatusError,
-			ErrorMessage:            "refresh failed",
+			ID:           31,
+			Platform:     PlatformOpenAI,
+			Type:         AccountTypeOAuth,
+			Status:       StatusError,
+			ErrorMessage: "refresh failed",
+			Extra: map[string]any{
+				BPSRequestRejectedExtraKey: map[string]any{"blocked": true},
+				QualityModelIsolationKey:   map[string]any{"isolated-model": true},
+			},
 			RateLimitResetAt:        &resetAt,
 			TempUnschedulableUntil:  &until,
 			TempUnschedulableReason: "missing refresh token",
@@ -73,10 +88,15 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 	blocker := &runtimeBlockRecorder{}
 	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker}
 
-	updated, err := svc.ClearAccountError(context.Background(), 31)
+	updated, err := svc.ClearAccountError(WithExplicitAccountStateReset(context.Background()), 31)
 	require.NoError(t, err)
 	require.NotNil(t, updated)
 	require.Equal(t, 1, repo.clearErrorCalls)
+	require.Equal(t, 1, repo.resetBPSRejectionCalls)
+	require.NotContains(t, updated.Extra, BPSRequestRejectedExtraKey)
+	require.Equal(t, "reset-generation", updated.Extra[BPSRequestRejectedGenerationExtraKey])
+	require.Contains(t, updated.Extra, QualityModelIsolationKey)
+	require.False(t, updated.Schedulable, "reset must preserve an unrelated manual scheduling stop")
 	require.Equal(t, 1, repo.clearRateLimitCalls)
 	require.Equal(t, 1, repo.clearAntigravityCalls)
 	require.Equal(t, 1, repo.clearModelRateLimitCalls)
@@ -85,4 +105,21 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 	require.Nil(t, updated.TempUnschedulableUntil)
 	require.Empty(t, updated.TempUnschedulableReason)
 	require.Equal(t, []int64{31}, blocker.clearedIDs)
+}
+
+func TestAdminService_ClearAccountError_BackgroundPreservesBPSRejection(t *testing.T) {
+	repo := &accountRepoStubForClearAccountError{account: &Account{
+		ID: 32, Platform: PlatformOpenAI, Status: StatusError, Schedulable: true,
+		Extra: map[string]any{
+			BPSRequestRejectedExtraKey:           map[string]any{"blocked": true},
+			BPSRequestRejectedGenerationExtraKey: "existing-generation",
+		},
+	}}
+	svc := &adminServiceImpl{accountRepo: repo}
+	updated, err := svc.ClearAccountError(context.Background(), 32)
+	require.NoError(t, err)
+	require.Zero(t, repo.resetBPSRejectionCalls)
+	require.True(t, updated.IsBPSRequestRejected())
+	require.False(t, updated.IsSchedulable())
+	require.Equal(t, "existing-generation", updated.Extra[BPSRequestRejectedGenerationExtraKey])
 }

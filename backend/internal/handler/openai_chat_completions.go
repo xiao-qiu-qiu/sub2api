@@ -294,7 +294,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		forwardStart := time.Now()
 
 		forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
-		writerSizeBeforeForward := c.Writer.Size()
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		clearOpenAIOAuthRecoveryFallback(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -392,10 +392,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					if c.Writer.Written() {
+						streamStarted = true
 					}
 					if handled, retry := h.recoverOpenAIOAuthHTTP401(c, userSlots, account, result, failoverErr, streamStarted, false); handled {
 						if !retry {
@@ -404,7 +407,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						_ = h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 						continue
 					}
-					if handled, retry := h.retryOpenAIAccountCooldownHTTP(c, h.gatewayService, userSlots, account, forwardModel, result, failoverErr, c.Writer.Size() == writerSizeBeforeForward, &streamStarted, false); handled {
+					if handled, retry := h.retryOpenAIAccountCooldownHTTP(c, h.gatewayService, userSlots, account, forwardModel, result, failoverErr, openAIForwardMayFailover(c, writerSizeBeforeForward, nil), &streamStarted, false); handled {
 						if !retry {
 							return
 						}

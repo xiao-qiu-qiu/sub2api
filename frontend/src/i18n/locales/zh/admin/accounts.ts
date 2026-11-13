@@ -623,6 +623,8 @@ export default {
         paused: '暂停',
         limited: '限流',
         rateLimited: '限流中',
+        indefiniteCooldown: '无限期冷却',
+        requestRejectedHint: '上游拒绝请求（request_rejected），当前不参与调度，重置账号状态后恢复',
         overloaded: '过载中',
         tempUnschedulable: '临时不可调度',
         quotaExceeded: '配额超限',

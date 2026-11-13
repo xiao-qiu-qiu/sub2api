@@ -1941,7 +1941,7 @@ func (h *AccountHandler) ClearError(c *gin.Context) {
 		return
 	}
 
-	account, err := h.adminService.ClearAccountError(c.Request.Context(), accountID)
+	account, err := h.adminService.ClearAccountError(service.WithExplicitAccountStateReset(c.Request.Context()), accountID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2143,7 +2143,7 @@ func (h *AccountHandler) BatchClearError(c *gin.Context) {
 	for _, id := range req.AccountIDs {
 		accountID := id // 闭包捕获
 		g.Go(func() error {
-			account, err := h.adminService.ClearAccountError(gctx, accountID)
+			account, err := h.adminService.ClearAccountError(service.WithExplicitAccountStateReset(gctx), accountID)
 			if err != nil {
 				mu.Lock()
 				failedCount++

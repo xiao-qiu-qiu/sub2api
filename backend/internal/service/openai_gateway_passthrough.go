@@ -1601,8 +1601,25 @@ func openAIStreamFailureStatus(payload []byte, message string) int {
 	if len(bytes.TrimSpace(payload)) == 0 || !gjson.ValidBytes(payload) {
 		return http.StatusBadGateway
 	}
+	// Explicit request failures must not become 5xx quality signals. Keep
+	// arbitrary message text and malformed status values out of this path.
+	for _, path := range openAIStreamErrorStatusPaths {
+		value := gjson.GetBytes(payload, path)
+		if value.Type != gjson.Number {
+			continue
+		}
+		if status, err := strconv.Atoi(value.Raw); err == nil && status >= 400 && status < 500 {
+			return status
+		}
+	}
 	semanticStatus := openAIStreamFailedEventSemanticStatus(payload, message)
 	switch semanticStatus {
+	case http.StatusBadRequest:
+		for _, path := range []string{"response.error.type", "error.type"} {
+			if gjson.GetBytes(payload, path).String() == "invalid_request_error" {
+				return semanticStatus
+			}
+		}
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, 529:
 		return semanticStatus
 	case http.StatusServiceUnavailable:

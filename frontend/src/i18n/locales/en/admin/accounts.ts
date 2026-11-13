@@ -332,6 +332,8 @@ export default {
         paused: 'Paused',
         limited: 'Limited',
         rateLimited: 'Rate Limited',
+        indefiniteCooldown: 'Indefinite cooldown',
+        requestRejectedHint: 'Upstream rejected the request (request_rejected). This account is excluded from scheduling until its status is reset.',
         overloaded: 'Overloaded',
         tempUnschedulable: 'Temp Unschedulable',
         quotaExceeded: 'Quota Exceeded',

@@ -73,6 +73,19 @@ func excelBPS429(retryAfter string) *http.Response {
 		Body: io.NopCloser(strings.NewReader(`{"error":{"code":"basispoints_rate_limited","message":"PRIVATE_UPSTREAM workspace detail"}}`))}
 }
 
+func excelBPSPreGeneration429() *http.Response {
+	const wire = "event: response.created\ndata: " +
+		`{"type":"response.created","response":{"id":"resp_rejected_attempt","status":"in_progress","output":[]}}` + "\n\n" +
+		"event: response.in_progress\ndata: " +
+		`{"type":"response.in_progress","response":{"id":"resp_rejected_attempt","status":"in_progress","output":[]}}` + "\n\n" +
+		"event: error\ndata: " +
+		`{"type":"error","code":"rate_limit_exceeded","message":"PRIVATE_UPSTREAM rate limit"}` + "\n\n"
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{
+		"Content-Type": {"text/event-stream"},
+		"Retry-After":  {"60"},
+	}, Body: io.NopCloser(strings.NewReader(wire))}
+}
+
 func excelBPSPaymentRequired(body string) *http.Response {
 	return &http.Response{StatusCode: http.StatusPaymentRequired, Header: http.Header{
 		"Content-Type": {"application/json"},
@@ -216,7 +229,7 @@ func newExcelBPSFailoverTestHandlerWithRepo(t *testing.T, upstream service.HTTPU
 		accountRepo,
 		nil, nil, nil, nil, nil, nil, binding,
 		cfg,
-		nil, schedulingConcurrency, nil, rateLimitService, nil,
+		nil, schedulingConcurrency, service.NewBillingService(cfg, nil), rateLimitService, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
@@ -458,6 +471,112 @@ func TestOpenAIResponsesExcelBPSPaymentRequiredDoesNotFailOverOrBlockAccount(t *
 				"a generic payment error must not isolate the account or prevent new sessions from selecting it")
 			require.Empty(t, repo.errorCalls())
 		})
+	}
+}
+
+func TestOpenAIResponsesExcelBPSPreGeneration429FailsOverImmediately(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, loadBatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("load_batch=%t", loadBatch), func(t *testing.T) {
+			upstream := &excelBPSFailoverUpstream{answer: func(call int) *http.Response {
+				if call == 0 {
+					return excelBPSPreGeneration429()
+				}
+				return excelBPSCompleted()
+			}}
+			handler := newExcelBPSFailoverTestHandler(t, upstream, loadBatch, &oauthRecoveryHandlerBindings{})
+			// A cooldown wait would outlive this request and prevent completion.
+			// This checks the branch taken, without an elapsed-time assertion.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			c, rec := newExcelBPSFailoverTestContext(ctx, true)
+			c.Request.Header.Set("session_id", "bps-stream-rejection-failover")
+
+			handler.Responses(c)
+
+			require.NoError(t, ctx.Err(), "the backup must finish before a cooldown wait can expire")
+			require.Equal(t, []int64{1, 2}, upstream.calls(), "the rejected account must be excluded immediately")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+			require.Contains(t, rec.Body.String(), "resp_bps_failover")
+			require.Contains(t, rec.Body.String(), "done")
+			require.Equal(t, 1, strings.Count(rec.Body.String(), "event: response.completed\n"))
+			require.NotContains(t, rec.Body.String(), "resp_rejected_attempt")
+			require.NotContains(t, rec.Body.String(), "rate_limit_exceeded")
+			require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
+			for _, url := range upstream.urls {
+				require.Equal(t, basispoints.ResponsesURL, url)
+			}
+			require.NotEmpty(t, gjson.GetBytes(upstream.bodies[0], "input").Raw)
+			require.Equal(t, gjson.GetBytes(upstream.bodies[0], "input").Raw, gjson.GetBytes(upstream.bodies[1], "input").Raw,
+				"the replacement must receive the same message and tool history")
+		})
+	}
+}
+
+func TestOpenAIExcelBPSPreGeneration429AfterHeartbeatFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		endpoint, terminal string
+	}{
+		{"responses", "event: response.completed\n"},
+		{"chat/completions", "data: [DONE]"},
+	} {
+		for _, loadBatch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/load_batch=%t", tc.endpoint, loadBatch), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				c, rec := newExcelBPSFailoverTestContext(ctx, true)
+				c.Request.URL.Path = "/v1/" + tc.endpoint
+				c.Request.Header.Set("session_id", "bps-heartbeat-rejection-failover")
+				if tc.endpoint != "responses" {
+					const body = `{"model":"gpt-6-astra","stream":true,"messages":[{"role":"user","content":"preserve this input"}],"max_tokens":20}`
+					c.Request.Body = io.NopCloser(strings.NewReader(body))
+					c.Request.ContentLength = int64(len(body))
+				}
+				heartbeatWritten := false
+				pingHelper := NewConcurrencyHelper(nil, SSEPingFormatComment, 15*time.Second)
+				upstream := &excelBPSFailoverUpstream{
+					onDo: func(call int) {
+						if call == 0 {
+							// Emit after the handler's pre-forward snapshot. Count the
+							// gateway heartbeat only, exactly as its real writer does.
+							require.NoError(t, pingHelper.writeWaitPing(c, &heartbeatWritten))
+							require.True(t, gatewayStreamHasOnlyHeartbeats(c))
+						}
+					},
+					answer: func(call int) *http.Response {
+						if call == 0 {
+							return excelBPSPreGeneration429()
+						}
+						success := excelBPSCompleted()
+						success.Body = io.NopCloser(io.MultiReader(
+							strings.NewReader("event: response.output_text.delta\ndata: "+`{"type":"response.output_text.delta","delta":"done"}`+"\n\n"),
+							success.Body,
+						))
+						return success
+					},
+				}
+				handler := newExcelBPSFailoverTestHandler(t, upstream, loadBatch, &oauthRecoveryHandlerBindings{})
+
+				runOAuthRecoveryHandler(handler, c, tc.endpoint)
+
+				require.NoError(t, ctx.Err(), "an already flushed comment must not trigger a cooldown wait")
+				require.True(t, heartbeatWritten)
+				require.True(t, rec.Flushed)
+				require.Equal(t, []int64{1, 2}, upstream.calls(), rec.Body.String())
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.True(t, strings.HasPrefix(rec.Body.String(), string(SSEPingFormatComment)))
+				require.Contains(t, rec.Body.String(), "done")
+				require.Contains(t, rec.Body.String(), tc.terminal)
+				require.NotContains(t, rec.Body.String(), "resp_rejected_attempt")
+				require.NotContains(t, rec.Body.String(), "rate_limit_exceeded")
+				require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
+				for _, url := range upstream.urls {
+					require.Equal(t, basispoints.ResponsesURL, url)
+				}
+			})
+		}
 	}
 }
 

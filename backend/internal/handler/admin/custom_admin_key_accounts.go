@@ -142,6 +142,7 @@ func (h *AccountHandler) ScopedAdminKeyAccounts(c *gin.Context) {
 		}
 	case path == base+"/:id/clear-error" && c.Request.Method == "POST":
 		action = "accounts.recover"
+		ctx = service.WithExplicitAccountStateReset(ctx)
 	case path == base+"/:id/refresh" && c.Request.Method == "POST":
 		action = "accounts.refresh"
 		var cancel context.CancelFunc

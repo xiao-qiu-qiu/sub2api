@@ -9,8 +9,21 @@
       :title="t('admin.accounts.openai.excelBPS')"
     >bps</span>
     <div class="flex items-center gap-2">
+      <HelpTooltip
+        v-if="isRequestRejected"
+        class="!ml-0"
+        width-class="w-72"
+        :content="t('admin.accounts.status.requestRejectedHint')"
+      >
+        <template #trigger>
+          <span data-testid="request-rejected-badge" class="badge text-xs badge-warning cursor-help">
+            {{ t('admin.accounts.status.indefiniteCooldown') }}
+          </span>
+        </template>
+      </HelpTooltip>
+
       <!-- OpenAI OAuth RPM Display - keep the pause reason explicit -->
-      <div v-if="isRPMPaused" class="flex flex-col items-center gap-1">
+      <div v-else-if="isRPMPaused" class="flex flex-col items-center gap-1">
         <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rpmPaused') }}</span>
         <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rpmResumeText }}</span>
       </div>
@@ -68,7 +81,7 @@
       </HelpTooltip>
 
       <!-- Rate Limit Indicator (429) -->
-      <HelpTooltip v-if="isRateLimited" class="!ml-0" width-class="w-56">
+      <HelpTooltip v-if="!isRequestRejected && isRateLimited" class="!ml-0" width-class="w-56">
         <template #trigger>
           <span
             class="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
@@ -82,7 +95,7 @@
 
       <!-- Model Status Indicators (模型冷却 / 普通限流 / 超量请求中) -->
       <div
-        v-if="activeModelStatuses.length > 0"
+        v-if="!isRequestRejected && activeModelStatuses.length > 0"
         :class="[
           activeModelStatuses.length <= 4
             ? 'flex flex-col gap-1'
@@ -146,7 +159,7 @@
       </div>
 
       <!-- Overload Indicator (529) -->
-      <HelpTooltip v-if="isOverloaded" class="!ml-0" width-class="w-56">
+      <HelpTooltip v-if="!isRequestRejected && isOverloaded" class="!ml-0" width-class="w-56">
         <template #trigger>
           <span
             class="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
@@ -183,6 +196,8 @@ const emit = defineEmits<{
 }>()
 
 const protocolEnabled = computed(() => props.globalBpsEnabled)
+
+const isRequestRejected = computed(() => props.account.extra?.openai_bps_request_rejected?.blocked === true)
 
 // Keep eligibility aligned with Account.IsExcelBPSEnabled on the backend.
 const isExcelBPSEnabled = computed(() => {

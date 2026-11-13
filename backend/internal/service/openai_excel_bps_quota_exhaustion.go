@@ -5,12 +5,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type excelBPSRateLimitGenerationRepository interface {
@@ -83,21 +85,28 @@ func (s *OpenAIGatewayService) handleExcelBPSRateLimit(ctx context.Context, acco
 // HTTP SSE and the WS adapter share this reader; ordinary deltas are not decoded.
 type excelBPSQuotaResponseBody struct {
 	io.ReadCloser
-	mu            sync.Mutex
-	line          []byte
-	discardLine   bool
-	limited       bool
-	accessBlocked bool
-	usageOnce     sync.Once
-	observedAt    time.Time
-	ctx           context.Context
-	account       *Account
-	headers       http.Header
-	svc           *OpenAIGatewayService
+	mu                 sync.Mutex
+	line               []byte
+	discardLine        bool
+	eventType          string
+	eventData          []byte
+	discardEvent       bool
+	limited            bool
+	accessBlocked      bool
+	requestRejected    bool
+	generationObserved bool
+	usageOnce          sync.Once
+	observedAt         time.Time
+	ctx                context.Context
+	account            *Account
+	headers            http.Header
+	svc                *OpenAIGatewayService
 }
 
-func (s *OpenAIGatewayService) observeExcelBPSQuotaResponse(ctx context.Context, account *Account, resp *http.Response) {
-	resp.Body = &excelBPSQuotaResponseBody{ReadCloser: resp.Body, ctx: ctx, account: account, headers: resp.Header, svc: s, observedAt: time.Now()}
+func (s *OpenAIGatewayService) observeExcelBPSQuotaResponse(ctx context.Context, account *Account, resp *http.Response) *excelBPSQuotaResponseBody {
+	body := &excelBPSQuotaResponseBody{ReadCloser: resp.Body, ctx: ctx, account: account, headers: resp.Header, svc: s, observedAt: time.Now()}
+	resp.Body = body
+	return body
 }
 
 func (r *excelBPSQuotaResponseBody) Read(p []byte) (int, error) {
@@ -126,18 +135,69 @@ func (r *excelBPSQuotaResponseBody) Read(p []byte) (int, error) {
 	}
 	if err == io.EOF {
 		r.observeLine()
+		r.observeEvent()
 		r.recordUsage()
 	}
 	return n, err
 }
 
 func (r *excelBPSQuotaResponseBody) observeLine() {
-	if r.discardLine || !bytes.HasPrefix(r.line, []byte("data:")) {
+	if r.discardLine {
+		r.generationObserved = true
+		r.discardEvent = true
 		return
 	}
-	raw := bytes.TrimSpace(bytes.TrimPrefix(r.line, []byte("data:")))
+	line := bytes.TrimSuffix(r.line, []byte{'\r'})
+	if len(line) == 0 {
+		r.observeEvent()
+	} else if bytes.HasPrefix(line, []byte("event:")) {
+		r.eventType = strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
+	} else if bytes.HasPrefix(line, []byte("data:")) && !r.discardEvent {
+		data := bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte{' '})
+		if len(r.eventData)+len(data)+1 > 16<<20 {
+			r.discardEvent, r.generationObserved = true, true
+			r.eventData = nil
+		} else {
+			r.eventData = append(r.eventData, data...)
+			r.eventData = append(r.eventData, '\n')
+		}
+	}
+}
+
+// Match the bridge's frame boundaries: event fields may follow data fields,
+// and all data lines together form the JSON that the upstream actually sent.
+func (r *excelBPSQuotaResponseBody) observeEvent() {
+	raw := bytes.TrimSuffix(r.eventData, []byte{'\n'})
+	kind, discarded := r.eventType, r.discardEvent
+	r.eventData, r.eventType, r.discardEvent = nil, "", false
+	if discarded || len(raw) == 0 {
+		return
+	}
+	if !gjson.ValidBytes(raw) {
+		if !(r.limited && bytes.Equal(raw, []byte("[DONE]"))) {
+			r.generationObserved = true
+		}
+		return
+	}
+	if r.limited && bytes.Equal(raw, []byte("[DONE]")) {
+		return
+	}
+	if gjson.GetBytes(raw, "type").String() == "" && kind != "" {
+		var err error
+		raw, err = sjson.SetBytes(raw, "type", kind)
+		if err != nil {
+			r.generationObserved = true
+			return
+		}
+	}
+	if !excelBPSBeforeGeneration(raw) {
+		r.generationObserved = true
+	}
 	switch gjson.GetBytes(raw, "type").String() {
 	case "error", "response.failed", "response.cancelled":
+		if !r.requestRejected {
+			r.requestRejected = r.svc.handleExcelBPSRequestRejected(r.ctx, r.account, raw)
+		}
 		if !r.accessBlocked && r.svc.handleExcelBPSAccessState(r.ctx, r.account, http.StatusBadGateway, r.headers, raw) != nil {
 			// Generation was accepted: isolate future requests, never replay it.
 			r.accessBlocked = true

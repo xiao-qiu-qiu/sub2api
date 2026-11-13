@@ -18,7 +18,7 @@ type openAIAccountCooldownGateway interface {
 // The forwarding owner must release its account slot before calling this. The
 // user slot also owns the API key lease, so neither remains held while waiting.
 func (h *OpenAIGatewayHandler) retryOpenAIAccountCooldownHTTP(c *gin.Context, gateway openAIAccountCooldownGateway, slots *openAIOAuthRecoveryUserSlot, account *service.Account, model string, result *service.OpenAIForwardResult, failoverErr *service.UpstreamFailoverError, replaySafe bool, streamStarted *bool, anthropic bool) (handled, retry bool) {
-	if !replaySafe || result != nil || account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.Reason != service.ExcelBPSRateLimitedReason || failoverClientGone(c) {
+	if !replaySafe || result != nil || account == nil || failoverErr == nil || failoverErr.SkipAccountCooldownWait || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.Reason != service.ExcelBPSRateLimitedReason || failoverClientGone(c) {
 		return false, false
 	}
 	if !gateway.QueueOpenAIAccountCooldown(c.Request.Context(), account.ID, model) {
@@ -117,7 +117,7 @@ func waitForOpenAIAccountCooldownWS(ctx context.Context, c *gin.Context, gateway
 }
 
 func waitForOpenAIAccountCooldownWSFailover(ctx context.Context, c *gin.Context, gateway openAIAccountCooldownGateway, releaseSlots func(), accountID int64, model string, failoverErr *service.UpstreamFailoverError, replaySafe bool) (bool, error) {
-	if !replaySafe || ctx.Err() != nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.Reason != service.ExcelBPSRateLimitedReason {
+	if !replaySafe || ctx.Err() != nil || failoverErr == nil || failoverErr.SkipAccountCooldownWait || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.Reason != service.ExcelBPSRateLimitedReason {
 		return false, nil
 	}
 	if !gateway.QueueOpenAIAccountCooldown(ctx, accountID, model) {

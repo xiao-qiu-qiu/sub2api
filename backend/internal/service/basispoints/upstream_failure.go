@@ -54,6 +54,16 @@ func classifyUpstreamFailure(kind string, payload object) *UpstreamFailure {
 		detail = payload
 	}
 	code := text(detail["code"])
+	if code == "request_rejected" {
+		// Only these provider error messages have a verified meaning. Never
+		// classify echoed request fields or arbitrary rejection text.
+		switch text(detail["message"]) {
+		case "This request was blocked by our usage policy.":
+			code = "basispoints_usage_policy_rejected"
+		case "Invalid request body.":
+			code = "basispoints_invalid_request_body"
+		}
+	}
 	status := failureIdentifierStatus(code)
 	if status == 0 {
 		code = "basispoints_upstream_error"
@@ -123,11 +133,11 @@ func failureIdentifierStatus(identifier string) int {
 	case "invalid_request", "invalid_request_error", "bad_request_error", "invalid_argument", "invalid_value",
 		"unsupported_value", "invalid_prompt", "context_length_exceeded", "string_above_max_length",
 		"previous_response_not_found", "thinking_signature_invalid", "invalid_encrypted_content",
-		"cyber_policy", "content_policy_violation":
+		"cyber_policy", "content_policy_violation", "basispoints_invalid_request_body":
 		return http.StatusBadRequest
 	case "authentication_error", "invalid_api_key", "token_expired":
 		return http.StatusUnauthorized
-	case "permission_error", "permission_denied", "basispoints_model_access_changed":
+	case "permission_error", "permission_denied", "basispoints_model_access_changed", "basispoints_usage_policy_rejected", "request_rejected":
 		return http.StatusForbidden
 	case "model_not_found", "model_not_found_error":
 		return http.StatusNotFound

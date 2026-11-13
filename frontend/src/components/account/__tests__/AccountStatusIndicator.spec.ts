@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountStatusIndicator from '../AccountStatusIndicator.vue'
+import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
+import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
+import HelpTooltip from '@/components/common/HelpTooltip.vue'
+import zhAccounts from '@/i18n/locales/zh/admin/accounts'
 import type { Account } from '@/types'
 
 vi.mock('vue-i18n', async () => {
@@ -8,7 +12,11 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string) => {
+        if (key === 'admin.accounts.status.indefiniteCooldown') return zhAccounts.accounts.status.indefiniteCooldown
+        if (key === 'admin.accounts.status.requestRejectedHint') return zhAccounts.accounts.status.requestRejectedHint
+        return key
+      }
     })
   }
 })
@@ -51,6 +59,93 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it.each(['usage_policy', 'invalid_request', 'upstream_rejected'] as const)(
+    'shows indefinite request_rejected cooldown without recovery dates or countdowns: %s',
+    async reason => {
+      const account = makeAccount({
+        platform: 'openai',
+        base_rpm: 10, current_rpm: 10, rpm_paused: true, rpm_reset_at: 1_900_000_020,
+        rate_limit_reset_at: '2099-01-01T00:00:00Z',
+        overload_until: '2099-01-01T00:00:00Z',
+        temp_unschedulable_until: '2099-01-01T00:00:00Z',
+        extra: {
+          openai_bps_request_rejected: { blocked: true, blocked_at: '2020-01-01T00:00:00Z', reason },
+          model_rate_limits: {
+            'gpt-6.1-sol': { rate_limited_at: '2020-01-01T00:00:00Z', rate_limit_reset_at: '2099-01-01T00:00:00Z' }
+          }
+        }
+      })
+      const wrapper = mount(AccountStatusIndicator, {
+        props: { account, globalBpsEnabled: false },
+        global: { stubs: { Teleport: true, Icon: true } }
+      })
+
+      expect(wrapper.get('[data-testid="request-rejected-badge"]').text()).toBe('无限期冷却')
+      expect(wrapper.get('[data-testid="request-rejected-badge"]').classes()).toContain('badge-warning')
+      await wrapper.getComponent(HelpTooltip).trigger('mouseenter')
+      expect(wrapper.get('[role="tooltip"]').isVisible()).toBe(true)
+      expect(wrapper.get('[role="tooltip"]').text()).toBe('上游拒绝请求（request_rejected），当前不参与调度，重置账号状态后恢复')
+      expect(wrapper.text()).not.toMatch(/AutoResume|Until|rpmPaused|1h|2020|2099|429|529|预计|自动恢复/)
+
+      await wrapper.setProps({ account: makeAccount({ platform: 'openai', extra: {} }) })
+      expect(wrapper.find('[data-testid="request-rejected-badge"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('admin.accounts.status.active')
+      wrapper.unmount()
+    }
+  )
+
+  it('keeps existing single/bulk reset and manual tests available for request_rejected alone', async () => {
+    const account = makeAccount({
+      platform: 'openai', schedulable: false,
+      extra: { openai_bps_request_rejected: { blocked: true, blocked_at: '2026-11-13T00:00:00Z', reason: 'usage_policy' } }
+    })
+    const menu = mount(AccountActionMenu, {
+      props: { show: true, account, anchorRect: new DOMRect(100, 100, 24, 24) },
+      global: { stubs: { Teleport: true, Icon: true } }
+    })
+    for (const [label, event] of [
+      ['admin.accounts.recoverState', 'recover-state'],
+      ['admin.accounts.testConnection', 'test'],
+      ['admin.accounts.pelicanTest.menu', 'iq-test']
+    ]) {
+      const button = menu.findAll('button').find(item => item.text() === label)!
+      expect(button.element.disabled).toBe(false)
+      await button.trigger('click')
+      expect(menu.emitted(event)).toEqual([[account]])
+    }
+    menu.unmount()
+
+    const bulk = mount(AccountBulkActionsBar, {
+      props: { selectedIds: [account.id], totalResults: 1, selectingAll: false, allResultsSelected: false }
+    })
+    const reset = bulk.findAll('button').find(item => item.text() === 'admin.accounts.bulkActions.resetStatus')!
+    expect(reset.element.disabled).toBe(false)
+    await reset.trigger('click')
+    expect(bulk.emitted('reset-status')).toEqual([[]])
+    bulk.unmount()
+  })
+
+  it.each([undefined, null, true, 'request_rejected', {}, { blocked: false }, { blocked: 'true' }, { blocked: 1 }])(
+    'ignores request_rejected markers without blocked === true: %j',
+    marker => {
+      const account = makeAccount({
+        platform: 'openai', error_message: 'request_rejected',
+        extra: { openai_bps_request_rejected: marker } as Account['extra']
+      })
+      const status = mount(AccountStatusIndicator, { props: { account } })
+      expect(status.find('[data-testid="request-rejected-badge"]').exists()).toBe(false)
+      expect(status.text()).toContain('admin.accounts.status.active')
+      status.unmount()
+
+      const menu = mount(AccountActionMenu, {
+        props: { show: true, account, anchorRect: new DOMRect(100, 100, 24, 24) },
+        global: { stubs: { Teleport: true, Icon: true } }
+      })
+      expect(menu.text()).not.toContain('admin.accounts.recoverState')
+      menu.unmount()
+    }
+  )
+
   it('keeps manual pause visible while showing the rotation phase', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: { account: makeAccount({ schedulable: false, account_rotation: {
