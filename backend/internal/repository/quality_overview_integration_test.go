@@ -153,9 +153,14 @@ func TestQualityOverviewIntegrationClassificationAndScopes(t *testing.T) {
 	for _, item := range history {
 		statuses = append(statuses, item.Status)
 		require.Equal(t, plan, item.PlanID)
+		if item.Status != "unknown" {
+			require.Empty(t, item.ReasonCodes)
+		}
 	}
 	require.Equal(t, []string{"healthy", "degraded", "unknown", "unknown", "unknown", "unknown", "degraded", "healthy", "unknown", "unknown", "unknown"}, statuses)
 	require.Equal(t, 50.0, *page.Items[0].HealthyRate)
+	require.Equal(t, 4, page.Items[0].EvaluatedRounds)
+	require.Equal(t, len(history), page.Items[0].TotalRounds)
 	require.Equal(t, "observed", history[0].QualityAction)
 	require.True(t, page.Items[0].Plans[0].RecoveryProbeEnabled)
 	require.Equal(t, 60, page.Items[0].Plans[0].RecoveryProbeIntervalMinutes)
@@ -302,6 +307,8 @@ func TestQualityOverviewIntegrationPaginationSearchAndLimit(t *testing.T) {
 	page = f.overview(service.QualityOverviewFilter{Page: 2, PageSize: 1})
 	require.Equal(t, a, page.Items[0].AccountID)
 	require.Len(t, page.Items[0].History, 60)
+	require.Equal(t, 60, page.Items[0].TotalRounds)
+	require.Equal(t, 60, page.Items[0].EvaluatedRounds)
 	require.Equal(t, "healthy", page.Items[0].Status)
 	for i := 1; i < len(page.Items[0].History); i++ {
 		require.True(t, page.Items[0].History[i].StartedAt.After(page.Items[0].History[i-1].StartedAt))

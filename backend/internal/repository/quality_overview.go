@@ -148,6 +148,12 @@ WITH eligible_plans AS NOT MATERIALIZED (
          AND (kind<>'random_reasoning' OR (pelican_config->'quality_batch'->>'decision'='peer_passed'
            AND COALESCE(pelican_config->'quality_batch'->>'peer_passed','0') ~ '^[1-9][0-9]*$')) AS failed
      FROM parsed WHERE $7='all' OR channel=$6
+   ), facts AS (
+     SELECT samples.*,quality_action='stale_run' AS stale_result,
+       error_message='account_quota_exhausted' AS quota_exhausted,
+       COALESCE(error_message,'') ~* '(^|[^a-z0-9_])(rate_limited|rate_limit_exceeded|rate_limit_error|too_many_requests|basispoints_rate_limited|excel_bps_rate_limited|upstream_429)([^a-z0-9_]|$)|(^|[^a-z0-9_])HTTP[[:space:]]+429([^0-9]|$)' AS rate_limited,
+       quality_action='comparison_pending' AS comparison_pending
+     FROM samples
    ), rounds AS (
      SELECT max(id) AS id,plan_id,min(started_at) AS started_at,
        (array_agg(model ORDER BY id))[1] AS model_id,
@@ -157,11 +163,23 @@ WITH eligible_plans AS NOT MATERIALIZED (
        count(*) FILTER (WHERE passed) AS passed,count(*) FILTER (WHERE failed) AS failed,
        count(*) FILTER (WHERE status='skipped') AS skipped,
        bool_or(NOT COALESCE(route_known,false) AND status<>'skipped') AS route_evidence_missing,
+       bool_or(COALESCE(stale_result,false)) AS stale_result,
+       bool_or(COALESCE(quota_exhausted,false)) AS quota_exhausted,
+       bool_or(rate_limited) AS rate_limited,
+       bool_or(COALESCE(comparison_pending,false)) AS comparison_pending,
+       bool_or(NOT COALESCE(finished_at>=started_at
+         AND parallel>0 AND jsonb_array_length(models) BETWEEN 1 AND 50 AND parallel*jsonb_array_length(models)<=100
+         AND models ? model AND model_samples=parallel,false))
+         OR count(DISTINCT models)<>1 OR count(DISTINCT parallel)<>1 OR count(DISTINCT kind)<>1 AS incomplete_round,
+       bool_or(status='failed' AND NOT COALESCE(passed OR failed,false)
+         AND NOT COALESCE(stale_result OR quota_exhausted OR rate_limited OR comparison_pending,false)
+         AND COALESCE(error_message,'') NOT IN ('answer_mismatch','state_degraded')) AS probe_failed,
+       bool_or(status='skipped' AND NOT COALESCE(stale_result OR quota_exhausted OR rate_limited OR comparison_pending,false)) AS unexplained_skipped,
        bool_and(COALESCE(finished_at>=started_at AND quality_action NOT IN ('','stale_run','comparison_pending')
          AND parallel>0 AND jsonb_array_length(models) BETWEEN 1 AND 50 AND parallel*jsonb_array_length(models)<=100
          AND models ? model AND model_samples=parallel AND (status='skipped' OR route_known),false))
          AND count(DISTINCT models)=1 AND count(DISTINCT parallel)=1 AND count(DISTINCT kind)=1 AS complete
-     FROM samples GROUP BY plan_id,round_key HAVING bool_or(channel=$6)
+     FROM facts GROUP BY plan_id,round_key HAVING bool_or(channel=$6)
      ORDER BY min(started_at) DESC,max(id) DESC LIMIT 60
    ) SELECT jsonb_agg(to_jsonb(rounds) ORDER BY started_at,id) AS items FROM rounds
  ) history ON true

@@ -23,20 +23,20 @@
       <section v-for="section in sections" :key="section.scope" class="status-panel" :data-probe-scope="section.scope" :aria-label="scopeTitle(section.scope)">
         <header class="scope-heading"><div><span class="scope-icon" :class="section.scope"><Icon :name="section.scope === 'main' ? 'shield' : 'sync'" size="sm" /></span><h2>{{ scopeTitle(section.scope) }}</h2><span class="scope-count">{{ section.loaded ? section.total : '—' }}</span></div><RouterLink class="scope-configure" :to="configureRoute(section.scope)"><Icon name="plus" size="xs" />{{ t(section.scope === 'recovery' ? 'qualityOps.recoveryQuickSetup' : 'qualityOps.create') }}</RouterLink></header>
         <div v-if="section.error" class="status-message error" role="alert">{{ section.error }}<button @click="load(section.scope)">{{ t('qualityOps.retry') }}</button></div>
-        <div class="list-caption"><span>{{ t('qualityOps.statusHistory') }}</span><div class="legend"><span v-for="status in statuses.slice(0, 3)" :key="status"><i :class="`bar-${status}`" />{{ label(status) }}</span></div></div>
+        <div class="list-caption"><span>{{ t('qualityOps.statusHistory') }}</span><div class="legend"><span v-for="entry in historyLegend(section)" :key="entry.key"><i :class="entry.className" />{{ entry.label }}</span></div></div>
         <div :aria-busy="section.loading" class="account-list">
           <div v-if="section.loading && !section.loaded" class="loading-rows" role="status" :aria-label="t('qualityOps.loading')"><div v-for="i in 5" :key="i" class="skeleton-row"><span /><span /></div></div>
           <article v-for="account in section.accounts" :key="account.account_id" class="account-row" :data-account-id="account.account_id">
-            <div class="account-identity"><div class="avatar" :class="`avatar-${account.status}`">{{ account.account_name.slice(0, 1).toUpperCase() || '#' }}</div><div class="identity-copy"><button class="account-name" :title="account.account_name" @click="openRules(account)">{{ account.account_name || `#${account.account_id}` }}</button><div class="account-meta"><span>#{{ account.account_id }}</span><span>{{ account.platform }}</span><span class="state-label" :class="`text-${account.status}`">{{ label(account.status) }}</span></div><p class="account-groups" :title="account.groups.map(item => item.name).join(' / ')">{{ account.groups.map(item => item.name).join(' / ') || t('qualityOps.ungroupedAccounts') }}</p></div></div>
+            <div class="account-identity"><div class="avatar" :class="`avatar-${account.status}`">{{ account.account_name.slice(0, 1).toUpperCase() || '#' }}</div><div class="identity-copy"><button class="account-name" :title="account.account_name" @click="openRules(account)">{{ account.account_name || `#${account.account_id}` }}</button><div class="account-meta"><span>#{{ account.account_id }}</span><span>{{ account.platform }}</span><span class="state-label" :class="`text-${account.status}`" :title="latestPoint(account) ? pointTitle(latestPoint(account)!) : undefined">{{ accountStatusLabel(account) }}</span></div><p class="account-groups" :title="account.groups.map(item => item.name).join(' / ')">{{ account.groups.map(item => item.name).join(' / ') || t('qualityOps.ungroupedAccounts') }}</p></div></div>
             <div class="history-cell">
               <div v-if="account.history.length" class="history-bars" :aria-label="t('qualityOps.statusOpenHistory', { account: account.account_name })">
-                <span v-for="n in Math.max(0, 60 - account.history.length)" :key="`empty-${n}`" class="history-bar bar-empty" aria-hidden="true" />
-                <button v-for="point in account.history" :key="point.id" class="history-bar" :class="`bar-${point.status}`" :title="pointTitle(point)" :aria-label="pointTitle(point)" @click="selected = { account, point }" />
+                <span v-for="n in Math.max(0, 60 - account.history.length)" :key="`empty-${n}`" class="history-bar bar-empty" :title="t('qualityOps.statusEmptySlot')" aria-hidden="true" />
+                <button v-for="point in account.history" :key="point.id" class="history-bar" :class="[`bar-${point.status}`, reasonClass(point)]" :title="pointTitle(point)" :aria-label="pointTitle(point)" @click="selected = { account, point }" />
               </div>
               <div v-else class="empty-history"><span v-for="n in 60" :key="n" class="history-bar bar-empty" /><span class="empty-history-label">{{ t('qualityOps.statusNoHistory') }}</span></div>
               <div class="history-meta"><span>{{ account.history.length ? date(account.history[0].started_at) : '—' }}</span><span v-if="recoveryPlan(account)" class="recovery-label" :title="t('qualityOps.statusRecoveryFlow', { interval: recoveryPlan(account)?.recovery_probe_interval_minutes || 60, confirmation: recoveryPlan(account)?.recovery_confirmation_minutes || 5 })"><Icon name="sync" size="xs" />{{ t('qualityOps.statusRecovery') }} · {{ recoveryPlan(account)?.recovery_probe_interval_minutes || 60 }} / {{ recoveryPlan(account)?.recovery_confirmation_minutes || 5 }} {{ t('qualityOps.minutesUnit') }}</span><span>{{ account.history.length ? date(account.history[account.history.length - 1].started_at) : '—' }}</span></div>
             </div>
-            <div class="rate-cell" :title="t('qualityOps.statusRateHelp')"><strong :class="{ 'rate-healthy': account.healthy_rate === 100 }">{{ account.healthy_rate === null ? '—' : `${Math.round(account.healthy_rate)}%` }}</strong><span>{{ t('qualityOps.statusHealthyRate') }}</span></div>
+            <div class="rate-cell" :title="t('qualityOps.statusRateHelp')"><strong :class="{ 'rate-healthy': account.healthy_rate === 100 }">{{ account.healthy_rate === null ? '—' : `${Math.round(account.healthy_rate)}%` }}</strong><span>{{ t('qualityOps.statusHealthyRate') }}</span><span class="rate-coverage" data-testid="quality-evaluated-rounds">{{ t('qualityOps.statusEvaluatedRounds', roundCounts(account)) }}</span></div>
             <div class="row-actions"><button class="probe-button" :disabled="!runnablePlan(account) || !!pending[runnablePlan(account)?.id || 0]" :title="account.plans.length ? undefined : t('qualityOps.statusNoRule')" @click="probe(account)"><Icon name="play" size="xs" />{{ pending[runnablePlan(account)?.id || 0] ? t('qualityOps.statusQueued') : t('qualityOps.statusProbe') }}</button><button class="rule-button" :aria-label="`${t('qualityOps.statusConfigure')} · ${account.account_name}`" @click="openRules(account, true)"><Icon name="cog" size="sm" /></button></div>
           </article>
           <div v-if="section.loaded && !section.accounts.length" class="empty-state"><Icon name="search" size="lg" /><p>{{ emptyScopeMessage(section.scope) }}</p></div>
@@ -46,8 +46,16 @@
     </div>
 
     <BaseDialog :show="!!selected" :title="t('qualityOps.statusEvidence')" @close="selected = null">
-      <p v-if="selected?.point.route_evidence_missing" class="mb-4 text-sm text-gray-500" data-testid="quality-missing-route">{{ t('qualityOps.statusMissingRouteEvidence') }}</p>
-      <template v-if="selected"><div class="evidence-account">{{ selected.account.account_name }}<span class="state-label" :class="`text-${selected.point.status}`">{{ label(selected.point.status) }}</span></div><dl class="evidence-details"><div><dt>{{ t('qualityOps.statusSampleAt') }}</dt><dd>{{ new Date(selected.point.started_at).toLocaleString() }}</dd></div><div><dt>{{ t('qualityOps.statusSampleModel') }}</dt><dd>{{ selected.point.model_ids?.join(' / ') || selected.point.model_id }}</dd></div><div><dt>{{ t('qualityOps.statusSampleMethod') }}</dt><dd>{{ t(selected.point.question_kind === 'state_probe' ? 'qualityOps.questionStateProbe' : selected.point.question_kind === 'random_reasoning' ? 'qualityOps.questionRandom' : 'qualityOps.questionCandy') }}</dd></div><div><dt>{{ t('qualityOps.statusSampleAction') }}</dt><dd>{{ actionLabel(selected.point.quality_action) }}</dd></div></dl><RouterLink class="btn btn-primary inline-flex items-center gap-2" :to="{ path: '/admin/account-quality', query: { plan_id: selected.point.plan_id, history: '1' } }">{{ t('qualityOps.statusViewHistory') }}<Icon name="arrowRight" size="sm" /></RouterLink></template>
+      <template v-if="selected">
+        <div class="evidence-account">{{ selected.account.account_name }}<span class="state-label" :class="`text-${selected.point.status}`">{{ pointStatusLabel(selected.point) }}</span></div>
+        <ul v-if="selected.point.status === 'unknown'" class="evidence-reasons" :aria-label="t('qualityOps.statusSampleReason')">
+          <li v-for="reason in evidenceReasons(selected.point)" :key="reason" data-testid="quality-reason">
+            <strong>{{ reasonLabel(reason) }}</strong>
+            <p :data-testid="reason === 'route_unverified' ? 'quality-missing-route' : undefined">{{ reason === 'route_unverified' ? t('qualityOps.statusMissingRouteEvidence') : t(`qualityOps.statusReasonHelp.${reason}`) }}</p>
+          </li>
+        </ul>
+        <dl class="evidence-details"><div><dt>{{ t('qualityOps.statusSampleAt') }}</dt><dd>{{ new Date(selected.point.started_at).toLocaleString() }}</dd></div><div><dt>{{ t('qualityOps.statusSampleModel') }}</dt><dd>{{ selected.point.model_ids?.join(' / ') || selected.point.model_id }}</dd></div><div><dt>{{ t('qualityOps.statusSampleMethod') }}</dt><dd>{{ t(selected.point.question_kind === 'state_probe' ? 'qualityOps.questionStateProbe' : selected.point.question_kind === 'random_reasoning' ? 'qualityOps.questionRandom' : 'qualityOps.questionCandy') }}</dd></div><div><dt>{{ t('qualityOps.statusSampleAction') }}</dt><dd>{{ actionLabel(selected.point.quality_action) }}</dd></div></dl><RouterLink class="btn btn-primary inline-flex items-center gap-2" :to="{ path: '/admin/account-quality', query: { plan_id: selected.point.plan_id, history: '1' } }">{{ t('qualityOps.statusViewHistory') }}<Icon name="arrowRight" size="sm" /></RouterLink>
+      </template>
     </BaseDialog>
   </AppLayout>
 </template>
@@ -60,7 +68,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import QualityTabs from '@/components/admin/operations/QualityTabs.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { getQualityOverview, type QualityOverviewAccount, type QualityHistoryPoint, type QualityStatus, type QualityProbeScope } from '@/api/admin/qualityOverview'
+import { getQualityOverview, type QualityOverviewAccount, type QualityHistoryPoint, type QualityStatus, type QualityProbeScope, type QualityUnknownReason } from '@/api/admin/qualityOverview'
 import { runQualityPlan } from '@/api/admin/accountQuality'
 import { getAllIncludingInactive } from '@/api/admin/groups'
 import { useAuthStore } from '@/stores/auth'
@@ -91,7 +99,47 @@ const label = (status: QualityStatus) => t(`qualityOps.${statusKeys[status]}`)
 const date = (value: string) => new Date(value).toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 const time = (value: string) => new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 const message = (cause: unknown) => { const err = cause as { response?: { data?: { message?: string } }; message?: string }; return err.response?.data?.message || err.message || t('qualityOps.error') }
-const pointTitle = (point: QualityHistoryPoint) => `${date(point.started_at)} · ${label(point.status)} · ${point.model_id}`
+const knownReasons: QualityUnknownReason[] = ['stale_result', 'quota_exhausted', 'rate_limited', 'route_unverified', 'comparison_pending', 'incomplete_round', 'probe_failed', 'skipped', 'inconclusive']
+const coloredReasons: QualityUnknownReason[] = ['quota_exhausted', 'rate_limited', 'stale_result']
+const reasonLabel = (reason: QualityUnknownReason) => t(`qualityOps.statusReasons.${reason}`)
+function pointReasons(point: QualityHistoryPoint): QualityUnknownReason[] {
+  if (point.status !== 'unknown') return []
+  const reasons = [...new Set(point.reason_codes?.filter(reason => knownReasons.includes(reason)) ?? [])]
+  if (reasons.length) return reasons
+  // Older servers still provide these facts, but no structured reason codes.
+  if (point.quality_action === 'stale_run') return ['stale_result']
+  if (point.quality_action === 'comparison_pending') return ['comparison_pending']
+  if (point.route_evidence_missing) return ['route_unverified']
+  return []
+}
+const evidenceReasons = (point: QualityHistoryPoint): QualityUnknownReason[] => pointReasons(point).length ? pointReasons(point) : ['inconclusive']
+const pointStatusLabel = (point: QualityHistoryPoint) => pointReasons(point).length ? pointReasons(point).map(reasonLabel).join(' / ') : label(point.status)
+const pointTitle = (point: QualityHistoryPoint) => `${date(point.started_at)} · ${pointStatusLabel(point)} · ${point.model_ids?.join(' / ') || point.model_id}`
+const latestPoint = (account: QualityOverviewAccount) => account.history[account.history.length - 1]
+function accountStatusLabel(account: QualityOverviewAccount) {
+  const point = latestPoint(account)
+  const reason = account.status === 'unknown' && point ? pointReasons(point)[0] : undefined
+  return reason ? reasonLabel(reason) : label(account.status)
+}
+function reasonClass(point: QualityHistoryPoint) {
+  const reason = pointReasons(point)[0]
+  return reason && coloredReasons.includes(reason) ? `reason-${reason}` : ''
+}
+function historyLegend(section: ScopeSection) {
+  const entries = ['healthy', 'degraded'].map(status => ({ key: status, label: label(status as QualityStatus), className: `bar-${status}` }))
+  const variants = new Set(section.accounts.flatMap(account => account.history.filter(point => point.status === 'unknown').map(reasonClass)))
+  for (const reason of coloredReasons) {
+    if (variants.has(`reason-${reason}`)) entries.push({ key: reason, label: reasonLabel(reason), className: `bar-unknown reason-${reason}` })
+  }
+  if (!variants.size || variants.has('')) entries.push({ key: 'unknown', label: label('unknown'), className: 'bar-unknown' })
+  return entries
+}
+function roundCounts(account: QualityOverviewAccount) {
+  return {
+    evaluated: account.evaluated_rounds ?? account.history.filter(point => point.status === 'healthy' || point.status === 'degraded').length,
+    total: account.total_rounds ?? account.history.length,
+  }
+}
 const recoveryPlan = (account: QualityOverviewAccount) => account.plans.find(plan => (plan.test_channel || 'account') === channel.value && plan.enabled && (plan.action_on === 'passed' || (plan.auto_restore && plan.recovery_probe_enabled)))
 function runnablePlan(account: QualityOverviewAccount) {
   const candidates = account.plans.filter(plan => (plan.test_channel || 'account') === channel.value && plan.enabled && (!plan.running_until || Date.parse(plan.running_until) <= Date.now()))
@@ -176,10 +224,10 @@ onBeforeUnmount(() => { alive = false; for (const section of sections.value) { +
 .channel-switch button { @apply min-h-9 rounded-md px-3 text-xs font-medium text-gray-500 transition-colors dark:text-gray-400; }
 .channel-switch button.selected { @apply bg-white text-gray-900 shadow-sm dark:bg-dark-600 dark:text-white; }
 .list-caption { @apply flex flex-wrap items-center justify-between gap-2 border-y border-gray-100 bg-gray-50/70 px-5 py-3 text-xs text-gray-500 dark:border-dark-700 dark:bg-dark-800/40 dark:text-gray-400; }
-.legend { @apply flex gap-4; }
+.legend { @apply flex flex-wrap justify-end gap-x-4 gap-y-2; }
 .legend > span { @apply inline-flex items-center gap-1.5; }
 .legend i { @apply h-2 w-2 rounded-sm; }
-.account-row { display: grid; grid-template-columns: minmax(170px, 220px) minmax(160px, 1fr) 66px 116px; @apply items-center gap-5 border-b border-gray-100 px-5 py-3 transition-colors last:border-b-0 hover:bg-gray-50/70 dark:border-dark-700/70 dark:hover:bg-dark-800/35; }
+.account-row { display: grid; grid-template-columns: minmax(170px, 220px) minmax(160px, 1fr) 112px 116px; @apply items-center gap-5 border-b border-gray-100 px-5 py-3 transition-colors last:border-b-0 hover:bg-gray-50/70 dark:border-dark-700/70 dark:hover:bg-dark-800/35; }
 .account-identity { @apply flex min-w-0 items-center gap-3; }
 .avatar { @apply flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-sm font-semibold text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
 .avatar-healthy { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400; }
@@ -199,13 +247,17 @@ button.history-bar { @apply transition-transform hover:scale-y-125 focus-visible
 .bar-healthy { @apply bg-emerald-500 dark:bg-emerald-400; }
 .bar-degraded { @apply bg-rose-500 dark:bg-rose-400; }
 .bar-unknown { @apply bg-slate-400 dark:bg-slate-500; }
+.bar-unknown.reason-quota_exhausted { @apply bg-amber-400 dark:bg-amber-500; }
+.bar-unknown.reason-rate_limited { @apply bg-sky-400 dark:bg-sky-500; }
+.bar-unknown.reason-stale_result { background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgb(255 255 255 / 40%) 3px 5px); }
 .bar-empty { @apply bg-gray-100 dark:bg-dark-800; }
 .empty-history-label { @apply absolute inset-0 flex items-center justify-center text-xs text-gray-500 dark:text-gray-400; }
 .history-meta { @apply mt-2 flex items-center justify-between gap-2 text-[10px] tabular-nums text-gray-400; }
 .recovery-label { @apply inline-flex items-center gap-1 text-primary-600 dark:text-primary-400; }
-.rate-cell { @apply flex flex-col items-end gap-1; }
+.rate-cell { @apply flex flex-col items-end gap-1 text-right; }
 .rate-cell strong { @apply text-base font-semibold tabular-nums; }
 .rate-cell > span { @apply text-[10px] text-gray-400; }
+.rate-cell .rate-coverage { @apply whitespace-nowrap text-[11px] tabular-nums text-gray-500 dark:text-gray-400; }
 .rate-healthy { @apply text-emerald-700 dark:text-emerald-400; }
 .row-actions { @apply flex items-center gap-2; }
 .probe-button { @apply inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-gray-100 px-3 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-dark-700 dark:text-gray-200 dark:hover:bg-dark-600; }
@@ -228,11 +280,14 @@ button.history-bar { @apply transition-transform hover:scale-y-125 focus-visible
 .recovery-link div > span { @apply text-xs text-gray-500 dark:text-gray-400; }
 .recovery-cta { @apply ml-auto flex items-center gap-2 text-xs font-medium text-primary-600 dark:text-primary-400; }
 .evidence-account { @apply flex flex-wrap items-center justify-between gap-3 break-all text-base font-semibold; }
+.evidence-reasons { @apply mt-5 space-y-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-dark-700 dark:bg-dark-800; }
+.evidence-reasons strong { @apply font-medium text-gray-800 dark:text-gray-100; }
+.evidence-reasons p { @apply mt-1 leading-relaxed text-gray-600 dark:text-gray-400; }
 .evidence-details { @apply my-6 space-y-4 text-sm; }
 .evidence-details > div { @apply flex justify-between gap-6; }
 .evidence-details dt { @apply shrink-0 text-gray-500 dark:text-gray-400; }
 .evidence-details dd { @apply break-all text-right; }
-@media (max-width: 1100px) { .account-row { grid-template-columns: minmax(150px, 180px) minmax(120px, 1fr) 55px; gap: 16px; } .row-actions { grid-column: 2 / 4; justify-content: flex-end; margin-top: -8px; } .history-bars, .empty-history { gap: 2px; } }
+@media (max-width: 1100px) { .account-row { grid-template-columns: minmax(150px, 180px) minmax(120px, 1fr) 104px; gap: 16px; } .row-actions { grid-column: 2 / 4; justify-content: flex-end; margin-top: -8px; } .history-bars, .empty-history { gap: 2px; } }
 @media (max-width: 640px) { .quality-status-page > .status-ops-nav { flex-wrap: nowrap; overflow-x: auto; width: 100%; } .status-ops-nav :deep(a) { flex-shrink: 0; } }
 @media (max-width: 640px) { .quality-status-page { gap: 16px; } .status-heading p { max-width: 250px; } .status-toolbar { gap: 8px; padding: 16px; } .search-field { flex-basis: 100%; } .group-filter { flex: 1; min-width: 0; width: 0; } .channel-switch button { padding: 0 8px; } .account-row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 18px 16px; } .account-identity { grid-column: 1; grid-row: 1; } .rate-cell { grid-column: 2; grid-row: 1; } .history-cell { grid-column: 1 / 3; grid-row: 2; } .row-actions { grid-column: 1 / 3; grid-row: 3; margin-top: 0; } .legend { gap: 10px; } .list-caption { padding: 12px 16px; } .recovery-label { font-size: 9px; } .summary-scope { top: 8px; right: 12px; } }
 </style>

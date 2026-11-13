@@ -2,6 +2,16 @@ import { apiClient } from '../client'
 
 export type QualityStatus = 'healthy' | 'degraded' | 'unknown' | 'untested'
 export type QualityProbeScope = 'main' | 'recovery'
+export type QualityUnknownReason =
+  | 'stale_result'
+  | 'quota_exhausted'
+  | 'rate_limited'
+  | 'route_unverified'
+  | 'comparison_pending'
+  | 'incomplete_round'
+  | 'probe_failed'
+  | 'skipped'
+  | 'inconclusive'
 export interface QualityHistoryPoint {
   id: number
   plan_id: number
@@ -12,6 +22,7 @@ export interface QualityHistoryPoint {
   question_kind: string
   quality_action: string
   route_evidence_missing?: boolean
+  reason_codes?: QualityUnknownReason[]
 }
 export interface QualityOverviewPlan {
   id: number
@@ -36,6 +47,8 @@ export interface QualityOverviewAccount {
   groups: { id: number; name: string }[]
   status: QualityStatus
   healthy_rate: number | null
+  evaluated_rounds?: number
+  total_rounds?: number
   history: QualityHistoryPoint[]
   plans: QualityOverviewPlan[]
 }

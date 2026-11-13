@@ -73,6 +73,7 @@ type QualityOverviewPlan struct {
 }
 
 type QualityOverviewHistory struct {
+	ReasonCodes          []string  `json:"reason_codes,omitempty"`
 	RouteEvidenceMissing bool      `json:"route_evidence_missing,omitempty"`
 	ID                   int64     `json:"id"`
 	PlanID               int64     `json:"plan_id"`
@@ -85,16 +86,18 @@ type QualityOverviewHistory struct {
 }
 
 type QualityOverviewItem struct {
-	AccountID     int64                    `json:"account_id"`
-	AccountName   string                   `json:"account_name"`
-	Platform      string                   `json:"platform"`
-	Type          string                   `json:"type"`
-	Groups        []QualityOverviewGroup   `json:"groups"`
-	Status        string                   `json:"status"`
-	HealthyRate   *float64                 `json:"healthy_rate"`
-	LastCheckedAt *time.Time               `json:"last_checked_at"`
-	History       []QualityOverviewHistory `json:"history"`
-	Plans         []QualityOverviewPlan    `json:"plans"`
+	AccountID       int64                    `json:"account_id"`
+	AccountName     string                   `json:"account_name"`
+	Platform        string                   `json:"platform"`
+	Type            string                   `json:"type"`
+	Groups          []QualityOverviewGroup   `json:"groups"`
+	Status          string                   `json:"status"`
+	HealthyRate     *float64                 `json:"healthy_rate"`
+	EvaluatedRounds int                      `json:"evaluated_rounds"`
+	TotalRounds     int                      `json:"total_rounds"`
+	LastCheckedAt   *time.Time               `json:"last_checked_at"`
+	History         []QualityOverviewHistory `json:"history"`
+	Plans           []QualityOverviewPlan    `json:"plans"`
 }
 
 type QualityOverviewPage struct {
@@ -108,12 +111,19 @@ type QualityOverviewPage struct {
 // credentials, prompts, judge identities or account Extra.
 type QualityOverviewRoundEvidence struct {
 	QualityOverviewHistory
-	Samples         int  `json:"samples"`
-	ExpectedSamples int  `json:"expected_samples"`
-	Passed          int  `json:"passed"`
-	Failed          int  `json:"failed"`
-	Skipped         int  `json:"skipped"`
-	Complete        bool `json:"complete"`
+	Samples            int  `json:"samples"`
+	ExpectedSamples    int  `json:"expected_samples"`
+	Passed             int  `json:"passed"`
+	Failed             int  `json:"failed"`
+	Skipped            int  `json:"skipped"`
+	Complete           bool `json:"complete"`
+	StaleResult        bool `json:"stale_result"`
+	QuotaExhausted     bool `json:"quota_exhausted"`
+	RateLimited        bool `json:"rate_limited"`
+	ComparisonPending  bool `json:"comparison_pending"`
+	IncompleteRound    bool `json:"incomplete_round"`
+	ProbeFailed        bool `json:"probe_failed"`
+	UnexplainedSkipped bool `json:"unexplained_skipped"`
 }
 
 type QualityOverviewAccountEvidence struct {
@@ -143,6 +153,46 @@ func qualityOverviewRoundStatus(r QualityOverviewRoundEvidence) string {
 		return "healthy"
 	}
 	return "unknown"
+}
+
+// Only fixed public codes leave the service. Repository facts cover every
+// sample, including stale/pending samples hidden by the last quality_action.
+func qualityOverviewRoundReasons(r QualityOverviewRoundEvidence, status string) []string {
+	if status != "unknown" {
+		return nil
+	}
+	codes := make([]string, 0, 9)
+	if r.StaleResult {
+		codes = append(codes, "stale_result")
+	}
+	if r.QuotaExhausted {
+		codes = append(codes, "quota_exhausted")
+	}
+	if r.RateLimited {
+		codes = append(codes, "rate_limited")
+	}
+	if r.RouteEvidenceMissing {
+		codes = append(codes, "route_unverified")
+	}
+	if r.ComparisonPending {
+		codes = append(codes, "comparison_pending")
+	}
+	// Stale, pending and unverified routes already explain an uncommitted
+	// round. Report incomplete only for independent structural gaps.
+	hasExplanation := len(codes) > 0 || r.ProbeFailed || r.UnexplainedSkipped || r.Skipped > 0
+	if r.IncompleteRound || r.ExpectedSamples < 1 || r.Samples != r.ExpectedSamples || (!r.Complete && !hasExplanation) {
+		codes = append(codes, "incomplete_round")
+	}
+	if r.ProbeFailed {
+		codes = append(codes, "probe_failed")
+	}
+	if r.UnexplainedSkipped || (r.Skipped > 0 && len(codes) == 0) {
+		codes = append(codes, "skipped")
+	}
+	if len(codes) == 0 {
+		codes = append(codes, "inconclusive")
+	}
+	return codes
 }
 
 // Use an optional read interface on the existing results repository so this
@@ -183,6 +233,7 @@ func (s *ScheduledTestService) AccountQualityOverview(ctx context.Context, filte
 		for _, round := range record.Rounds {
 			history := round.QualityOverviewHistory
 			history.Status = qualityOverviewRoundStatus(round)
+			history.ReasonCodes = qualityOverviewRoundReasons(round, history.Status)
 			if history.ModelIDs == nil {
 				history.ModelIDs = []string{}
 			}
@@ -200,6 +251,8 @@ func (s *ScheduledTestService) AccountQualityOverview(ctx context.Context, filte
 			rate := 100 * float64(healthy) / float64(definite)
 			item.HealthyRate = &rate
 		}
+		item.EvaluatedRounds = definite
+		item.TotalRounds = len(item.History)
 		page.Items = append(page.Items, item)
 	}
 	return page, nil
