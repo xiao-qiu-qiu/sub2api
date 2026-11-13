@@ -162,7 +162,6 @@ func (b *excelBPSTrackedBody) Read(p []byte) (int, error) {
 // before HTTP could have written anything. The caller owns the returned lease
 // through response closure. Static account proxies retain their old behavior.
 func (s *OpenAIGatewayService) doExcelBPSRequest(ctx context.Context, c *gin.Context, account *Account, scope string, body []byte, token, accountID string, acquire excelBPSAcquire) (*http.Response, excelBPSLease, string, error) {
-	c.Header("X-Sub2API-BPS-Transport", account.ExcelBPSTransport())
 	build := func(ctx context.Context) (*http.Request, error) {
 		return newExcelBPSRequest(ctx, body, token, accountID)
 	}
@@ -186,11 +185,25 @@ func (s *OpenAIGatewayService) doExcelBPSRequestTo(ctx context.Context, c *gin.C
 		if err := ctx.Err(); err != nil {
 			return nil, nil, proxy, err
 		}
+		req, err := build(ctx)
+		if err != nil {
+			return nil, nil, proxy, err
+		}
+		prepared, err := s.prepareExcelBPSUpstream(req, account)
+		if err != nil {
+			_ = req.Body.Close()
+			return nil, nil, proxy, err
+		}
+		req = prepared
+		selection := req.Context().Value(excelBPSTransportSelectionKey{}).(excelBPSTransportSelection)
+		c.Header("X-Sub2API-BPS-Transport", selection.transport)
+		c.Set("excel_bps_transport", selection.transport)
 		var lease excelBPSLease
 		if managed {
 			var err error
 			proxy, lease, err = acquire(ctx, scope, excluded...)
 			if err != nil {
+				_ = req.Body.Close()
 				if ctx.Err() != nil {
 					return nil, nil, proxy, ctx.Err()
 				}
@@ -199,15 +212,9 @@ func (s *OpenAIGatewayService) doExcelBPSRequestTo(ctx context.Context, c *gin.C
 				return nil, nil, proxy, err
 			}
 		}
-		req, err := build(ctx)
-		if err != nil {
-			if lease != nil {
-				lease.Release()
-			}
-			return nil, nil, proxy, err
-		}
 		c.Set("excel_bps_upstream_attempt", attempt)
 		if err := controlledSubmission(ctx, "bps"); err != nil {
+			_ = req.Body.Close()
 			if lease != nil {
 				lease.Release()
 			}
@@ -215,14 +222,14 @@ func (s *OpenAIGatewayService) doExcelBPSRequestTo(ctx context.Context, c *gin.C
 		}
 		evidence := &excelBPSWriteEvidence{}
 		var tracedRequest *http.Request
-		if account.ExcelBPSTransport() == ExcelBPSTransportWS && upstreamURL == basispoints.ResponsesURL {
+		if selection.transport == ExcelBPSTransportWS {
 			// WS parses the prepared POST body locally. Only the GET
 			// handshake's network trace can indicate a submission.
 			tracedRequest = evidence.Request(req)
 		} else {
 			tracedRequest = evidence.request(req)
 		}
-		resp, err := s.doExcelBPSUpstream(tracedRequest, proxy, account)
+		resp, err := s.doExcelBPSUpstream(tracedRequest, proxy, account, c)
 		controlledHTTPResponse(ctx, resp)
 		s.rateLimitService.observeQualityResponse(req.Context(), account, resp, err)
 		if err == nil {
@@ -286,6 +293,7 @@ func recordExcelBPSTransportFailureAt(ctx context.Context, c *gin.Context, accou
 	diagnostics := map[string]any{
 		"error_kind": kind, "error_type": fmt.Sprintf("%T", err),
 		"proxy_port": port, "session_hash": sessionHash, "attempt": attempt, "retry_before_send": retry,
+		"bps_transport": c.GetString("excel_bps_transport"),
 	}
 	if len(evidence) > 0 && evidence[0] != nil {
 		diagnostics["transport"] = evidence[0].Snapshot()
@@ -311,6 +319,7 @@ func recordExcelBPSTransportFailureAt(ctx context.Context, c *gin.Context, accou
 		zap.String("error_kind", kind), zap.String("error_type", fmt.Sprintf("%T", err)),
 		zap.Int("proxy_port", port), zap.String("session_hash", sessionHash),
 		zap.Int("attempt", attempt), zap.Bool("retry_before_send", retry),
+		zap.String("bps_transport", c.GetString("excel_bps_transport")),
 		zap.Any("transport", diagnostics["transport"]), zap.Any("acquisition_reason", diagnostics["acquisition_reason"]), zap.Any("candidates_checked", diagnostics["candidates_checked"]))
 }
 

@@ -31,6 +31,7 @@ func TestStreamProtocolFailuresAreTerminalAndNeverReplay(t *testing.T) {
 		{"client-command", `{"type":"response.create"}`, "basispoints_ws_protocol_error", websocket.MessageText},
 		{"json-null", `null`, "basispoints_ws_protocol_error", websocket.MessageText},
 		{"disconnect", "", "basispoints_ws_disconnected", websocket.MessageText},
+		{"message-too-big", "", "basispoints_ws_message_too_big", websocket.MessageText},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,8 +43,12 @@ func TestStreamProtocolFailuresAreTerminalAndNeverReplay(t *testing.T) {
 				c, _ := acceptCreate(t, w, r)
 				defer func() { _ = c.CloseNow() }()
 				defer close(closed)
-				if tc.name == "disconnect" {
-					_ = c.Close(websocket.StatusPolicyViolation, "server echoed "+testBearer)
+				if tc.name == "disconnect" || tc.name == "message-too-big" {
+					status := websocket.StatusPolicyViolation
+					if tc.name == "message-too-big" {
+						status = websocket.StatusMessageTooBig
+					}
+					_ = c.Close(status, "server echoed "+testBearer)
 					return
 				}
 				require.NoError(t, c.Write(ctx, tc.kind, []byte(tc.data)))
@@ -188,5 +193,9 @@ func TestStreamReadLimit(t *testing.T) {
 	data, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Contains(t, string(data), "event: response.failed")
+	require.Contains(t, string(data), `"code":"basispoints_ws_response_too_big"`)
+	require.Contains(t, string(data), "response exceeds the local read limit")
+	require.NotContains(t, string(data), `"code":"basispoints_ws_message_too_big"`)
+	require.NotContains(t, string(data), "request exceeds")
 	require.Less(t, len(data), 1024)
 }

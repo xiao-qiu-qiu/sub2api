@@ -54,17 +54,18 @@ const backendModeDBTimeout = 5 * time.Second
 
 // cachedGatewayForwardingSettings 缓存网关转发行为设置（进程内缓存，60s TTL）
 type cachedGatewayForwardingSettings struct {
-	openAITTFTMode                   string
-	fingerprintUnification           bool
-	metadataPassthrough              bool
-	cchSigning                       bool
-	claudeOAuthSystemPromptInjection bool
-	claudeOAuthSystemPrompt          string
-	claudeOAuthSystemPromptBlocks    string
-	anthropicCacheTTL1hInjection     bool
-	rewriteMessageCacheControl       bool
-	clientDatelineNormalization      bool
-	expiresAt                        int64 // unix nano
+	excelBPSLargeRequestHTTPFallbackEnabled bool
+	openAITTFTMode                          string
+	fingerprintUnification                  bool
+	metadataPassthrough                     bool
+	cchSigning                              bool
+	claudeOAuthSystemPromptInjection        bool
+	claudeOAuthSystemPrompt                 string
+	claudeOAuthSystemPromptBlocks           string
+	anthropicCacheTTL1hInjection            bool
+	rewriteMessageCacheControl              bool
+	clientDatelineNormalization             bool
+	expiresAt                               int64 // unix nano
 }
 
 var gatewayForwardingCache atomic.Value // *cachedGatewayForwardingSettings
@@ -1163,6 +1164,7 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 }
 
 type gatewayForwardingSettingsResult struct {
+	excelBPSLargeRequestHTTPFallbackEnabled                                               bool
 	openAITTFTMode                                                                        string
 	fp, mp, cch, claudeOAuthSystemPromptInjection, cacheTTL1h, rewriteMessageCacheControl bool
 	clientDatelineNormalization                                                           bool
@@ -1173,16 +1175,17 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 	if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return gatewayForwardingSettingsResult{
-				openAITTFTMode:                   cached.openAITTFTMode,
-				fp:                               cached.fingerprintUnification,
-				mp:                               cached.metadataPassthrough,
-				cch:                              cached.cchSigning,
-				claudeOAuthSystemPromptInjection: cached.claudeOAuthSystemPromptInjection,
-				claudeOAuthSystemPrompt:          cached.claudeOAuthSystemPrompt,
-				claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
-				cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
-				rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
-				clientDatelineNormalization:      cached.clientDatelineNormalization,
+				excelBPSLargeRequestHTTPFallbackEnabled: cached.excelBPSLargeRequestHTTPFallbackEnabled,
+				openAITTFTMode:                          cached.openAITTFTMode,
+				fp:                                      cached.fingerprintUnification,
+				mp:                                      cached.metadataPassthrough,
+				cch:                                     cached.cchSigning,
+				claudeOAuthSystemPromptInjection:        cached.claudeOAuthSystemPromptInjection,
+				claudeOAuthSystemPrompt:                 cached.claudeOAuthSystemPrompt,
+				claudeOAuthSystemPromptBlocks:           cached.claudeOAuthSystemPromptBlocks,
+				cacheTTL1h:                              cached.anthropicCacheTTL1hInjection,
+				rewriteMessageCacheControl:              cached.rewriteMessageCacheControl,
+				clientDatelineNormalization:             cached.clientDatelineNormalization,
 			}
 		}
 	}
@@ -1190,22 +1193,24 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
 				return gatewayForwardingSettingsResult{
-					openAITTFTMode:                   cached.openAITTFTMode,
-					fp:                               cached.fingerprintUnification,
-					mp:                               cached.metadataPassthrough,
-					cch:                              cached.cchSigning,
-					claudeOAuthSystemPromptInjection: cached.claudeOAuthSystemPromptInjection,
-					claudeOAuthSystemPrompt:          cached.claudeOAuthSystemPrompt,
-					claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
-					cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
-					rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
-					clientDatelineNormalization:      cached.clientDatelineNormalization,
+					excelBPSLargeRequestHTTPFallbackEnabled: cached.excelBPSLargeRequestHTTPFallbackEnabled,
+					openAITTFTMode:                          cached.openAITTFTMode,
+					fp:                                      cached.fingerprintUnification,
+					mp:                                      cached.metadataPassthrough,
+					cch:                                     cached.cchSigning,
+					claudeOAuthSystemPromptInjection:        cached.claudeOAuthSystemPromptInjection,
+					claudeOAuthSystemPrompt:                 cached.claudeOAuthSystemPrompt,
+					claudeOAuthSystemPromptBlocks:           cached.claudeOAuthSystemPromptBlocks,
+					cacheTTL1h:                              cached.anthropicCacheTTL1hInjection,
+					rewriteMessageCacheControl:              cached.rewriteMessageCacheControl,
+					clientDatelineNormalization:             cached.clientDatelineNormalization,
 				}, nil
 			}
 		}
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayForwardingDBTimeout)
 		defer cancel()
 		values, err := s.settingRepo.GetMultiple(dbCtx, []string{
+			SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled,
 			SettingKeyOpenAITTFTMode,
 			SettingKeyEnableFingerprintUnification,
 			SettingKeyEnableMetadataPassthrough,
@@ -1219,18 +1224,23 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		})
 		if err != nil {
 			slog.Warn("failed to get gateway forwarding settings", "error", err)
+			largeRequestHTTPFallbackEnabled := true
+			if cached, ok := gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings); ok && cached != nil && cached.expiresAt > 0 {
+				largeRequestHTTPFallbackEnabled = cached.excelBPSLargeRequestHTTPFallbackEnabled
+			}
 			gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
-				openAITTFTMode:                   OpenAITTFTModeSemantic,
-				fingerprintUnification:           true,
-				metadataPassthrough:              false,
-				cchSigning:                       false,
-				claudeOAuthSystemPromptInjection: true,
-				anthropicCacheTTL1hInjection:     false,
-				rewriteMessageCacheControl:       s.defaultRewriteMessageCacheControl(),
-				clientDatelineNormalization:      true,
-				expiresAt:                        time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
+				excelBPSLargeRequestHTTPFallbackEnabled: largeRequestHTTPFallbackEnabled,
+				openAITTFTMode:                          OpenAITTFTModeSemantic,
+				fingerprintUnification:                  true,
+				metadataPassthrough:                     false,
+				cchSigning:                              false,
+				claudeOAuthSystemPromptInjection:        true,
+				anthropicCacheTTL1hInjection:            false,
+				rewriteMessageCacheControl:              s.defaultRewriteMessageCacheControl(),
+				clientDatelineNormalization:             true,
+				expiresAt:                               time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
+			return gatewayForwardingSettingsResult{excelBPSLargeRequestHTTPFallbackEnabled: largeRequestHTTPFallbackEnabled, openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
 		}
 		ttftMode := normalizeOpenAITTFTMode(values[SettingKeyOpenAITTFTMode])
 		fp := true
@@ -1255,35 +1265,49 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			clientDatelineNormalization = v == "true"
 		}
 		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
-			openAITTFTMode:                   ttftMode,
-			fingerprintUnification:           fp,
-			metadataPassthrough:              mp,
-			cchSigning:                       cch,
-			claudeOAuthSystemPromptInjection: systemPromptInjection,
-			claudeOAuthSystemPrompt:          systemPrompt,
-			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
-			anthropicCacheTTL1hInjection:     cacheTTL1h,
-			rewriteMessageCacheControl:       rewriteMessageCacheControl,
-			clientDatelineNormalization:      clientDatelineNormalization,
-			expiresAt:                        time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
+			excelBPSLargeRequestHTTPFallbackEnabled: !isFalseSettingValue(values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled]),
+			openAITTFTMode:                          ttftMode,
+			fingerprintUnification:                  fp,
+			metadataPassthrough:                     mp,
+			cchSigning:                              cch,
+			claudeOAuthSystemPromptInjection:        systemPromptInjection,
+			claudeOAuthSystemPrompt:                 systemPrompt,
+			claudeOAuthSystemPromptBlocks:           systemPromptBlocks,
+			anthropicCacheTTL1hInjection:            cacheTTL1h,
+			rewriteMessageCacheControl:              rewriteMessageCacheControl,
+			clientDatelineNormalization:             clientDatelineNormalization,
+			expiresAt:                               time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 		})
 		return gatewayForwardingSettingsResult{
-			openAITTFTMode:                   ttftMode,
-			fp:                               fp,
-			mp:                               mp,
-			cch:                              cch,
-			claudeOAuthSystemPromptInjection: systemPromptInjection,
-			claudeOAuthSystemPrompt:          systemPrompt,
-			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
-			cacheTTL1h:                       cacheTTL1h,
-			rewriteMessageCacheControl:       rewriteMessageCacheControl,
-			clientDatelineNormalization:      clientDatelineNormalization,
+			excelBPSLargeRequestHTTPFallbackEnabled: !isFalseSettingValue(values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled]),
+			openAITTFTMode:                          ttftMode,
+			fp:                                      fp,
+			mp:                                      mp,
+			cch:                                     cch,
+			claudeOAuthSystemPromptInjection:        systemPromptInjection,
+			claudeOAuthSystemPrompt:                 systemPrompt,
+			claudeOAuthSystemPromptBlocks:           systemPromptBlocks,
+			cacheTTL1h:                              cacheTTL1h,
+			rewriteMessageCacheControl:              rewriteMessageCacheControl,
+			clientDatelineNormalization:             clientDatelineNormalization,
 		}, nil
 	})
 	if r, ok := val.(gatewayForwardingSettingsResult); ok {
 		return r
 	}
-	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, clientDatelineNormalization: true}
+	return gatewayForwardingSettingsResult{excelBPSLargeRequestHTTPFallbackEnabled: true, fp: true, claudeOAuthSystemPromptInjection: true, clientDatelineNormalization: true}
+}
+
+// IsExcelBPSLargeRequestHTTPFallbackEnabled defaults to true for installations
+// without an override and shares the gateway forwarding cache and save refresh.
+func (s *SettingService) IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.getGatewayForwardingSettingsCached(ctx).excelBPSLargeRequestHTTPFallbackEnabled
 }
 
 // GetOpenAITTFTMode 返回 Responses first_token_ms 的统计口径。

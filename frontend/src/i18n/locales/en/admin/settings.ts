@@ -17,6 +17,10 @@ export default {
         payment: 'Payment',
       },
       features: {
+        excelBpsTransport: {
+          largeRequestHTTPFallback: 'Use HTTP/SSE for large BPS requests',
+          largeRequestHTTPFallbackHint: 'Use HTTP/SSE before sending WebSocket messages of 15 MB or more, preserving images and context.',
+        },
         excelBpsInstructions: {
           title: 'BPS client instructions',
           description: 'Applies to all BPS clients. Tool transport rules are appended separately.',

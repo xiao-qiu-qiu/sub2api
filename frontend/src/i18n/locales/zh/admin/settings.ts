@@ -17,6 +17,10 @@ export default {
         payment: '支付设置',
       },
       features: {
+        excelBpsTransport: {
+          largeRequestHTTPFallback: 'BPS 大请求自动使用 HTTP/SSE',
+          largeRequestHTTPFallbackHint: 'WS 消息达到 15 MB 时，在发送前改用 HTTP/SSE，图片和上下文保持完整。',
+        },
         excelBpsInstructions: {
           title: 'BPS 客户端提示词',
           description: '适用于所有 BPS 客户端，工具调用协议由系统另行追加。',

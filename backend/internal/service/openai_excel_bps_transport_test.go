@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -122,6 +124,90 @@ func TestExcelBPSProxyFailoverOnlyBeforeRequestSent(t *testing.T) {
 				require.Nil(t, lease)
 				require.Equal(t, 1, calls)
 				require.Equal(t, 1, acquired)
+			}
+		})
+	}
+}
+
+func TestExcelBPSLargeRequestHTTPFailoverOnlyBeforeSend(t *testing.T) {
+	for _, scenario := range []string{"body_read", "get_body_read", "dial_only"} {
+		t.Run(scenario, func(t *testing.T) {
+			body := excelBPSRequestAtWSThreshold(t, 0)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			account := excelAccount()
+			account.Extra[ExcelBPSTransportKey] = ExcelBPSTransportWS
+			account.Extra["openai_excel_bps_mihomo"] = true
+			var leases []*bpsTestLease
+			acquired, calls := 0, 0
+			acquire := func(_ context.Context, _ string, excluded ...string) (string, excelBPSLease, error) {
+				acquired++
+				lease := &bpsTestLease{}
+				leases = append(leases, lease)
+				if acquired == 1 {
+					assert.Empty(t, excluded)
+				} else {
+					assert.Equal(t, []string{"http://127.0.0.1:19001"}, excluded)
+				}
+				return fmt.Sprintf("http://127.0.0.1:%d", 19000+acquired), lease, nil
+			}
+			upstream := &bpsTestUpstream{send: func(req *http.Request, proxy string) (*http.Response, error) {
+				calls++
+				defer func() { _ = req.Body.Close() }()
+				assert.Equal(t, fmt.Sprintf("http://127.0.0.1:%d", 19000+calls), proxy)
+				assert.Equal(t, HTTPUpstreamProfileExcelBPS, HTTPUpstreamProfileFromContext(req.Context()))
+				assert.Equal(t, "excel_bps_sse", transportdiag.HTTPRoute(req).Mode)
+				if calls > 1 {
+					sent, err := io.ReadAll(req.Body)
+					require.NoError(t, err)
+					assert.True(t, bytes.Equal(body, sent), "the unsent retry keeps the original body")
+					return bpsCompletionResponse(200, "done"), nil
+				}
+				// A dial notification alone is not submission. Reading either
+				// body is HTTP write evidence, even without a GotConn hook.
+				httptrace.ContextClientTrace(req.Context()).GetConn("bps.openai.com:443")
+				var reader io.ReadCloser
+				switch scenario {
+				case "body_read":
+					reader = req.Body
+				case "get_body_read":
+					var err error
+					reader, err = req.GetBody()
+					require.NoError(t, err)
+				}
+				if reader != nil {
+					_, err := reader.Read(make([]byte, 1))
+					require.NoError(t, err)
+					require.NoError(t, reader.Close())
+				}
+				return nil, io.ErrUnexpectedEOF
+			}}
+			svc := &OpenAIGatewayService{httpUpstream: upstream}
+			resp, lease, _, err := svc.doExcelBPSRequest(t.Context(), c, account, "large-ws-configured", body, "test-token", "test-account", acquire)
+			assert.Equal(t, ExcelBPSTransportSSE, rec.Header().Get("X-Sub2API-BPS-Transport"))
+			assert.Equal(t, ExcelBPSTransportWS, account.ExcelBPSTransport())
+			if scenario == "dial_only" {
+				require.NoError(t, err)
+				require.NoError(t, resp.Body.Close())
+				lease.Release()
+				assert.Equal(t, 2, calls)
+				assert.Equal(t, 2, acquired)
+			} else {
+				require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+				assert.Nil(t, resp)
+				assert.Nil(t, lease)
+				assert.Equal(t, 1, calls, "a written HTTP request must not move to another exit")
+				assert.Equal(t, 1, acquired)
+				events, exists := c.Get(OpsUpstreamErrorsKey)
+				require.True(t, exists)
+				entries := events.([]*OpsUpstreamErrorEvent)
+				require.Len(t, entries, 1)
+				assert.Contains(t, entries[0].Detail, `"bps_transport":"sse"`)
+				assert.Contains(t, entries[0].Detail, `"retry_before_send":false`)
+			}
+			for _, lease := range leases {
+				assert.Equal(t, 1, lease.releases)
 			}
 		})
 	}
@@ -241,12 +327,25 @@ func TestExcelBPSTransportErrorClassification(t *testing.T) {
 
 // Exercise actual net/http tracing without listening sockets or external traffic.
 func TestExcelBPSFailoverRealHTTPTransport(t *testing.T) {
-	for _, sent := range []bool{false, true} {
-		t.Run(fmt.Sprintf("sent_%t", sent), func(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		sent, configuredWS bool
+	}{
+		{name: "HTTP unsent"},
+		{name: "HTTP sent", sent: true},
+		{name: "large WS-configured HTTP unsent", configuredWS: true},
+		{name: "large WS-configured HTTP sent", sent: true, configuredWS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 			account := excelAccount()
 			account.Extra["openai_excel_bps_mihomo"] = true
+			body := []byte("must not duplicate")
+			if tc.configuredWS {
+				account.Extra[ExcelBPSTransportKey] = ExcelBPSTransportWS
+				body = excelBPSRequestAtWSThreshold(t, 0)
+			}
 			acquired, calls := 0, 0
 			acquire := func(context.Context, string, ...string) (string, excelBPSLease, error) {
 				acquired++
@@ -254,7 +353,7 @@ func TestExcelBPSFailoverRealHTTPTransport(t *testing.T) {
 			}
 			observed := make(chan string, 1)
 			transport := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
-				if !sent {
+				if !tc.sent {
 					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 				}
 				local, remote := net.Pipe()
@@ -283,12 +382,13 @@ func TestExcelBPSFailoverRealHTTPTransport(t *testing.T) {
 				return client.Do(r)
 			}}
 			s := &OpenAIGatewayService{httpUpstream: upstream}
-			resp, lease, _, err := s.doExcelBPSRequest(context.Background(), c, account, "session", []byte("must not duplicate"), "token", "account", acquire)
-			if sent {
+			resp, lease, _, err := s.doExcelBPSRequest(t.Context(), c, account, "session", body, "token", "account", acquire)
+			assert.Equal(t, ExcelBPSTransportSSE, c.Writer.Header().Get("X-Sub2API-BPS-Transport"))
+			if tc.sent {
 				require.Error(t, err)
 				require.Equal(t, 1, calls)
 				require.Equal(t, 1, acquired)
-				require.Equal(t, "must not duplicate", <-observed)
+				require.Equal(t, string(body), <-observed)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, 2, calls)

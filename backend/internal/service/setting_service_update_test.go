@@ -598,6 +598,80 @@ func TestSettingService_InitializeDefaultBPSImages(t *testing.T) {
 	require.Equal(t, "false", repo.values[SettingKeyExcelBPSImageRelayEnabled])
 }
 
+func TestSettingService_ExcelBPSLargeRequestHTTPFallbackDefaults(t *testing.T) {
+	ctx := context.Background()
+	var nilService *SettingService
+	require.True(t, nilService.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+	require.True(t, (&SettingService{}).IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+
+	t.Run("new installation", func(t *testing.T) {
+		repo := &forwardedIPMigrationRepoStub{values: map[string]string{}}
+		svc := NewSettingService(repo, &config.Config{})
+		require.NoError(t, svc.InitializeDefaultSettings(ctx))
+		require.Equal(t, "true", repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled])
+		repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled] = "false"
+		require.NoError(t, svc.InitializeDefaultSettings(ctx))
+		require.Equal(t, "false", repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled])
+	})
+
+	t.Run("existing installation without key", func(t *testing.T) {
+		resetGatewayForwardingSettingsCacheForTest(t)
+		repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeySiteName: "existing site"}}
+		svc := NewSettingService(repo, &config.Config{})
+		settings, err := svc.GetAllSettings(ctx)
+		require.NoError(t, err)
+		require.True(t, settings.ExcelBPSLargeRequestHTTPFallbackEnabled)
+		require.True(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(nil))
+		require.NotContains(t, repo.values, SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled)
+	})
+
+	t.Run("unavailable settings", func(t *testing.T) {
+		resetGatewayForwardingSettingsCacheForTest(t)
+		svc := NewSettingService(&excelBPSImageSettingsRepo{err: errors.New("read failed")}, &config.Config{})
+		require.True(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+	})
+}
+
+func TestSettingService_ExcelBPSLargeRequestHTTPFallbackRoundTripAndCache(t *testing.T) {
+	resetGatewayForwardingSettingsCacheForTest(t)
+	ctx := context.Background()
+	repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeySiteName: "keep site"}}
+	svc := NewSettingService(repo, &config.Config{})
+	require.True(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+	for _, enabled := range []bool{false, true, false} {
+		settings, err := svc.GetAllSettings(ctx)
+		require.NoError(t, err)
+		settings.ExcelBPSLargeRequestHTTPFallbackEnabled = enabled
+		require.NoError(t, svc.UpdateSettings(ctx, settings))
+		require.Equal(t, strconv.FormatBool(enabled), repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled])
+		require.Equal(t, enabled, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx), "successful save must refresh a warm cache")
+		resetGatewayForwardingSettingsCacheForTest(t)
+		require.Equal(t, enabled, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx), "batched reload must preserve explicit false")
+		saved, err := svc.GetAllSettings(ctx)
+		require.NoError(t, err)
+		require.Equal(t, enabled, saved.ExcelBPSLargeRequestHTTPFallbackEnabled)
+		require.Equal(t, "keep site", saved.SiteName)
+	}
+
+	settings, err := svc.GetAllSettings(ctx)
+	require.NoError(t, err)
+	settings.SiteName = "changed site"
+	settings.ExcelBPSLargeRequestHTTPFallbackEnabled = true
+	require.NoError(t, svc.UpdateSettingsOmitting(ctx, settings, OmittedSettingKeys{SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled: {}}))
+	require.Equal(t, "changed site", repo.values[SettingKeySiteName])
+	require.Equal(t, "false", repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled])
+	require.False(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+
+	repo.err = errors.New("save failed")
+	require.Error(t, svc.UpdateSettings(ctx, settings))
+	require.False(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx))
+	require.Equal(t, "false", repo.values[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled])
+	expired := *gatewayForwardingCache.Load().(*cachedGatewayForwardingSettings)
+	expired.expiresAt = 1
+	gatewayForwardingCache.Store(&expired)
+	require.False(t, svc.IsExcelBPSLargeRequestHTTPFallbackEnabled(ctx), "refresh failure must preserve the last explicit false")
+}
+
 func TestSettingService_UpdateSettings_APIKeyACLTrustForwardedIPRefreshesConfig(t *testing.T) {
 	repo := &settingUpdateRepoStub{}
 	cfg := &config.Config{}

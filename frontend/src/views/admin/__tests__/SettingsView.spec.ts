@@ -1157,12 +1157,43 @@ describe("admin SettingsView payment visible method controls", () => {
     const tab = wrapper.findAll('button').find((node) => node.text().includes('admin.settings.tabs.features'));
     await tab?.trigger('click');
     const protocolSwitches = wrapper.get('[data-testid="protocol-feature-switches"]');
-    await protocolSwitches.get('input').setValue(false);
-    await protocolSwitches.findAll('input')[1].setValue(true);
+    await protocolSwitches.get('#excel-bps-protocol-enabled').setValue(false);
+    await protocolSwitches.get('#prism-browser-enabled').setValue(true);
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
     expect(updateSettings.mock.calls[0]?.[0]).toMatchObject({ excel_bps_enabled: false, prism_browser_enabled: true });
     wrapper.unmount();
+  });
+
+  it("defaults large BPS requests to HTTP/SSE and saves disabled and enabled states", async () => {
+    settingsRoute.query = { tab: 'features' };
+    const wrapper = mountView();
+    await flushPromises();
+    const toggle = wrapper.get('#excel-bps-large-request-http');
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    expect(toggle.attributes('aria-describedby')).toBe('excel-bps-large-request-http-hint');
+    await toggle.setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      excel_bps_enabled: true,
+      excel_bps_large_request_http_fallback_enabled: false,
+    }));
+    expect(showError).not.toHaveBeenCalled();
+    wrapper.unmount();
+
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, excel_bps_large_request_http_fallback_enabled: false });
+    const reloaded = mountView();
+    await flushPromises();
+    const savedToggle = reloaded.get('#excel-bps-large-request-http');
+    expect((savedToggle.element as HTMLInputElement).checked).toBe(false);
+    await savedToggle.setValue(true);
+    await reloaded.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      excel_bps_large_request_http_fallback_enabled: true,
+    }));
+    expect(showError).not.toHaveBeenCalled();
   });
 
   it("defaults to native image uploads without a public origin and reloads the mode", async () => {

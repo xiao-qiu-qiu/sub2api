@@ -85,8 +85,14 @@ func classifyUpstreamFailure(kind string, payload object) *UpstreamFailure {
 			errorType = "invalid_request_error"
 		}
 	}
-	return &UpstreamFailure{Status: status, Code: code, Type: errorType, Param: safeFailureParam(text(detail["param"])),
-		Message: "Excel BPS upstream failure: " + code + "; request was not replayed"}
+	message := "Excel BPS upstream failure: " + code + "; request was not replayed"
+	switch code {
+	case "basispoints_ws_message_too_big":
+		message = "Excel BPS WebSocket request exceeds the upstream message size limit; request was not replayed"
+	case "basispoints_ws_response_too_big":
+		message = "Excel BPS upstream WebSocket response exceeds the local read limit; request was not replayed"
+	}
+	return &UpstreamFailure{Status: status, Code: code, Type: errorType, Param: safeFailureParam(text(detail["param"])), Message: message}
 }
 
 // Only protocol field names and bounded array indices may cross the bridge.
@@ -125,7 +131,7 @@ func failureIdentifierStatus(identifier string) int {
 		return http.StatusForbidden
 	case "model_not_found", "model_not_found_error":
 		return http.StatusNotFound
-	case "message_too_big":
+	case "message_too_big", "basispoints_ws_message_too_big":
 		return http.StatusRequestEntityTooLarge
 	case "rate_limit_error", "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached":
 		return http.StatusTooManyRequests
@@ -133,7 +139,8 @@ func failureIdentifierStatus(identifier string) int {
 		return http.StatusInternalServerError
 	case "overloaded_error", "service_unavailable":
 		return http.StatusServiceUnavailable
-	case "api_error", "basispoints_upstream_error", "basispoints_upstream_cancelled", "basispoints_protocol_error":
+	case "api_error", "basispoints_upstream_error", "basispoints_upstream_cancelled", "basispoints_protocol_error",
+		"basispoints_ws_response_too_big":
 		return http.StatusBadGateway
 	default:
 		return 0

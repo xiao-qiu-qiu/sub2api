@@ -20,6 +20,10 @@ WS 模式仍请求 `/basispoints/api/responses`，通过 WebSocket 握手和 `re
 
 Responses 响应头 `X-Sub2API-BPS-Transport` 返回 `ws` 或 `sse`，可用来确认实际选择。可以先用账号连接测试中的 **BPS 工具往返** 验证，再在同账号、同模型、同出口下切换传输进行答题对照。
 
+**系统设置 → 功能开关 → 协议功能 → BPS 大请求自动使用 HTTP/SSE** 默认开启。账号选择 WS 时，最终 `response.create` 消息达到 **15 MB（15,000,000 字节）**，会在发送前改用同一 BPS 的 HTTP/SSE；大小计算包含控制字段和 JSON 转义。这是预留余量的保护阈值，不代表上游公布的精确限制。图片、文本、模型、账号和出口均保持原配置，账号本身的 WS 选项也不会被改写。关闭后保留原 WS 行为；已有 HTTP/SSE 账号和附件、生图接口不受影响。
+
+管理员设置字段为 `excel_bps_large_request_http_fallback_enabled`；旧配置缺少此字段时同样开启，保存后当前实例的新请求立即生效。发生自动切换时响应头显示 `sse`，诊断事件 `excel_bps.large_request_http_fallback` 记录消息字节数与保护阈值。远端 WS 关闭码 1009 保留为 `basispoints_ws_message_too_big`（语义状态 413）；本地响应读上限为 `basispoints_ws_response_too_big`（502），两者都不会触发已发送请求的重放。
+
 断线、超时或协议错误不会重连、自动切回 SSE 或重放已提交生成。未启用 ARC 初始化或诊断模式的 ticket/Cookie 回传。此功能用于协议对照，质量效果需要实际测试。协议参考：[bps-local-public](https://github.com/sunboyzoey/bps-local-public/tree/7134964fe0ce72b6b44b000cc97d86ea1e7b80e5)。
 
 ## 客户端提示词

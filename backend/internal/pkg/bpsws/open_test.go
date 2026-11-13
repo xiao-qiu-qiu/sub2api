@@ -2,6 +2,7 @@ package bpsws
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -219,6 +221,111 @@ func TestOpenHandshakeProfileAndStreaming(t *testing.T) {
 			require.Equal(t, "application/json", req.Header.Get("Content-Type"))
 		})
 	}
+}
+
+func TestPrepareRequestMatchesSentPayloadAndPreservesCapture(t *testing.T) {
+	ctx := testContext(t)
+	original := []byte(` {"model":"test-model","input":"<>&汉😀\u2028","metadata":{"integer":9007199254740993},"stream":true} `)
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"responses"}, OriginPatterns: []string{"bps.openai.com"}})
+		require.NoError(t, err)
+		defer func() { _ = conn.CloseNow() }()
+		_, payload, err := conn.Read(ctx)
+		require.NoError(t, err)
+		var frame map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(payload, &frame))
+		var requestID string
+		require.NoError(t, json.Unmarshal(frame["basispoints_request_id"], &requestID))
+		assert.Equal(t, requestID, r.URL.Query().Get("bps_ws_affinity"))
+		received <- payload
+		sendJSON(t, ctx, conn, `{"type":"response.completed","response":{"status":"completed","output":[]}}`)
+	}))
+	defer server.Close()
+	req := preparedRequest(t, ctx, server.URL+"/responses")
+	req.Body = io.NopCloser(bytes.NewReader(original))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(original)), nil }
+	prepared, size, err := PrepareRequest(req)
+	require.NoError(t, err)
+	pending := prepared.Context().Value(preparedCreateKey{}).(*atomic.Pointer[preparedCreate])
+	expectedPayload := bytes.Clone(pending.Load().payload)
+	assert.Greater(t, size, len(original))
+	assert.Contains(t, string(expectedPayload), `\u003c\u003e\u0026汉😀\u2028`)
+	assert.Contains(t, string(expectedPayload), `9007199254740993`)
+	unchanged, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, original, unchanged, "measuring must not consume the original HTTP body")
+	req.Body = io.NopCloser(bytes.NewReader(original))
+	var captured bytes.Buffer
+	prepared.Body = io.NopCloser(io.TeeReader(req.Body, &captured))
+	cached, cachedSize, err := PrepareRequest(prepared)
+	require.NoError(t, err)
+	assert.Same(t, prepared, cached)
+	assert.Equal(t, size, cachedSize)
+	response, err := Open(cached.Context(), server.Client(), cached, time.Second)
+	require.NoError(t, err)
+	assert.Nil(t, pending.Load(), "the request context must release its encoded payload before streaming")
+	stream := response.Body.(*eventBody)
+	assert.Same(t, pending, stream.ctx.Value(preparedCreateKey{}))
+	_, _, err = PrepareRequest(cached)
+	require.ErrorIs(t, err, errPreparedCreateConsumed, "a consumed request must not be prepared again")
+	_, err = io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	select {
+	case payload := <-received:
+		assert.Equal(t, size, len(payload))
+		assert.Equal(t, expectedPayload, payload, "send the exact bytes measured, without new control IDs")
+	case <-ctx.Done():
+		t.Fatal("server did not receive response.create")
+	}
+	assert.Equal(t, original, captured.Bytes(), "cached payload must still feed request capture")
+}
+
+func TestPreparedRequestConcurrentOpenConsumesOnce(t *testing.T) {
+	ctx := testContext(t)
+	var attempts atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("rejected"))}, nil
+	})}
+	req, _, err := PrepareRequest(preparedRequest(t, ctx, "https://upstream.invalid/responses"))
+	require.NoError(t, err)
+	start := make(chan struct{})
+	type openResult struct {
+		response *http.Response
+		err      error
+	}
+	results := make(chan openResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			response, err := Open(req.Context(), client, req, 0)
+			results <- openResult{response, err}
+		}()
+	}
+	close(start)
+	opened, consumed := 0, 0
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				require.ErrorIs(t, result.err, errPreparedCreateConsumed)
+				assert.Nil(t, result.response)
+				consumed++
+			} else {
+				require.NotNil(t, result.response)
+				assert.Equal(t, http.StatusForbidden, result.response.StatusCode)
+				require.NoError(t, result.response.Body.Close())
+				opened++
+			}
+		case <-ctx.Done():
+			t.Fatal("concurrent Open did not finish before cancellation")
+		}
+	}
+	assert.Equal(t, 1, opened)
+	assert.Equal(t, 1, consumed)
+	assert.EqualValues(t, 1, attempts.Load(), "a prepared request can reach the network only once")
 }
 
 func TestOpenRejectsSuccessfulHTTPWithoutWebSocketUpgrade(t *testing.T) {

@@ -208,7 +208,8 @@ type SystemSettings struct {
 	OpsQueryModeDefault          string
 	OpsMetricsIntervalSeconds    int
 
-	ExcelBPSEnabled bool `json:"excel_bps_enabled"`
+	ExcelBPSEnabled                         bool `json:"excel_bps_enabled"`
+	ExcelBPSLargeRequestHTTPFallbackEnabled bool `json:"excel_bps_large_request_http_fallback_enabled"`
 
 	// Channel Monitor feature
 	ChannelMonitorEnabled                bool   `json:"channel_monitor_enabled"`

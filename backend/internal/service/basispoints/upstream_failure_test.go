@@ -3,11 +3,17 @@ package basispoints
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/bpsws"
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,6 +50,96 @@ func TestUpstreamFailureClassificationBoundaries(t *testing.T) {
 		})
 	}
 	require.Nil(t, ParseUpstreamFailure([]byte("invalid JSON")))
+}
+
+func TestUpstreamFailureWebSocketReadClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		closeStatus              websocket.StatusCode
+		status                   int
+		code, errorType, message string
+	}{
+		{"remote message limit", websocket.StatusMessageTooBig, http.StatusRequestEntityTooLarge,
+			"basispoints_ws_message_too_big", "invalid_request_error",
+			"Excel BPS WebSocket request exceeds the upstream message size limit; request was not replayed"},
+		{"ordinary disconnect", websocket.StatusPolicyViolation, http.StatusBadGateway,
+			"basispoints_upstream_error", "server_error",
+			"Excel BPS upstream failure: basispoints_upstream_error; request was not replayed"},
+		{"local response limit", 0, http.StatusBadGateway,
+			"basispoints_ws_response_too_big", "server_error",
+			"Excel BPS upstream WebSocket response exceeds the local read limit; request was not replayed"},
+	} {
+		for _, clientStream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, clientStream), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				var connections, creates atomic.Int32
+				closed := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					connections.Add(1)
+					defer close(closed)
+					conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+						Subprotocols: []string{"responses"}, OriginPatterns: []string{"bps.openai.com"},
+					})
+					require.NoError(t, err)
+					defer func() { _ = conn.CloseNow() }()
+					kind, data, err := conn.Read(ctx)
+					require.NoError(t, err)
+					require.Equal(t, websocket.MessageText, kind)
+					var create object
+					require.NoError(t, decode(data, &create))
+					require.Equal(t, "response.create", create["type"])
+					creates.Add(1)
+					if tc.closeStatus != 0 {
+						_ = conn.Close(tc.closeStatus, "PRIVATE_UPSTREAM_CLOSE_REASON Bearer PRIVATE_WS_BEARER")
+						return
+					}
+					_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"response.output_text.delta","delta":"`+strings.Repeat("x", 16<<20)+`"}`))
+				}))
+				defer server.Close()
+				source := testSource()
+				source["stream"] = clientStream
+				prepared, bridge := mustPrepare(t, source, "", nil)
+				raw, err := json.Marshal(prepared)
+				require.NoError(t, err)
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, strings.NewReader(string(raw)))
+				require.NoError(t, err)
+				req.Header.Set("Authorization", "Bearer PRIVATE_WS_BEARER")
+				response, err := bpsws.Open(ctx, server.Client(), req, 0)
+				require.NoError(t, err)
+				defer func() { _ = response.Body.Close() }()
+				repairs := 0
+				body := bridge.StreamWithRepairs(ctx, response.Body,
+					func(context.Context, object, error) (object, error) { repairs++; return nil, io.ErrUnexpectedEOF },
+					func(context.Context) (io.ReadCloser, error) { repairs++; return nil, io.ErrUnexpectedEOF })
+				events := repairEvents(t, body)
+				require.Len(t, events, 1)
+				require.Equal(t, "response.failed", events[0]["type"])
+				raw, err = json.Marshal(events[0])
+				require.NoError(t, err)
+				require.NotContains(t, string(raw), "PRIVATE_")
+				failure := ParseUpstreamFailure(raw)
+				require.NotNil(t, failure)
+				require.Equal(t, tc.status, failure.Status)
+				require.Equal(t, tc.code, failure.Code)
+				require.Equal(t, tc.errorType, failure.Type)
+				require.Equal(t, tc.message, failure.Message)
+				errorDetail := repairValue[object](t, repairValue[object](t, events[0]["response"])["error"])
+				require.Equal(t, json.Number(fmt.Sprint(tc.status)), errorDetail["status"])
+				require.Equal(t, tc.code, errorDetail["code"])
+				require.Equal(t, tc.errorType, errorDetail["type"])
+				require.Equal(t, tc.message, errorDetail["message"])
+				require.Zero(t, repairs, "do not retry or replay an already sent request")
+				select {
+				case <-closed:
+				case <-ctx.Done():
+					t.Fatal("WebSocket server did not finish")
+				}
+				require.EqualValues(t, 1, connections.Load())
+				require.EqualValues(t, 1, creates.Load())
+			})
+		}
+	}
 }
 
 func TestUpstreamFailureErrorEventParamRedaction(t *testing.T) {

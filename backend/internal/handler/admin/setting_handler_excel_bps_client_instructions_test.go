@@ -30,6 +30,73 @@ func getExcelBPSClientInstructionsSettings(t *testing.T, h *SettingHandler) *htt
 	return rec
 }
 
+func TestSettingsExcelBPSLargeRequestHTTPFallbackRoundTripAndOmission(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
+		service.SettingKeySiteName:                   "keep site",
+		service.SettingKeyExcelBPSEnabled:            "false",
+		service.SettingKeyExcelBPSClientInstructions: "keep prompt",
+	})
+	key := service.SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled
+	rec := getExcelBPSClientInstructionsSettings(t, h)
+	require.Equal(t, gjson.True, gjson.Get(rec.Body.String(), "data."+key).Type)
+	require.NotContains(t, repo.values, key, "GET must not persist defaults")
+	rec = doUpdateSettings(t, h, map[string]any{"site_name": "keep site"}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, gjson.True, gjson.Get(rec.Body.String(), "data."+key).Type)
+	require.NotContains(t, repo.values, key, "omitted new setting must not be written")
+
+	for _, enabled := range []bool{false, true, false} {
+		rec = doUpdateSettings(t, h, map[string]any{key: enabled}, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, enabled, gjson.Get(rec.Body.String(), "data."+key).Bool())
+		require.True(t, gjson.Get(rec.Body.String(), "data."+key).Exists())
+		require.Equal(t, enabled, repo.values[key] == "true")
+		if !enabled {
+			require.Equal(t, "false", repo.values[key])
+		}
+		require.Equal(t, enabled, h.settingService.IsExcelBPSLargeRequestHTTPFallbackEnabled(context.Background()))
+		for _, payload := range []map[string]any{{"site_name": "keep site"}, {key: nil}} {
+			rec = doUpdateSettings(t, h, payload, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.NotContains(t, repo.lastUpdates, key)
+			require.Equal(t, enabled, gjson.Get(rec.Body.String(), "data."+key).Bool())
+			require.Equal(t, enabled, h.settingService.IsExcelBPSLargeRequestHTTPFallbackEnabled(context.Background()))
+		}
+		rec = getExcelBPSClientInstructionsSettings(t, h)
+		require.Equal(t, enabled, gjson.Get(rec.Body.String(), "data."+key).Bool())
+		require.True(t, gjson.Get(rec.Body.String(), "data."+key).Exists())
+		require.Equal(t, "keep site", repo.values[service.SettingKeySiteName])
+		require.Equal(t, "false", repo.values[service.SettingKeyExcelBPSEnabled])
+		require.Equal(t, "keep prompt", repo.values[service.SettingKeyExcelBPSClientInstructions])
+	}
+	before := maps.Clone(repo.values)
+	rec = doUpdateSettings(t, h, map[string]any{key: "false", "site_name": "must not save"}, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, before, repo.values)
+}
+
+func TestSettingsExcelBPSLargeRequestHTTPFallbackAuditAndAdminOnly(t *testing.T) {
+	key := service.SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled
+	before := &service.SystemSettings{ExcelBPSLargeRequestHTTPFallbackEnabled: true}
+	after := &service.SystemSettings{ExcelBPSLargeRequestHTTPFallbackEnabled: false}
+	require.Contains(t, diffSettings(before, after, nil, nil, UpdateSettingsRequest{}), key)
+	require.NotContains(t, diffSettings(after, after, nil, nil, UpdateSettingsRequest{}), key)
+	h, _ := newStepUpSwitchTestHandler(t, map[string]string{key: "false"})
+	public, err := h.settingService.GetPublicSettings(context.Background())
+	require.NoError(t, err)
+	encoded, err := json.Marshal(public)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), key)
+	for _, schema := range []any{service.PublicSettings{}, service.PublicSettingsInjectionPayload{}, dto.PublicSettings{}} {
+		typ := reflect.TypeOf(schema)
+		for i := range typ.NumField() {
+			field := typ.Field(i)
+			require.NotEqual(t, "ExcelBPSLargeRequestHTTPFallbackEnabled", field.Name, typ.Name())
+			require.NotEqual(t, key, field.Tag.Get("json"), typ.Name())
+		}
+	}
+}
+
 func TestSettingsExcelBPSClientInstructionsDefaultCustomAndOmission(t *testing.T) {
 	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
 	key := service.SettingKeyExcelBPSClientInstructions

@@ -7426,11 +7426,22 @@
           <div class="space-y-5 p-6">
             <div class="flex items-center justify-between gap-4">
               <span class="font-medium text-gray-900 dark:text-white">Excel / BPS 协议</span>
-              <Toggle v-model="form.excel_bps_enabled" />
+              <Toggle id="excel-bps-protocol-enabled" v-model="form.excel_bps_enabled" />
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <label id="settings-section-features-excel-bps-large-request-http" for="excel-bps-large-request-http" tabindex="-1" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.excelBpsTransport.largeRequestHTTPFallback') }}
+                </label>
+                <p id="excel-bps-large-request-http-hint" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.excelBpsTransport.largeRequestHTTPFallbackHint') }}
+                </p>
+              </div>
+              <Toggle id="excel-bps-large-request-http" v-model="form.excel_bps_large_request_http_fallback_enabled" aria-describedby="excel-bps-large-request-http-hint" />
             </div>
             <div class="flex items-center justify-between gap-4">
               <span class="font-medium text-gray-900 dark:text-white">Prism 浏览器桥</span>
-              <Toggle v-model="form.prism_browser_enabled" />
+              <Toggle id="prism-browser-enabled" v-model="form.prism_browser_enabled" />
             </div>
           </div>
         </div>
@@ -10335,6 +10346,7 @@ type SettingsForm = Omit<
   account_rotation_settings: AccountRotationSettings;
   prism_browser_api_key: string;
   excel_bps_client_instructions: string;
+  excel_bps_large_request_http_fallback_enabled: boolean;
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
@@ -10352,6 +10364,7 @@ function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] 
 const form = reactive<SettingsForm>({
   account_rotation_settings: defaultAccountRotationSettings(),
   excel_bps_enabled: true,
+  excel_bps_large_request_http_fallback_enabled: true,
   excel_bps_client_instructions: "",
   prism_browser_enabled: false,
   prism_browser_base_url: "http://127.0.0.1:8319/v1",
@@ -11722,6 +11735,7 @@ async function loadSettings() {
       settings.channel_monitor_hide_user_ranking
     );
     form.excel_bps_enabled = settings.excel_bps_enabled !== false;
+    form.excel_bps_large_request_http_fallback_enabled = settings.excel_bps_large_request_http_fallback_enabled !== false;
     excelBPSDefaultClientInstructions.value = settings.excel_bps_default_client_instructions ?? "";
     form.excel_bps_client_instructions = settings.excel_bps_client_instructions ?? excelBPSDefaultClientInstructions.value;
     form.prism_browser_enabled = Boolean(settings.prism_browser_enabled);
@@ -12163,6 +12177,7 @@ async function saveSettings() {
     const payload: UpdateSettingsRequest = {
       prism_browser_enabled: form.prism_browser_enabled,
       excel_bps_enabled: form.excel_bps_enabled,
+      excel_bps_large_request_http_fallback_enabled: form.excel_bps_large_request_http_fallback_enabled,
       excel_bps_client_instructions: form.excel_bps_client_instructions,
       prism_browser_base_url: form.prism_browser_base_url,
       ...(form.prism_browser_api_key ? { prism_browser_api_key: form.prism_browser_api_key } : {}),

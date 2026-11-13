@@ -91,6 +91,9 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 		wantCode, wantType           string
 	}{
 		{"invalid input", "response.failed", "invalid_value", "", 0, 400, "invalid_value", "invalid_request_error"},
+		{"message too big", "response.failed", "message_too_big", "", 0, 413, "message_too_big", "invalid_request_error"},
+		{"WS request too big", "response.failed", "basispoints_ws_message_too_big", "", 0, 413, "basispoints_ws_message_too_big", "invalid_request_error"},
+		{"WS response too big", "response.failed", "basispoints_ws_response_too_big", "", 0, 502, "basispoints_ws_response_too_big", "server_error"},
 		{"authentication", "response.failed", "invalid_api_key", "", 0, 401, "invalid_api_key", "authentication_error"},
 		{"permission", "response.failed", "permission_denied", "", 0, 403, "permission_denied", "permission_error"},
 		{"rate limit", "error", "rate_limit_exceeded", "", 0, 429, "rate_limit_exceeded", "rate_limit_error"},

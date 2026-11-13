@@ -504,6 +504,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 
 	// Channel monitor feature switch
 	updates[SettingKeyExcelBPSEnabled] = strconv.FormatBool(settings.ExcelBPSEnabled)
+	updates[SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled] = strconv.FormatBool(settings.ExcelBPSLargeRequestHTTPFallbackEnabled)
 	updates[SettingKeyChannelMonitorEnabled] = strconv.FormatBool(settings.ChannelMonitorEnabled)
 	updates[SettingKeyChannelMonitorMode] = normalizeChannelMonitorMode(settings.ChannelMonitorMode)
 	if v := clampChannelMonitorInterval(settings.ChannelMonitorDefaultIntervalSeconds); v > 0 {
@@ -917,17 +918,18 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	})
 	gatewayForwardingSF.Forget("gateway_forwarding")
 	gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
-		openAITTFTMode:                   normalizeOpenAITTFTMode(settings.OpenAITTFTMode),
-		fingerprintUnification:           settings.EnableFingerprintUnification,
-		metadataPassthrough:              settings.EnableMetadataPassthrough,
-		cchSigning:                       settings.EnableCCHSigning,
-		claudeOAuthSystemPromptInjection: settings.EnableClaudeOAuthSystemPromptInjection,
-		claudeOAuthSystemPrompt:          settings.ClaudeOAuthSystemPrompt,
-		claudeOAuthSystemPromptBlocks:    settings.ClaudeOAuthSystemPromptBlocks,
-		anthropicCacheTTL1hInjection:     settings.EnableAnthropicCacheTTL1hInjection,
-		rewriteMessageCacheControl:       settings.RewriteMessageCacheControl,
-		clientDatelineNormalization:      settings.EnableClientDatelineNormalization,
-		expiresAt:                        time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
+		excelBPSLargeRequestHTTPFallbackEnabled: settings.ExcelBPSLargeRequestHTTPFallbackEnabled,
+		openAITTFTMode:                          normalizeOpenAITTFTMode(settings.OpenAITTFTMode),
+		fingerprintUnification:                  settings.EnableFingerprintUnification,
+		metadataPassthrough:                     settings.EnableMetadataPassthrough,
+		cchSigning:                              settings.EnableCCHSigning,
+		claudeOAuthSystemPromptInjection:        settings.EnableClaudeOAuthSystemPromptInjection,
+		claudeOAuthSystemPrompt:                 settings.ClaudeOAuthSystemPrompt,
+		claudeOAuthSystemPromptBlocks:           settings.ClaudeOAuthSystemPromptBlocks,
+		anthropicCacheTTL1hInjection:            settings.EnableAnthropicCacheTTL1hInjection,
+		rewriteMessageCacheControl:              settings.RewriteMessageCacheControl,
+		clientDatelineNormalization:             settings.EnableClientDatelineNormalization,
+		expiresAt:                               time.Now().Add(gatewayForwardingCacheTTL).UnixNano(),
 	})
 	s.antigravityUAVersionSF.Forget("antigravity_user_agent_version")
 	antigravityUserAgentVersion := antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)

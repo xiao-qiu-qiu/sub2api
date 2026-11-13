@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -70,9 +71,16 @@ func (b *eventBody) Read(p []byte) (int, error) {
 			if b.ctx.Err() != nil {
 				continue
 			}
-			if timedOut {
+			switch {
+			case errors.Is(err, websocket.ErrMessageTooBig):
+				// The local reader also sends close 1009; distinguish it from
+				// a remote close rejecting the request we already sent.
+				b.fail("basispoints_ws_response_too_big", "upstream WebSocket response exceeds the local read limit; request was not retried")
+			case websocket.CloseStatus(err) == websocket.StatusMessageTooBig:
+				b.fail("basispoints_ws_message_too_big", "WebSocket request exceeds the upstream message size limit; request was not retried")
+			case timedOut:
 				b.fail("basispoints_ws_timeout", "upstream WebSocket was idle too long; request was not retried")
-			} else {
+			default:
 				b.fail("basispoints_ws_disconnected", "upstream WebSocket closed before a terminal event; request was not retried")
 			}
 			continue

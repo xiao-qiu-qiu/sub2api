@@ -49,6 +49,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { tab: 'features', id: 'request-capture', titleKey: 'admin.requestCapture.title' },
   { tab: 'features', id: 'smart-ops-sidebar', titleKey: 'admin.settings.features.smartOpsSidebar.title' },
   { tab: 'features', id: 'features-excel-bps-images', titleKey: 'admin.settings.features.excelBpsImages.title' },
+  { tab: 'features', id: 'features-excel-bps-large-request-http', titleKey: 'admin.settings.features.excelBpsTransport.largeRequestHTTPFallback', keywordKeys: ['admin.settings.features.excelBpsTransport.largeRequestHTTPFallbackHint'] },
   { tab: 'features', id: 'features-excel-bps-client-instructions', titleKey: 'admin.settings.features.excelBpsInstructions.title', keywordKeys: ['admin.settings.features.excelBpsInstructions.label', 'admin.settings.features.excelBpsInstructions.description'] },
   { tab: 'features', id: 'features-channel-monitor', titleKey: 'admin.settings.features.channelMonitor.title' },
   { tab: 'features', id: 'features-available-channels', titleKey: 'admin.settings.features.availableChannels.title' },

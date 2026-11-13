@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -23,6 +24,67 @@ const (
 	maxWSMessage     = maxSSEEvent - 1024
 )
 
+type preparedCreateKey struct{}
+
+var errPreparedCreateConsumed = errors.New("prepared BPS WebSocket request already consumed")
+
+type preparedCreate struct {
+	payload   []byte
+	requestID string
+}
+
+// PrepareRequest measures the exact response.create bytes Open will send,
+// including control fields and JSON escaping. The original HTTP body stays
+// available for capture or an HTTP/SSE send. Discard the returned request to
+// release the encoded payload when choosing HTTP instead. Call before adding
+// submission tracking: reading this replayable body is local preparation.
+// Open consumes the cached bytes once; a consumed request cannot be prepared
+// or opened again.
+func PrepareRequest(req *http.Request) (*http.Request, int, error) {
+	if req == nil || req.GetBody == nil {
+		return nil, 0, errors.New("BPS WebSocket preparation requires a replayable body")
+	}
+	if pending, ok := req.Context().Value(preparedCreateKey{}).(*atomic.Pointer[preparedCreate]); ok {
+		create := pending.Load()
+		if create == nil {
+			return nil, 0, errPreparedCreateConsumed
+		}
+		return req, len(create.payload), nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, 0, safeError(req.Context(), err, "could not read prepared BPS WebSocket JSON")
+	}
+	defer func() { _ = body.Close() }()
+	create, err := encodeCreate(req.Context(), body)
+	if err != nil {
+		return nil, 0, err
+	}
+	pending := new(atomic.Pointer[preparedCreate])
+	pending.Store(create)
+	return req.WithContext(context.WithValue(req.Context(), preparedCreateKey{}, pending)), len(create.payload), nil
+}
+
+func encodeCreate(ctx context.Context, body io.Reader) (*preparedCreate, error) {
+	var doc map[string]json.RawMessage
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(&doc); err != nil || doc == nil {
+		return nil, safeError(ctx, err, "invalid prepared BPS WebSocket JSON")
+	}
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, safeError(ctx, err, "invalid prepared BPS WebSocket JSON")
+	}
+	requestID := uuid.NewString()
+	doc["type"] = json.RawMessage(`"response.create"`)
+	doc["basispoints_request_id"], _ = json.Marshal(requestID)
+	doc["basispoints_resume_token"], _ = json.Marshal("resume_" + strings.ReplaceAll(uuid.NewString(), "-", ""))
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return nil, errors.New("could not encode prepared BPS WebSocket JSON")
+	}
+	return &preparedCreate{payload: payload, requestID: requestID}, nil
+}
+
 // Open sends req's prepared JSON body once, using the supplied HTTP/1 client
 // (including its proxy, transport wrappers and tracing). It consumes and closes
 // req.Body. A successful handshake becomes a 200 SSE response; a rejected HTTP
@@ -32,6 +94,15 @@ const (
 func Open(ctx context.Context, client *http.Client, req *http.Request, idleTimeout time.Duration) (*http.Response, error) {
 	if ctx == nil || client == nil || req == nil || req.URL == nil || req.Body == nil || req.Method != http.MethodPost {
 		return nil, errors.New("invalid BPS WebSocket request")
+	}
+	var create *preparedCreate
+	if pending, ok := req.Context().Value(preparedCreateKey{}).(*atomic.Pointer[preparedCreate]); ok {
+		// Only this Open owns the encoded bytes. Inherited stream contexts keep
+		// an empty slot rather than retaining the payload until stream closure.
+		create = pending.Swap(nil)
+		if create == nil {
+			return nil, errPreparedCreateConsumed
+		}
 	}
 	defer func() { _ = req.Body.Close() }()
 	if err := ctx.Err(); err != nil {
@@ -53,22 +124,17 @@ func Open(ctx context.Context, client *http.Client, req *http.Request, idleTimeo
 	if len(auth) != 2 || !strings.EqualFold(auth[0], "Bearer") || !validProtocolToken(auth[1]) {
 		return nil, errors.New("invalid BPS WebSocket bearer credentials")
 	}
-	var doc map[string]json.RawMessage
-	decoder := json.NewDecoder(req.Body)
-	if err := decoder.Decode(&doc); err != nil || doc == nil {
-		return nil, safeError(ctx, err, "invalid prepared BPS WebSocket JSON")
+	var err error
+	if create == nil {
+		create, err = encodeCreate(ctx, req.Body)
+		if err != nil {
+			return nil, err
+		}
+	} else if _, err := io.Copy(io.Discard, req.Body); err != nil {
+		// Capture wrappers still need to observe the original prepared POST.
+		return nil, safeError(ctx, err, "could not read prepared BPS WebSocket JSON")
 	}
-	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
-		return nil, safeError(ctx, err, "invalid prepared BPS WebSocket JSON")
-	}
-	requestID := uuid.NewString()
-	doc["type"] = json.RawMessage(`"response.create"`)
-	doc["basispoints_request_id"], _ = json.Marshal(requestID)
-	doc["basispoints_resume_token"], _ = json.Marshal("resume_" + strings.ReplaceAll(uuid.NewString(), "-", ""))
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return nil, errors.New("could not encode prepared BPS WebSocket JSON")
-	}
+	requestID := create.requestID
 	profile := excelProfile()
 	profileJSON, _ := json.Marshal(profile)
 	query := u.Query()
@@ -137,7 +203,7 @@ func Open(ctx context.Context, client *http.Client, req *http.Request, idleTimeo
 		release()
 	})
 	writeCtx, cancelWrite := context.WithTimeout(streamCtx, writeTimeout)
-	err = conn.Write(writeCtx, websocket.MessageText, payload)
+	err = conn.Write(writeCtx, websocket.MessageText, create.payload)
 	if err != nil {
 		err = safeError(writeCtx, err, "BPS WebSocket response.create write failed; request was not retried")
 	}

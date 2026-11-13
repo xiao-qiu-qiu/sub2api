@@ -25,16 +25,17 @@ import (
 
 // UpdateSettingsRequest 更新设置请求
 type UpdateSettingsRequest struct {
-	AccountRotationSettings           *service.AccountRotationSettings `json:"account_rotation_settings"`
-	ExcelBPSEnabled                   *bool                            `json:"excel_bps_enabled"`
-	OpenAICodexTicketHarvestScope     *service.CodexTicketHarvestScope `json:"openai_codex_ticket_harvest_scope"`
-	OpenAICodexTicketStrictResponse   *bool                            `json:"openai_codex_ticket_strict_response"`
-	OpenAICodexTicketCandyObservation *bool                            `json:"openai_codex_ticket_candy_observation"`
-	OpenAICodexTicketFailClosed       *bool                            `json:"openai_codex_ticket_fail_closed"`
-	OpenAICodexTicketStrategy         *string                          `json:"openai_codex_ticket_strategy"`
-	PrismBrowserEnabled               bool                             `json:"prism_browser_enabled"`
-	PrismBrowserBaseURL               string                           `json:"prism_browser_base_url"`
-	PrismBrowserAPIKey                string                           `json:"prism_browser_api_key"`
+	AccountRotationSettings                 *service.AccountRotationSettings `json:"account_rotation_settings"`
+	ExcelBPSEnabled                         *bool                            `json:"excel_bps_enabled"`
+	ExcelBPSLargeRequestHTTPFallbackEnabled *bool                            `json:"excel_bps_large_request_http_fallback_enabled"`
+	OpenAICodexTicketHarvestScope           *service.CodexTicketHarvestScope `json:"openai_codex_ticket_harvest_scope"`
+	OpenAICodexTicketStrictResponse         *bool                            `json:"openai_codex_ticket_strict_response"`
+	OpenAICodexTicketCandyObservation       *bool                            `json:"openai_codex_ticket_candy_observation"`
+	OpenAICodexTicketFailClosed             *bool                            `json:"openai_codex_ticket_fail_closed"`
+	OpenAICodexTicketStrategy               *string                          `json:"openai_codex_ticket_strategy"`
+	PrismBrowserEnabled                     bool                             `json:"prism_browser_enabled"`
+	PrismBrowserBaseURL                     string                           `json:"prism_browser_base_url"`
+	PrismBrowserAPIKey                      string                           `json:"prism_browser_api_key"`
 	// 注册设置
 	RegistrationEnabled                 bool                         `json:"registration_enabled"`
 	LoginRateLimitEnabled               *bool                        `json:"login_rate_limit_enabled"`      // 省略=保持现值
@@ -650,6 +651,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	omitted := omittedSettingKeys(sentFields)
 	if req.ExcelBPSClientInstructions == nil {
 		omitted[service.SettingKeyExcelBPSClientInstructions] = struct{}{}
+	}
+	if req.ExcelBPSLargeRequestHTTPFallbackEnabled == nil {
+		omitted[service.SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled] = struct{}{}
 	}
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
@@ -2313,6 +2317,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.AccountQuotaNotifyEmails
 		}(),
+		ExcelBPSLargeRequestHTTPFallbackEnabled: boolValueOrDefault(req.ExcelBPSLargeRequestHTTPFallbackEnabled, previousSettings.ExcelBPSLargeRequestHTTPFallbackEnabled),
 		ExcelBPSEnabled: func() bool {
 			if req.ExcelBPSEnabled != nil {
 				return *req.ExcelBPSEnabled
@@ -2889,13 +2894,14 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentAlipayForceQRCode:                               updatedPaymentCfg.AlipayForceQRCode,
 		PaymentAlipayMobilePrecreateDeepLink:                   updatedPaymentCfg.AlipayMobilePrecreateDeepLink,
 
-		ChannelMonitorEnabled:                updatedSettings.ChannelMonitorEnabled,
-		ExcelBPSEnabled:                      updatedSettings.ExcelBPSEnabled,
-		ChannelMonitorMode:                   updatedSettings.ChannelMonitorMode,
-		ChannelMonitorDefaultIntervalSeconds: updatedSettings.ChannelMonitorDefaultIntervalSeconds,
-		ChannelMonitorHideThroughput:         updatedSettings.ChannelMonitorHideThroughput,
-		ChannelMonitorShowQuota:              updatedSettings.ChannelMonitorShowQuota,
-		ChannelMonitorHideUserRanking:        updatedSettings.ChannelMonitorHideUserRanking,
+		ChannelMonitorEnabled:                   updatedSettings.ChannelMonitorEnabled,
+		ExcelBPSEnabled:                         updatedSettings.ExcelBPSEnabled,
+		ExcelBPSLargeRequestHTTPFallbackEnabled: updatedSettings.ExcelBPSLargeRequestHTTPFallbackEnabled,
+		ChannelMonitorMode:                      updatedSettings.ChannelMonitorMode,
+		ChannelMonitorDefaultIntervalSeconds:    updatedSettings.ChannelMonitorDefaultIntervalSeconds,
+		ChannelMonitorHideThroughput:            updatedSettings.ChannelMonitorHideThroughput,
+		ChannelMonitorShowQuota:                 updatedSettings.ChannelMonitorShowQuota,
+		ChannelMonitorHideUserRanking:           updatedSettings.ChannelMonitorHideUserRanking,
 
 		GrokDefaultTextModel:           updatedSettings.GrokDefaultTextModel,
 		GrokCrossClientModelMapEnabled: updatedSettings.GrokCrossClientModelMapEnabled,

@@ -529,7 +529,8 @@ const (
 	SettingKeyChannelMonitorHideUserRanking = "channel_monitor_hide_user_ranking"
 
 	// Protocol-wide switches default on for BPS compatibility and off for Prism.
-	SettingKeyExcelBPSEnabled = "excel_bps_enabled"
+	SettingKeyExcelBPSEnabled                         = "excel_bps_enabled"
+	SettingKeyExcelBPSLargeRequestHTTPFallbackEnabled = "excel_bps_large_request_http_fallback_enabled"
 	// SettingKeyExcelBPSClientInstructions stores the administrator-only prompt override.
 	SettingKeyExcelBPSClientInstructions = "excel_bps_client_instructions"
 	// Prism browser bridge is administrator-managed and disabled by default.
