@@ -78,21 +78,22 @@ func (s *OpenAIGatewayService) handleExcelBPSRateLimit(ctx context.Context, acco
 	s.coolDownExcelBPS(ctx, account, retryAfter)
 }
 
-// The bridge preserves explicit error.code but replaces a quota identifier
-// supplied only as error.type. Observe raw terminal events before that loss.
+// Observe raw failure terminals before the bridge normalizes access-state
+// codes and quota identifiers supplied only as error.type.
 // HTTP SSE and the WS adapter share this reader; ordinary deltas are not decoded.
 type excelBPSQuotaResponseBody struct {
 	io.ReadCloser
-	mu          sync.Mutex
-	line        []byte
-	discardLine bool
-	limited     bool
-	usageOnce   sync.Once
-	observedAt  time.Time
-	ctx         context.Context
-	account     *Account
-	headers     http.Header
-	svc         *OpenAIGatewayService
+	mu            sync.Mutex
+	line          []byte
+	discardLine   bool
+	limited       bool
+	accessBlocked bool
+	usageOnce     sync.Once
+	observedAt    time.Time
+	ctx           context.Context
+	account       *Account
+	headers       http.Header
+	svc           *OpenAIGatewayService
 }
 
 func (s *OpenAIGatewayService) observeExcelBPSQuotaResponse(ctx context.Context, account *Account, resp *http.Response) {
@@ -137,6 +138,10 @@ func (r *excelBPSQuotaResponseBody) observeLine() {
 	raw := bytes.TrimSpace(bytes.TrimPrefix(r.line, []byte("data:")))
 	switch gjson.GetBytes(raw, "type").String() {
 	case "error", "response.failed", "response.cancelled":
+		if !r.accessBlocked && r.svc.handleExcelBPSAccessState(r.ctx, r.account, http.StatusBadGateway, r.headers, raw) != nil {
+			// Generation was accepted: isolate future requests, never replay it.
+			r.accessBlocked = true
+		}
 		if failure := basispoints.ParseUpstreamFailure(raw); failure != nil && failure.Status == http.StatusTooManyRequests {
 			if !r.limited {
 				r.svc.handleExcelBPSRateLimit(r.ctx, r.account, r.headers.Get("Retry-After"), raw)

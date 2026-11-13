@@ -73,6 +73,15 @@ func excelBPS429(retryAfter string) *http.Response {
 		Body: io.NopCloser(strings.NewReader(`{"error":{"code":"basispoints_rate_limited","message":"PRIVATE_UPSTREAM workspace detail"}}`))}
 }
 
+func excelBPSPaymentRequired(body string) *http.Response {
+	return &http.Response{StatusCode: http.StatusPaymentRequired, Header: http.Header{
+		"Content-Type": {"application/json"},
+	}, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+const excelBPSDeactivatedWorkspaceBody = `{"error":{"code":"deactivated_workspace",` +
+	`"message":"PRIVATE_UPSTREAM workspace detail access_token=token-1 refresh_token=private-refresh-token chatgpt-1 list the files"}}`
+
 func excelBPSCompleted() *http.Response {
 	wire := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bps_failover\",\"status\":\"completed\",\"model\":\"gpt-6-astra\"," +
 		"\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n"
@@ -82,6 +91,82 @@ func excelBPSCompleted() *http.Response {
 // excelBPSFailoverAccountRepo also answers the no-account diagnosis query.
 type excelBPSFailoverAccountRepo struct {
 	openAIImagesFailoverAccountRepo
+}
+
+func (r excelBPSFailoverAccountRepo) SetError(context.Context, int64, string) error {
+	return nil
+}
+
+type excelBPSFailoverStateAccountRepo struct {
+	excelBPSFailoverAccountRepo
+	mu              sync.Mutex
+	errorAccountIDs []int64
+	errorMessages   map[int64]string
+	setErrorErr     error
+}
+
+func (r *excelBPSFailoverStateAccountRepo) SetError(_ context.Context, id int64, message string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errorAccountIDs = append(r.errorAccountIDs, id)
+	if r.setErrorErr != nil {
+		return r.setErrorErr
+	}
+	if r.errorMessages == nil {
+		r.errorMessages = make(map[int64]string)
+	}
+	r.errorMessages[id] = message
+	return nil
+}
+
+func (r *excelBPSFailoverStateAccountRepo) GetByID(ctx context.Context, id int64) (*service.Account, error) {
+	account, err := r.excelBPSFailoverAccountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Reflect SetError in admission lookups as the real repository does.
+	if message, ok := r.errorMessages[id]; ok {
+		account.Status = service.StatusError
+		account.ErrorMessage = message
+	}
+	return account, nil
+}
+
+func (r *excelBPSFailoverStateAccountRepo) GetOpenAITurnAdmission(ctx context.Context, id int64) (*service.Account, *service.Account, error) {
+	account, err := r.GetByID(ctx, id)
+	return account, nil, err
+}
+
+func (r *excelBPSFailoverStateAccountRepo) schedulableAccounts(platform string) []service.Account {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var accounts []service.Account
+	for _, account := range r.accountsForPlatform(platform) {
+		if _, unavailable := r.errorMessages[account.ID]; !unavailable {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
+}
+
+func (r *excelBPSFailoverStateAccountRepo) ListSchedulableByGroupIDAndPlatform(_ context.Context, _ int64, platform string) ([]service.Account, error) {
+	return r.schedulableAccounts(platform), nil
+}
+
+func (r *excelBPSFailoverStateAccountRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]service.Account, error) {
+	return r.schedulableAccounts(platform), nil
+}
+
+func (r *excelBPSFailoverStateAccountRepo) ListSchedulableUngroupedByPlatform(_ context.Context, platform string) ([]service.Account, error) {
+	return r.schedulableAccounts(platform), nil
+}
+
+func (r *excelBPSFailoverStateAccountRepo) errorCalls() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int64(nil), r.errorAccountIDs...)
 }
 
 func (r excelBPSFailoverAccountRepo) ListModelAvailabilityCandidates(_ context.Context, _ *int64, platforms []string, _ bool) ([]service.Account, error) {
@@ -96,11 +181,18 @@ func (r excelBPSFailoverAccountRepo) ListModelAvailabilityCandidates(_ context.C
 // otherwise the simple priority path is used.
 func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream, loadBatch bool, bindings ...service.GatewayCache) *OpenAIGatewayHandler {
 	t.Helper()
+	handler, _ := newExcelBPSFailoverTestHandlerWithRepo(t, upstream, loadBatch, bindings...)
+	return handler
+}
+
+func newExcelBPSFailoverTestHandlerWithRepo(t *testing.T, upstream service.HTTPUpstream, loadBatch bool, bindings ...service.GatewayCache) (*OpenAIGatewayHandler, *excelBPSFailoverStateAccountRepo) {
+	t.Helper()
 	var accounts []service.Account
 	for _, id := range []int64{1, 2} {
 		accounts = append(accounts, service.Account{
 			ID: id, Name: fmt.Sprintf("bps-account-%d", id), Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 			Status: service.StatusActive, Schedulable: true, GroupIDs: []int64{3131},
+			Priority:    int(id - 1),
 			Credentials: map[string]any{"access_token": fmt.Sprintf("token-%d", id), "chatgpt_account_id": fmt.Sprintf("chatgpt-%d", id)},
 			Extra:       map[string]any{"openai_excel_bps": true},
 		})
@@ -116,11 +208,15 @@ func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream,
 	if len(bindings) > 0 {
 		binding = bindings[0]
 	}
+	accountRepo := &excelBPSFailoverStateAccountRepo{
+		excelBPSFailoverAccountRepo: excelBPSFailoverAccountRepo{openAIImagesFailoverAccountRepo{accounts: accounts}},
+	}
+	rateLimitService := service.NewRateLimitService(accountRepo, nil, cfg, nil, nil)
 	gatewayService := service.NewOpenAIGatewayService(
-		excelBPSFailoverAccountRepo{openAIImagesFailoverAccountRepo{accounts: accounts}},
+		accountRepo,
 		nil, nil, nil, nil, nil, nil, binding,
 		cfg,
-		nil, schedulingConcurrency, nil, nil, nil,
+		nil, schedulingConcurrency, nil, rateLimitService, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
@@ -135,7 +231,7 @@ func newExcelBPSFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream,
 		cfg,
 	)
 	handler.maxAccountSwitches = 10
-	return handler
+	return handler, accountRepo
 }
 
 func newExcelBPSFailoverTestContext(ctx context.Context, stream bool) (*gin.Context, *httptest.ResponseRecorder) {
@@ -155,6 +251,214 @@ func newExcelBPSFailoverTestContext(ctx context.Context, stream bool) (*gin.Cont
 	})
 	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 100, Concurrency: 0})
 	return c, rec
+}
+
+func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceFailsOverAndBlocksAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		loadBatch, stream bool
+	}{{false, false}, {false, true}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprintf("load_batch=%t/stream=%t", tc.loadBatch, tc.stream), func(t *testing.T) {
+			upstream := &excelBPSFailoverUpstream{answer: func(call int) *http.Response {
+				if call == 0 {
+					return excelBPSPaymentRequired(excelBPSDeactivatedWorkspaceBody)
+				}
+				return excelBPSCompleted()
+			}}
+			handler, repo := newExcelBPSFailoverTestHandlerWithRepo(t, upstream, tc.loadBatch, &oauthRecoveryHandlerBindings{})
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			c, rec := newExcelBPSFailoverTestContext(ctx, tc.stream)
+			c.Request.Header.Set("session_id", "bps-deactivated-workspace")
+
+			handler.Responses(c)
+
+			calls := upstream.calls()
+			require.Len(t, calls, 2, "an initial access-state rejection must use the healthy backup")
+			require.NotEqual(t, calls[0], calls[1])
+			require.Equal(t, []int64{calls[0]}, repo.errorCalls(), "only the deactivated account must be marked unavailable")
+			blocked, err := repo.GetByID(ctx, calls[0])
+			require.NoError(t, err)
+			require.Equal(t, service.StatusError, blocked.Status)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), "done")
+			for _, private := range []string{"PRIVATE_UPSTREAM", "deactivated_workspace", "access_token", "refresh_token", "token-1", "token-2", "private-refresh-token", "chatgpt-1"} {
+				require.NotContains(t, rec.Body.String(), private)
+			}
+			for _, private := range []string{"PRIVATE_UPSTREAM", "access_token", "refresh_token", "token-1", "private-refresh-token", "chatgpt-1", "list the files"} {
+				require.NotContains(t, blocked.ErrorMessage, private)
+			}
+			for _, url := range upstream.urls {
+				require.Equal(t, basispoints.ResponsesURL, url, "failover must stay on the BPS route")
+			}
+			history := gjson.GetBytes(upstream.bodies[0], "input").Raw
+			require.NotEmpty(t, history)
+			for _, item := range []string{"list the files", "call_ls", "shell", "a.txt"} {
+				require.Contains(t, history, item)
+			}
+			require.JSONEq(t, history, gjson.GetBytes(upstream.bodies[1], "input").Raw,
+				"messages, tool calls and tool outputs must survive the account switch")
+			rawEvents, ok := c.Get(service.OpsUpstreamErrorsKey)
+			require.True(t, ok)
+			events, ok := rawEvents.([]*service.OpsUpstreamErrorEvent)
+			require.True(t, ok)
+			require.Len(t, events, 1)
+			require.Equal(t, "failover", events[0].Kind)
+			require.Equal(t, calls[0], events[0].AccountID)
+			require.Equal(t, http.StatusPaymentRequired, events[0].UpstreamStatusCode)
+
+			// A fresh session cannot pass merely because the first request rebound
+			// its sticky session to the backup. The first account remains unavailable.
+			for _, sessionID := range []string{"bps-deactivated-workspace", "bps-fresh-session"} {
+				c, rec = newExcelBPSFailoverTestContext(ctx, tc.stream)
+				c.Request.Header.Set("session_id", sessionID)
+				handler.Responses(c)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Contains(t, rec.Body.String(), "done")
+			}
+			require.Equal(t, []int64{calls[0], calls[1], calls[1], calls[1]}, upstream.calls(),
+				"neither sticky nor fresh requests may reuse the deactivated account")
+			require.NoError(t, ctx.Err())
+		})
+	}
+}
+
+func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceSetErrorFailureKeepsAccountBlocked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		loadBatch, stream bool
+	}{{false, false}, {false, true}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprintf("load_batch=%t/stream=%t", tc.loadBatch, tc.stream), func(t *testing.T) {
+			upstream := &excelBPSFailoverUpstream{answer: func(call int) *http.Response {
+				if call == 1 {
+					return excelBPSPaymentRequired(excelBPSDeactivatedWorkspaceBody)
+				}
+				return excelBPSCompleted()
+			}}
+			handler, repo := newExcelBPSFailoverTestHandlerWithRepo(t, upstream, tc.loadBatch, &oauthRecoveryHandlerBindings{})
+			repo.setErrorErr = errors.New("SetError persistence unavailable")
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			// Bind an older session to the account before it becomes unavailable,
+			// so retrying that session exercises stale sticky selection as well.
+			c, rec := newExcelBPSFailoverTestContext(ctx, tc.stream)
+			c.Request.Header.Set("session_id", "bps-before-persistence-failure")
+			handler.Responses(c)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Len(t, upstream.calls(), 1)
+
+			c, rec = newExcelBPSFailoverTestContext(ctx, tc.stream)
+			c.Request.Header.Set("session_id", "bps-persistence-failure")
+			handler.Responses(c)
+
+			calls := upstream.calls()
+			require.Len(t, calls, 3, "the initial rejection must fail over even when SetError fails")
+			require.Equal(t, calls[0], calls[1], "the older session must be bound to the account that later fails")
+			require.NotEqual(t, calls[1], calls[2])
+			require.Equal(t, []int64{calls[1]}, repo.errorCalls())
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), "done")
+			require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
+			require.NotContains(t, rec.Body.String(), repo.setErrorErr.Error())
+
+			// No persistent error or cooldown may hide the scheduling regression:
+			// only the runtime quarantine can exclude this still-active snapshot.
+			stale, err := repo.GetByID(ctx, calls[1])
+			require.NoError(t, err)
+			require.Equal(t, service.StatusActive, stale.Status)
+			require.True(t, stale.IsSchedulable())
+			require.Empty(t, stale.ErrorMessage)
+			require.Nil(t, stale.TempUnschedulableUntil)
+			require.Nil(t, stale.RateLimitResetAt)
+			require.Nil(t, stale.OverloadUntil)
+			require.Len(t, repo.schedulableAccounts(service.PlatformOpenAI), 2)
+
+			for _, sessionID := range []string{"bps-before-persistence-failure", "bps-persistence-failure", "bps-after-persistence-failure"} {
+				c, rec = newExcelBPSFailoverTestContext(ctx, tc.stream)
+				c.Request.Header.Set("session_id", sessionID)
+				handler.Responses(c)
+				require.Equal(t, http.StatusOK, rec.Code, "session=%s: %s", sessionID, rec.Body.String())
+				require.Contains(t, rec.Body.String(), "done")
+			}
+			require.Equal(t, []int64{calls[1], calls[1], calls[2], calls[2], calls[2], calls[2]}, upstream.calls(),
+				"older sticky, rebound sticky and fresh sessions must all avoid the account after a failed SetError write")
+			require.Equal(t, []int64{calls[1]}, repo.errorCalls(), "the blocked account must never reach upstream again")
+			require.NoError(t, ctx.Err())
+		})
+	}
+}
+
+func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceOnEveryAccountReturnsSafe502(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		loadBatch, stream bool
+	}{{false, false}, {false, true}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprintf("load_batch=%t/stream=%t", tc.loadBatch, tc.stream), func(t *testing.T) {
+			upstream := &excelBPSFailoverUpstream{answer: func(int) *http.Response {
+				return excelBPSPaymentRequired(excelBPSDeactivatedWorkspaceBody)
+			}}
+			handler, repo := newExcelBPSFailoverTestHandlerWithRepo(t, upstream, tc.loadBatch)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			c, rec := newExcelBPSFailoverTestContext(ctx, tc.stream)
+
+			handler.Responses(c)
+
+			calls := upstream.calls()
+			require.Len(t, calls, 2, "each rejected account may be tried only once even with a larger switch budget")
+			require.NotEqual(t, calls[0], calls[1])
+			require.Equal(t, calls, repo.errorCalls(), "both deactivated accounts must be isolated")
+			require.NoError(t, ctx.Err(), "pool exhaustion must finish without waiting for client cancellation")
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			require.Equal(t, "upstream_error", gjson.Get(rec.Body.String(), "error.type").String())
+			require.Equal(t, "Upstream access is temporarily unavailable, please retry later",
+				gjson.Get(rec.Body.String(), "error.message").String())
+			for _, private := range []string{"PRIVATE_UPSTREAM", "deactivated_workspace", "workspace detail", "list the files", "access_token", "refresh_token", "token-1", "token-2", "private-refresh-token", "chatgpt-1"} {
+				require.NotContains(t, rec.Body.String(), private)
+			}
+			require.NotContains(t, rec.Body.String(), "event:", "a stream request rejected before output must still receive an HTTP error")
+		})
+	}
+}
+
+func TestOpenAIResponsesExcelBPSPaymentRequiredDoesNotFailOverOrBlockAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		loadBatch, stream bool
+	}{{false, false}, {false, true}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprintf("load_batch=%t/stream=%t", tc.loadBatch, tc.stream), func(t *testing.T) {
+			upstream := &excelBPSFailoverUpstream{answer: func(call int) *http.Response {
+				if call == 0 {
+					return excelBPSPaymentRequired(`{"error":{"message":"Payment Required"}}`)
+				}
+				return excelBPSCompleted()
+			}}
+			handler, repo := newExcelBPSFailoverTestHandlerWithRepo(t, upstream, tc.loadBatch, &oauthRecoveryHandlerBindings{})
+			c, rec := newExcelBPSFailoverTestContext(context.Background(), tc.stream)
+			c.Request.Header.Set("session_id", "bps-payment-required")
+
+			handler.Responses(c)
+
+			calls := upstream.calls()
+			require.Len(t, calls, 1, "a plain 402 is not evidence that the workspace is deactivated")
+			require.Empty(t, repo.errorCalls(), "a generic payment error must not persist an account error")
+			require.Equal(t, http.StatusPaymentRequired, rec.Code, rec.Body.String())
+			require.Equal(t, "basispoints_upstream_error", gjson.Get(rec.Body.String(), "error.code").String())
+			require.Equal(t, "Excel BPS rejected this request; account scheduling was not changed",
+				gjson.Get(rec.Body.String(), "error.message").String())
+			for _, sessionID := range []string{"bps-payment-required", "bps-payment-fresh-session"} {
+				c, rec = newExcelBPSFailoverTestContext(context.Background(), tc.stream)
+				c.Request.Header.Set("session_id", sessionID)
+				handler.Responses(c)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Contains(t, rec.Body.String(), "done")
+			}
+			require.Equal(t, []int64{calls[0], calls[0], calls[0]}, upstream.calls(),
+				"a generic payment error must not isolate the account or prevent new sessions from selecting it")
+			require.Empty(t, repo.errorCalls())
+		})
+	}
 }
 
 // A bound request waits for the short BPS cooldown and retries its original

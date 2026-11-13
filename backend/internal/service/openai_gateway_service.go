@@ -562,25 +562,26 @@ type OpenAIGatewayService struct {
 	openaiProxyStreamCircuit       *openAIProxyStreamCircuit
 	openaiProxyStreamFailOpenLogAt atomic.Int64
 
-	openaiWSFallbackUntil               sync.Map // key: int64(accountID), value: time.Time
-	openaiAccountRuntimeBlockUntil      sync.Map // key: int64(accountID), value: time.Time
-	openaiAccountRuntimeBlockLocks      sync.Map // key: int64(accountID), value: *sync.Mutex
-	openaiAccountRuntimeBlockGeneration sync.Map // key: int64(accountID), value: uint64
-	openaiAccountRuntimeBlockSequence   atomic.Uint64
-	openaiOAuth429RetryStartedAt        sync.Map // key: int64(accountID), value: time.Time
-	grokCredentialMutationLocks         sync.Map // key: int64(accountID), value: *sync.Mutex
-	openaiOAuth429WindowStartUnixNano   atomic.Int64
-	openaiOAuth429WindowCount           atomic.Int64
-	openAITurnAdmissionCache            openAITurnAdmissionLocalCache
-	openaiWSRetryMetrics                openAIWSRetryMetrics
-	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle               *accountWriteThrottle
-	codexSnapshotMu                     sync.Mutex
-	codexSnapshotClosed                 bool
-	openAIModelsCache                   openAIModelsCache
-	excelBPSModelsCache                 openAIModelsCache
-	openaiCompatSessionResponses        sync.Map
-	openaiCompatAnthropicDigestSessions sync.Map
+	openaiWSFallbackUntil                sync.Map // key: int64(accountID), value: time.Time
+	openaiAccountRuntimeBlockUntil       sync.Map // key: int64(accountID), value: time.Time
+	openaiAccountRuntimeBlockLocks       sync.Map // key: int64(accountID), value: *sync.Mutex
+	openaiAccountRuntimeBlockGeneration  sync.Map // key: int64(accountID), value: uint64
+	openaiAccountRuntimeBlockAccessState sync.Map // key: int64(accountID), value: bool; retained until expiry or explicit clear
+	openaiAccountRuntimeBlockSequence    atomic.Uint64
+	openaiOAuth429RetryStartedAt         sync.Map // key: int64(accountID), value: time.Time
+	grokCredentialMutationLocks          sync.Map // key: int64(accountID), value: *sync.Mutex
+	openaiOAuth429WindowStartUnixNano    atomic.Int64
+	openaiOAuth429WindowCount            atomic.Int64
+	openAITurnAdmissionCache             openAITurnAdmissionLocalCache
+	openaiWSRetryMetrics                 openAIWSRetryMetrics
+	responseHeaderFilter                 *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle                *accountWriteThrottle
+	codexSnapshotMu                      sync.Mutex
+	codexSnapshotClosed                  bool
+	openAIModelsCache                    openAIModelsCache
+	excelBPSModelsCache                  openAIModelsCache
+	openaiCompatSessionResponses         sync.Map
+	openaiCompatAnthropicDigestSessions  sync.Map
 	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
 	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
 	// 剥离跨账号回带（openai_codex_turn_state.go）。

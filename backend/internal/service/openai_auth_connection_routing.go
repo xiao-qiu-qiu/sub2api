@@ -214,13 +214,16 @@ func (s *OpenAIGatewayService) prepareAuthConnection(ctx context.Context, c *gin
 	return &out, nil
 }
 
-// Connection-only credential failures never mutate account-wide security. An
-// explicit account/workspace ban still follows the existing account policy;
-// 429 remains account-scoped because entitlement sharing is not independently
-// proven for these registrations.
-func (s *OpenAIOAuthReauthService) FailAuthConnection(ctx context.Context, account *Account, status int) error {
+// Connection-only failures never mutate other registrations or parent account
+// security. When supplied, a structured access-state rejection permanently
+// disables this revision until an administrator re-enables or reauthorizes it.
+func (s *OpenAIOAuthReauthService) FailAuthConnection(ctx context.Context, account *Account, status int, responseBody ...[]byte) error {
+	accessState := len(responseBody) > 0 && isOpenAIUpstreamAccessStateError("", responseBody[0])
 	lease, lockErr := s.lockAuthConnection(ctx, account.ID, account.AuthConnectionID)
 	if lockErr != nil {
+		if accessState {
+			return lockErr
+		}
 		return nil
 	} // A live refresh may already be healing the rejected access token.
 	defer lease.release()
@@ -235,7 +238,10 @@ func (s *OpenAIOAuthReauthService) FailAuthConnection(ctx context.Context, accou
 	if c.Revision != account.AuthConnectionRevision {
 		return nil
 	}
-	if status == 401 && c.Kind != "api_key" {
+	if accessState {
+		c.Status = "disabled"
+		c.CooldownUntil = nil
+	} else if status == 401 && c.Kind != "api_key" {
 		creds, readErr := s.readConnectionCredentials(c)
 		if readErr != nil {
 			return readErr
@@ -254,7 +260,10 @@ func (s *OpenAIOAuthReauthService) FailAuthConnection(ctx context.Context, accou
 	if err != nil {
 		return err
 	}
-	_, err = r.CASAuthConnection(ctx, c, c.Revision)
+	changed, err := r.CASAuthConnection(ctx, c, c.Revision)
+	if accessState && err == nil && !changed {
+		return connectionChanged()
+	}
 	return err
 }
 

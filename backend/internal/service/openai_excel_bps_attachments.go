@@ -77,6 +77,11 @@ func (s *OpenAIGatewayService) uploadExcelBPSAttachment(ctx context.Context, acc
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if accessFailure := s.handleExcelBPSAccessState(ctx, account, resp.StatusCode, resp.Header, raw); accessFailure != nil {
+			failure := excelBPSAttachmentFailure("attachment_http", "upstream_access_state", resp.StatusCode, nil)
+			failure.status = accessFailure.ClientStatusCode
+			return "", failure
+		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			s.handleExcelBPSRateLimit(ctx, account, resp.Header.Get("Retry-After"), raw)
 		}

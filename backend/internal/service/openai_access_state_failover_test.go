@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,8 @@ type openAIAuthPolicyAccountRepo struct {
 	AccountRepository
 	tempCalls     int
 	setErrorCalls int
+	setErrorErr   error
+	onSetError    func()
 }
 
 func (r *openAIAuthPolicyAccountRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
@@ -37,7 +40,10 @@ func (r *openAIAuthPolicyAccountRepo) SetTempUnschedulable(context.Context, int6
 
 func (r *openAIAuthPolicyAccountRepo) SetError(context.Context, int64, string) error {
 	r.setErrorCalls++
-	return nil
+	if r.onSetError != nil {
+		r.onSetError()
+	}
+	return r.setErrorErr
 }
 
 type openAIAuthPolicy403Counter struct {
@@ -152,6 +158,95 @@ func TestOpenAIHTTPAccessStateTrustsStructuredCode(t *testing.T) {
 	require.True(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusBadRequest, nil, body))
 	require.Equal(t, 1, repo.setErrorCalls)
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+func TestOpenAIAccessStateRuntimeBlockSurvivesStaleSnapshot(t *testing.T) {
+	for _, writeFails := range []bool{false, true} {
+		name := "persisted"
+		if writeFails {
+			name = "write_failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := &openAIAuthPolicyAccountRepo{}
+			if writeFails {
+				repo.setErrorErr = errors.New("database unavailable")
+			}
+			svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+			svc.rateLimitService.SetAccountRuntimeBlocker(svc)
+			account := &Account{ID: 933, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true}
+			repo.onSetError = func() {
+				require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false), "access-state protection must already apply while SetError is running")
+			}
+			body := []byte(`{"error":{"code":"deactivated_workspace"}}`)
+			require.True(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusPaymentRequired, nil, body))
+			require.Equal(t, 1, repo.setErrorCalls)
+			for _, readOnly := range []bool{true, false, false} {
+				require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false, readOnly))
+			}
+			_, err := svc.admitOpenAITurnWithGroup(context.Background(), account, "gpt-6-astra", 0, false)
+			var denied *OpenAITurnAdmissionError
+			require.ErrorAs(t, err, &denied)
+			require.Equal(t, "account_runtime_blocked", denied.Reason)
+			require.True(t, account.IsSchedulable(), "the supplied scheduler snapshot must stay immutable")
+
+			svc.ClearAccountSchedulingBlock(account.ID)
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+			_, err = svc.admitOpenAITurnWithGroup(context.Background(), account, "gpt-6-astra", 0, false)
+			require.NoError(t, err)
+			// Recovery must not leave access-state protection on later ordinary cooldowns.
+			svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "oauth_401")
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+		})
+	}
+}
+
+func TestOpenAIAccessStateRuntimeBlockPreservesGenerationAndDeadline(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 934, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true}
+	until := time.Now().Add(10 * time.Minute)
+	svc.BlockAccountScheduling(account, until, "oauth_401")
+	old := svc.peekOpenAIAccountRuntimeBlock(account)
+	svc.BlockAccountScheduling(account, until, "openai_access_state")
+	svc.clearOpenAIAccountRuntimeBlockIfUnchanged(account.ID, old)
+	current := svc.peekOpenAIAccountRuntimeBlock(account)
+	require.True(t, current.blocked)
+	require.True(t, current.until.Equal(until))
+	require.Greater(t, current.generation, old.generation)
+	// Even a matching generation cannot treat missing cooldowns as recovery.
+	svc.clearOpenAIAccountRuntimeBlockIfUnchanged(account.ID, current)
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "oauth_401")
+	require.True(t, svc.peekOpenAIAccountRuntimeBlock(account).until.Equal(until))
+	require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+
+	svc.ClearAccountSchedulingBlock(account.ID)
+	svc.BlockAccountScheduling(account, until, "oauth_401")
+	svc.clearOpenAIAccountRuntimeBlockIfUnchanged(account.ID, current)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account), "an old access-state snapshot must not clear a newer block")
+	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+}
+
+func TestOpenAIAccessStateRuntimeBlockExpiresWithoutLeakingProtection(t *testing.T) {
+	for _, inspectDirectly := range []bool{false, true} {
+		svc := &OpenAIGatewayService{}
+		account := &Account{ID: 935, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+		svc.BlockAccountScheduling(account, time.Time{}, "openai_access_state")
+		svc.openaiAccountRuntimeBlockUntil.Store(account.ID, time.Now().Add(-time.Second))
+		if inspectDirectly {
+			require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+		} else {
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+		}
+		svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "oauth_401")
+		require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
+	}
+
+	// A new cooldown may arrive after expiry before either inspection path runs.
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 936, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	svc.BlockAccountScheduling(account, time.Time{}, "openai_access_state")
+	svc.openaiAccountRuntimeBlockUntil.Store(account.ID, time.Now().Add(-time.Second))
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "oauth_401")
+	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
 }
 
 func TestOpenAIHTTPAuthMessagesUseExistingStatusPolicies(t *testing.T) {

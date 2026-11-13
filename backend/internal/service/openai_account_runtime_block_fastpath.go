@@ -141,11 +141,12 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		if upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstreamMsg != "" {
 			message = upstreamMsg
 		}
+		if s != nil {
+			// Install the access-state bridge before SetError can block on storage.
+			s.BlockAccountScheduling(account, time.Time{}, "openai_access_state")
+		}
 		if s != nil && s.rateLimitService != nil {
 			s.rateLimitService.handleAuthError(stateCtx, account, message)
-		}
-		if s != nil {
-			s.BlockAccountScheduling(account, time.Time{}, "openai_access_state")
 		}
 		return true
 	}
@@ -376,10 +377,20 @@ func (s *OpenAIGatewayService) openAIAccountRuntimeBlockLock(accountID int64) *s
 	return mu
 }
 
-func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, _ string) (uint64, bool) {
+func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, reason string) (uint64, bool) {
 	generation := s.openaiAccountRuntimeBlockSequence.Add(1)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, generation)
 	now := time.Now()
+	current, loaded := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
+	currentUntil, isTime := current.(time.Time)
+	if !loaded || !isTime || !currentUntil.After(now) {
+		s.openaiAccountRuntimeBlockAccessState.Delete(account.ID)
+	}
+	if reason == "openai_access_state" {
+		// Structured access-state failures are independent of persisted cooldowns.
+		// A stale snapshot or failed SetError must not undo this bridge block.
+		s.openaiAccountRuntimeBlockAccessState.Store(account.ID, true)
+	}
 	blockUntil := until
 	if blockUntil.IsZero() || !blockUntil.After(now) {
 		blockUntil = now.Add(openAIStopSchedulingBridgeCooldown)
@@ -419,6 +430,7 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockAccessState.Delete(accountID)
 	s.openaiOAuth429RetryStartedAt.Delete(accountID)
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
 }
@@ -440,6 +452,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	cooldownUntil, ok := value.(time.Time)
 	if !ok || cooldownUntil.IsZero() {
 		s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+		s.openaiAccountRuntimeBlockAccessState.Delete(account.ID)
 		s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 		return false
 	}
@@ -447,6 +460,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 		return true
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+	s.openaiAccountRuntimeBlockAccessState.Delete(account.ID)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 	return false
 }
@@ -530,9 +544,10 @@ func accountPersistedSchedulingCooldownActive(account *Account) bool {
 }
 
 type openAIAccountRuntimeBlockSnapshot struct {
-	until      time.Time
-	generation uint64
-	blocked    bool
+	until       time.Time
+	generation  uint64
+	blocked     bool
+	accessState bool
 }
 
 func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account, readOnly ...bool) openAIAccountRuntimeBlockSnapshot {
@@ -550,6 +565,7 @@ func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account, r
 	if !isTime || until.IsZero() || !time.Now().Before(until) {
 		if len(readOnly) == 0 || !readOnly[0] {
 			s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+			s.openaiAccountRuntimeBlockAccessState.Delete(account.ID)
 			s.openaiOAuth429RetryStartedAt.Delete(account.ID)
 			s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 		}
@@ -557,12 +573,14 @@ func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account, r
 	}
 	generation, _ := s.openaiAccountRuntimeBlockGeneration.Load(account.ID)
 	gen, _ := generation.(uint64)
-	return openAIAccountRuntimeBlockSnapshot{until: until, generation: gen, blocked: true}
+	_, accessState := s.openaiAccountRuntimeBlockAccessState.Load(account.ID)
+	return openAIAccountRuntimeBlockSnapshot{until: until, generation: gen, blocked: true, accessState: accessState}
 }
 
 // clearOpenAIAccountRuntimeBlockIfUnchanged deletes the in-process account block
 // only when generation and deadline are unchanged. A newer block installed after
-// peek must be kept even if its deadline happens to match.
+// peek must be kept even if its deadline happens to match. Access-state bridge
+// blocks require expiry or explicit administrative recovery, not a stale snapshot.
 func (s *OpenAIGatewayService) clearOpenAIAccountRuntimeBlockIfUnchanged(accountID int64, snapshot openAIAccountRuntimeBlockSnapshot) {
 	if s == nil || accountID <= 0 || !snapshot.blocked {
 		return
@@ -572,6 +590,9 @@ func (s *OpenAIGatewayService) clearOpenAIAccountRuntimeBlockIfUnchanged(account
 	defer mu.Unlock()
 	generation, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
 	if !ok || generation != snapshot.generation {
+		return
+	}
+	if _, accessState := s.openaiAccountRuntimeBlockAccessState.Load(accountID); accessState {
 		return
 	}
 	current, ok := s.openaiAccountRuntimeBlockUntil.Load(accountID)
@@ -589,8 +610,9 @@ func (s *OpenAIGatewayService) clearOpenAIAccountRuntimeBlockIfUnchanged(account
 // RateLimitResetAt, and OverloadUntil are all inactive, a stale local account
 // block is dropped with generation+deadline CAS. Model-scoped transient blocks
 // and Excel BPS cooldowns (BPS-routed models only) are left alone. This is
-// fail-open if a DB write failed or the snapshot has not caught up yet: empty
-// cooldown fields drop the local account-level block.
+// fail-open for ordinary cooldowns if a DB write failed or the snapshot has not
+// caught up yet. Structured access-state blocks retain their original deadline
+// regardless of persisted cooldowns, including when SetError failed.
 // requireCompact 必须与 Forward 的 /responses/compact 判定同源（两侧都来自
 // IsOpenAIResponsesCompactPath）：门票门控按真正出站的模型名判定，否则 compact
 // 请求会被按客户端原始模型误拦（见 openAICodexTicketOutboundModel）。
@@ -614,7 +636,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRequestRuntimeBlockedWithoutBPSCoo
 	}
 	snapshot := s.peekOpenAIAccountRuntimeBlock(account, readOnly...)
 	if snapshot.blocked {
-		if accountPersistedSchedulingCooldownActive(account) {
+		if snapshot.accessState || accountPersistedSchedulingCooldownActive(account) {
 			return true
 		}
 		if len(readOnly) == 0 || !readOnly[0] {
