@@ -402,7 +402,7 @@ func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceSetErrorFailureKeepsAccountB
 	}
 }
 
-func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceOnEveryAccountReturnsSafe502(t *testing.T) {
+func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceOnEveryAccountReturnsOriginalMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		loadBatch, stream bool
@@ -425,9 +425,9 @@ func TestOpenAIResponsesExcelBPSDeactivatedWorkspaceOnEveryAccountReturnsSafe502
 			require.NoError(t, ctx.Err(), "pool exhaustion must finish without waiting for client cancellation")
 			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
 			require.Equal(t, "upstream_error", gjson.Get(rec.Body.String(), "error.type").String())
-			require.Equal(t, "Upstream access is temporarily unavailable, please retry later",
+			require.Equal(t, "PRIVATE_UPSTREAM workspace detail access_token=*** refresh_token=*** chatgpt-1 list the files",
 				gjson.Get(rec.Body.String(), "error.message").String())
-			for _, private := range []string{"PRIVATE_UPSTREAM", "deactivated_workspace", "workspace detail", "list the files", "access_token", "refresh_token", "token-1", "token-2", "private-refresh-token", "chatgpt-1"} {
+			for _, private := range []string{"deactivated_workspace", "token-1", "token-2", "private-refresh-token"} {
 				require.NotContains(t, rec.Body.String(), private)
 			}
 			require.NotContains(t, rec.Body.String(), "event:", "a stream request rejected before output must still receive an HTTP error")
@@ -458,7 +458,7 @@ func TestOpenAIResponsesExcelBPSPaymentRequiredDoesNotFailOverOrBlockAccount(t *
 			require.Empty(t, repo.errorCalls(), "a generic payment error must not persist an account error")
 			require.Equal(t, http.StatusPaymentRequired, rec.Code, rec.Body.String())
 			require.Equal(t, "basispoints_upstream_error", gjson.Get(rec.Body.String(), "error.code").String())
-			require.Equal(t, "Excel BPS rejected this request; account scheduling was not changed",
+			require.Equal(t, "Payment Required",
 				gjson.Get(rec.Body.String(), "error.message").String())
 			for _, sessionID := range []string{"bps-payment-required", "bps-payment-fresh-session"} {
 				c, rec = newExcelBPSFailoverTestContext(context.Background(), tc.stream)
@@ -676,8 +676,7 @@ func TestOpenAIResponsesExcelBPS429OnEveryAccountReturnsRateLimit(t *testing.T) 
 			require.Equal(t, http.StatusTooManyRequests, rec.Code, "exhausting upstream 429s must preserve the rate limit")
 			require.Equal(t, "rate_limit_error", gjson.Get(rec.Body.String(), "error.type").String())
 			require.Equal(t, "basispoints_rate_limited", gjson.Get(rec.Body.String(), "error.code").String())
-			require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
-			require.NotContains(t, rec.Body.String(), "workspace")
+			require.Equal(t, "PRIVATE_UPSTREAM workspace detail", gjson.Get(rec.Body.String(), "error.message").String())
 			require.Equal(t, tc.wantRetryAfter, rec.Header().Get("Retry-After"))
 
 			// After its wait allowance is exhausted, a cooling pool is answered

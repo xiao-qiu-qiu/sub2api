@@ -33,6 +33,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -1247,12 +1248,22 @@ func (s *AccountTestService) testResponsesGatewayAccountConnection(c *gin.Contex
 				return s.sendErrorAndEnd(c, local.Error()+": "+payload.Error.Message)
 			}
 		}
-		// BPS has already classified and sanitized in-band failures. Preserve
+		// BPS has already classified and sanitized upstream failures. Preserve
 		// that explanation in manual and scheduled tests instead of only the
 		// generic terminal event name returned by the forwarding layer.
 		if GetActualOpenAIUpstreamEndpoint(probeCtx) == "/basispoints/api/responses" && !errors.Is(err, context.Canceled) {
+			var upstreamFailure *basispoints.UpstreamFailure
+			if errors.As(err, &upstreamFailure) {
+				return s.sendErrorAndEnd(c, upstreamFailure.Message)
+			}
 			if failure, ok := GetOpsStreamError(probeCtx); ok && failure.Code != OpsClientCanceledCode && strings.TrimSpace(failure.Message) != "" {
 				return s.sendErrorAndEnd(c, failure.Message)
+			}
+			if probe.Code >= http.StatusBadRequest {
+				message := gjson.GetBytes(probe.Body.Bytes(), "error.message")
+				if message.Type == gjson.String && strings.TrimSpace(message.String()) != "" {
+					return s.sendErrorAndEnd(c, message.String())
+				}
 			}
 		}
 		return s.sendErrorAndEnd(c, err.Error())

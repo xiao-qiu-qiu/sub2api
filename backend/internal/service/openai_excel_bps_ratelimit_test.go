@@ -273,7 +273,9 @@ func TestExcelBPS429FailsOverWithoutChangingCodexState(t *testing.T) {
 				require.Len(t, events, 1)
 				require.Equal(t, "failover", events[0].Kind)
 				require.Equal(t, http.StatusTooManyRequests, events[0].UpstreamStatusCode)
-				require.NotContains(t, events[0].Message+events[0].Detail, "PRIVATE_UPSTREAM")
+				if tc.raw == "" {
+					require.Equal(t, "PRIVATE_UPSTREAM", events[0].Message)
+				}
 
 				// The observed 429 cools only the BPS route, even when the client left.
 				require.InDelta(t, tc.wantCooldown.Seconds(), excelBPSCooldownRemaining(t, svc, account.ID).Seconds(), 2)

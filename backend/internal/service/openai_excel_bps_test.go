@@ -150,7 +150,7 @@ func TestExcelBPSModelDeniedDoesNotFailover(t *testing.T) {
 	require.NotErrorAs(t, err, &failover)
 	require.Equal(t, 403, rec.Code)
 	require.Contains(t, rec.Body.String(), "basispoints_model_access_changed")
-	require.NotContains(t, rec.Body.String(), "SECRET_UPSTREAM")
+	require.Equal(t, "SECRET_UPSTREAM", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
 	require.True(t, IsResponseCommitted(c))
 }
 
@@ -178,13 +178,13 @@ func TestExcelBPSHTTPErrorRecordsUpstreamRejection(t *testing.T) {
 			require.True(t, IsResponseCommitted(c))
 			require.Equal(t, http.StatusBadRequest, rec.Code)
 			require.True(t, json.Valid(rec.Body.Bytes()))
-			require.NotContains(t, rec.Body.String(), "Expected an ID")
-			require.Equal(t, http.StatusBadRequest, c.GetInt(OpsUpstreamStatusCodeKey))
-			if logBody {
-				require.Contains(t, c.GetString(OpsUpstreamErrorMessageKey), "Expected an ID")
-			} else {
-				require.Equal(t, "Excel BPS returned HTTP 400", c.GetString(OpsUpstreamErrorMessageKey))
+			require.Contains(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), "Expected an ID")
+			require.Contains(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), "private-user-input")
+			for _, secret := range []string{"test-token", "other-secret", "refresh-secret", "user:pass", "query-secret"} {
+				require.NotContains(t, rec.Body.String(), secret)
 			}
+			require.Equal(t, http.StatusBadRequest, c.GetInt(OpsUpstreamStatusCodeKey))
+			require.Equal(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), c.GetString(OpsUpstreamErrorMessageKey))
 			events, exists := c.Get(OpsUpstreamErrorsKey)
 			require.True(t, exists)
 			attempts, ok := events.([]*OpsUpstreamErrorEvent)
@@ -202,8 +202,8 @@ func TestExcelBPSHTTPErrorRecordsUpstreamRejection(t *testing.T) {
 				require.Empty(t, attempts[0].Detail)
 				require.Empty(t, attempts[0].UpstreamResponseBody)
 				require.Empty(t, c.GetString(OpsUpstreamErrorDetailKey))
-				require.NotContains(t, attempts[0].Message, "private-user-input")
 			}
+			require.Equal(t, c.GetString(OpsUpstreamErrorMessageKey), attempts[0].Message)
 			encoded, err := json.Marshal(attempts)
 			require.NoError(t, err)
 			require.NotContains(t, string(encoded), "test-token")

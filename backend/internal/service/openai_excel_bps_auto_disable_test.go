@@ -79,8 +79,9 @@ func TestExcelBPSAutoDisableOn403(t *testing.T) {
 					require.Equal(t, tc.status, rec.Code)
 				}
 				require.Equal(t, wantCode, gjson.Get(rec.Body.String(), "error.code").String())
-				require.Equal(t, tc.changed && tc.writeErr == nil, strings.Contains(rec.Body.String(), "automatically disabled"))
-				require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
+				if tc.status != http.StatusTooManyRequests && !tc.modelError {
+					require.Equal(t, "PRIVATE_UPSTREAM", gjson.Get(rec.Body.String(), "error.message").String())
+				}
 				require.Equal(t, tc.wantCalls, calls)
 				require.Len(t, upstream.requests, 1, "do not replay the failed request")
 				require.True(t, account.IsExcelBPSEnabled(), "do not mutate a shared scheduler snapshot")

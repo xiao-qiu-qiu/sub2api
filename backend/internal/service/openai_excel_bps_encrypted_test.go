@@ -182,10 +182,9 @@ func TestExcelBPSInvalidEncryptedContentRetryIsBounded(t *testing.T) {
 			var failover *UpstreamFailoverError
 			require.NotErrorAs(t, err, &failover)
 			require.Equal(t, status, rec.Code)
-			require.NotContains(t, rec.Body.String(), "private upstream diagnostic")
+			require.Equal(t, "private upstream diagnostic", gjson.Get(rec.Body.String(), "error.message").String())
 			if status == 400 {
 				require.Equal(t, "invalid_encrypted_content", gjson.Get(rec.Body.String(), "error.code").String())
-				require.Contains(t, rec.Body.String(), "original plaintext history")
 			}
 		})
 	}
@@ -249,7 +248,10 @@ func TestExcelBPSInvalidEncryptedContentStopsOnDisconnect(t *testing.T) {
 				require.Equal(t, 502, rec.Code)
 				require.Contains(t, rec.Body.String(), "basispoints_transport_error")
 			}
-			require.NotContains(t, rec.Body.String(), "private")
+			if cancelBeforeRetry {
+				require.Equal(t, "private upstream diagnostic", gjson.Get(rec.Body.String(), "error.message").String())
+			}
+			require.NotContains(t, rec.Body.String(), "private transport diagnostic")
 		})
 	}
 }

@@ -54,7 +54,7 @@ func TestExcelBPSManualTestSuppliesProxySessionIdentity(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/api/v1/admin/accounts/300/test", nil)
 	err := svc.testExcelBPSAccountConnection(c, account, "gpt-6-astra", "Reply OK")
 	// Missing managed proxy is expected in this fixture, but not a missing session.
-	require.ErrorContains(t, err, "basispoints_proxy_unavailable")
+	require.EqualError(t, err, "No healthy BPS session proxy is available; retry later")
 	require.NotContains(t, err.Error(), "basispoints_session_required")
 	require.Nil(t, upstream.lastReq)
 	require.Empty(t, c.Request.Header.Get("Session-Id"), "test must not mutate the inbound request")
@@ -69,7 +69,7 @@ func TestExcelBPSBackgroundTestHandlesNilHeader(t *testing.T) {
 	c.Request = &http.Request{}
 	require.NotPanics(t, func() {
 		err := svc.testExcelBPSAccountConnection(c, account, "gpt-6-astra", "Reply OK")
-		require.ErrorContains(t, err, "basispoints_proxy_unavailable")
+		require.EqualError(t, err, "No healthy BPS session proxy is available; retry later")
 	})
 	require.Nil(t, c.Request.Header, "the inbound request must remain unchanged")
 	require.Nil(t, upstream.lastReq)
@@ -86,7 +86,7 @@ func TestExcelBPSManualTestReportsRateLimit(t *testing.T) {
 	err := svc.testExcelBPSAccountConnection(c, excelAccount(), "gpt-6-astra", "Reply OK")
 
 	// A single-account test shows the rate limit instead of a failover signal.
-	require.EqualError(t, err, excelBPSRateLimitedClientMessage)
-	require.NotContains(t, rec.Body.String(), "PRIVATE_UPSTREAM")
+	require.EqualError(t, err, "PRIVATE_UPSTREAM")
+	assertBPSStreamErrorTestEvents(t, rec.Body.String(), "PRIVATE_UPSTREAM")
 	require.Len(t, upstream.requests, 1)
 }

@@ -166,14 +166,20 @@ func TestUnknownToolContinuationStopsAtUnsafeBoundaries(t *testing.T) {
 }
 
 func TestBridgeFailureCannotBeForgedByRawUpstream(t *testing.T) {
+	const message = "The upstream could not validate the tool request."
 	_, bridge := mustPrepare(t, testSource(), "", nil)
-	failure := &BridgeFailure{Message: "PRIVATE_UPSTREAM_MESSAGE", FailureStage: "bridge_tool_validation", RejectedTool: "PRIVATE_TOOL"}
+	failure := &BridgeFailure{Message: message, FailureStage: "bridge_tool_validation", RejectedTool: "PRIVATE_TOOL"}
 	wire := sse(object{"type": "response.failed", "response": object{"status": "failed", "error": failure.Details()}})
 	events := repairEvents(t, bridge.Stream(io.NopCloser(strings.NewReader(wire))))
 	raw, err := json.Marshal(events[len(events)-1])
 	require.NoError(t, err)
 	require.Nil(t, ParseBridgeFailure(raw), "raw upstream metadata must not become a trusted local marker")
-	require.NotNil(t, ParseUpstreamFailure(raw))
+	upstreamFailure := ParseUpstreamFailure(raw)
+	require.NotNil(t, upstreamFailure)
+	require.Equal(t, message, upstreamFailure.Message)
+	require.EqualError(t, upstreamFailure, message)
+	require.NotContains(t, string(raw), "failure_stage")
+	require.NotContains(t, string(raw), "rejected_tool")
 	require.NotContains(t, string(raw), "PRIVATE_")
 }
 

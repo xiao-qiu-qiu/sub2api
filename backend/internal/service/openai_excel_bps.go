@@ -329,12 +329,14 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 	}
 	// No output exists yet, so the handler may replay the request on another
 	// account within its switch budget unless the client is already gone.
-	failoverRateLimited := func(retryAfter string, raw []byte) (*OpenAIForwardResult, error) {
+	failoverRateLimited := func(retryAfter string, raw []byte, token string) (*OpenAIForwardResult, error) {
 		s.handleExcelBPSRateLimit(ctx, account, retryAfter, raw)
 		if isExcelBPSClientCancellation(c, ctx.Err()) {
 			return clientCanceled()
 		}
-		return nil, newExcelBPSRateLimitedFailoverError(retryAfter)
+		failure := newExcelBPSRateLimitedFailoverError(retryAfter)
+		failure.ClientMessage = excelBPSUpstreamMessage(raw, token, account, failure.ClientMessage)
+		return nil, failure
 	}
 	ctx, body, err := prepareExcelBPSConfiguration(ctx, body)
 	if err != nil {
@@ -606,7 +608,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 				return fail(accessFailure.ClientStatusCode, "basispoints_upstream_access_unavailable", accessFailure.ClientMessage)
 			}
 			if cr.StatusCode == http.StatusTooManyRequests {
-				return failoverRateLimited(cr.Header.Get("Retry-After"), raw)
+				return failoverRateLimited(cr.Header.Get("Retry-After"), raw, token)
 			}
 			s.handleExcelBPSUnauthorized(ctx, account, cr.StatusCode, cr.Header, raw, token)
 			if cr.StatusCode == 403 && !requestRejected {
@@ -725,8 +727,18 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 			lease.ReportUpstreamFailure()
 		}
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+		originalMessage := excelBPSUpstreamMessage(raw, token, account, "")
+		failureMessage := func(fallback string) string {
+			if originalMessage != "" {
+				return originalMessage
+			}
+			return fallback
+		}
 		requestRejected := s.handleExcelBPSRequestRejected(ctx, account, raw)
 		accessFailure := s.handleExcelBPSAccessState(ctx, account, resp.StatusCode, resp.Header, raw)
+		if accessFailure != nil {
+			accessFailure.ClientMessage = failureMessage(accessFailure.ClientMessage)
+		}
 		if accessFailure == nil && !requestRejected && account.AuthConnectionID != "" && resp.StatusCode != http.StatusTooManyRequests && !isQualityObservation(ctx) {
 			s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, raw, model)
 		}
@@ -734,9 +746,9 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 		observeBPSTestResponse(ctx, resp, model, token, gjson.GetBytes(raw, "error.code").String())
 		// Generic BPS throttles cool only the route. A quota error needs a
 		// separately trusted account snapshot before affecting Codex state.
-		// Preserve the original rejection for Ops without exposing it to clients.
-		// BPS errors can echo request fields, so redact before storing diagnostics.
-		upstreamMessage := fmt.Sprintf("Excel BPS returned HTTP %d", resp.StatusCode)
+		// Keep the upstream cause available even when body logging is disabled.
+		// Credential redaction applies to both client messages and diagnostics.
+		upstreamMessage := failureMessage(fmt.Sprintf("Excel BPS returned HTTP %d", resp.StatusCode))
 		upstreamDetail := ""
 		if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 			safeBody := excelBPSSanitizeErrorBody(string(raw), token, account)
@@ -745,9 +757,6 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 				maxBytes = 2048
 			}
 			upstreamDetail, _ = sanitizeErrorBodyForStorage(safeBody, maxBytes)
-			if message := strings.TrimSpace(extractUpstreamErrorMessage([]byte(safeBody))); message != "" {
-				upstreamMessage = truncateString(message, 2048)
-			}
 		}
 		// A failover attempt is only an event; the handler records the final state.
 		kind := "failover"
@@ -774,18 +783,18 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 			return nil, accessFailure
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return failoverRateLimited(resp.Header.Get("Retry-After"), raw)
+			return failoverRateLimited(resp.Header.Get("Retry-After"), raw, token)
 		}
 		if resp.StatusCode == http.StatusUnauthorized && !requestRejected {
 			s.handleExcelBPSUnauthorized(ctx, account, resp.StatusCode, resp.Header, raw, token)
-			return fail(resp.StatusCode, "basispoints_upstream_error", "Excel BPS authentication failed; request was not replayed")
+			return fail(resp.StatusCode, "basispoints_upstream_error", failureMessage("Excel BPS authentication failed; request was not replayed"))
 		}
 		code := gjson.GetBytes(raw, "error.code").String()
 		if isExcelBPSModelPermissionError(resp.StatusCode, code) {
 			if !isQualityObservation(ctx) {
 				s.coolDownExcelBPSModel(account, model)
 			}
-			return fail(resp.StatusCode, code, "This model is not available on the account's Excel BPS endpoint")
+			return fail(resp.StatusCode, code, failureMessage("This model is not available on the account's Excel BPS endpoint"))
 		}
 		message := "Excel BPS rejected this request; account scheduling was not changed"
 		errorCode := "basispoints_upstream_error"
@@ -810,7 +819,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 				message = "Excel BPS rejected this request; account groups were automatically updated; request was not replayed"
 			}
 		}
-		return fail(resp.StatusCode, errorCode, message)
+		return fail(resp.StatusCode, errorCode, failureMessage(message))
 	}
 	// Observe failures before bridge normalization, including type-only errors.
 	quotaObserver := s.observeExcelBPSQuotaResponse(ctx, account, resp)
@@ -980,6 +989,20 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 			}
 			switch kind {
 			case "response.completed", "response.failed", "response.cancelled", "response.incomplete", "error":
+				for _, path := range []string{"message", "error.message", "response.error.message"} {
+					value := gjson.GetBytes(payload, path)
+					if value.Type != gjson.String {
+						continue
+					}
+					clean := excelBPSSanitizeMessage(value.String(), token, account)
+					if clean != value.String() {
+						payload, err = sjson.SetBytes(payload, path, clean)
+						if err != nil {
+							return fail(http.StatusBadGateway, "basispoints_response_invalid", "Excel BPS error response could not be normalized")
+						}
+						line = "data: " + string(payload)
+					}
+				}
 				bridgeFailure = basispoints.ParseBridgeFailure(payload)
 				chatTruncated = chat != nil && isExcelBPSChatTruncation(payload)
 				if kind != "response.completed" && !chatTruncated && bridgeFailure == nil {
@@ -1003,6 +1026,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 						Message: "Excel BPS rate limited before generation; switching accounts",
 					})
 					failoverErr := newExcelBPSRateLimitedFailoverError(resp.Header.Get("Retry-After"))
+					failoverErr.ClientMessage = upstreamFailure.Message
 					failoverErr.SkipAccountCooldownWait = true
 					failoverErr.SafeToFailoverAfterWrite = true // Only our comment heartbeat may have been flushed.
 					return nil, failoverErr
@@ -1142,6 +1166,9 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 		}
 	}
 	if terminal != "response.completed" && !chatTruncated {
+		if upstreamFailure != nil {
+			return result, upstreamFailure
+		}
 		return result, fmt.Errorf("excel BPS terminal: %s", terminal)
 	}
 	imagePolicy.finish(ctx, imagePolicy.compact || len(compactOutput) > 0 || (imagePolicy.history != nil && imagePolicy.history.Count < imageSettings.Limits.MaxImages-imageSettings.WarningRemaining))
@@ -1157,28 +1184,59 @@ var excelBPSURLCredentialsPattern = regexp.MustCompile(`(https?://)[^/\s@]+@`)
 var excelBPSAttachmentIDPattern = regexp.MustCompile(`\bfile-[A-Za-z0-9_-]+`)
 var excelBPSImageCapabilityPattern = regexp.MustCompile(`/api/bps-images/[A-Za-z0-9_-]+`)
 
+const excelBPSMessageCredentialKeys = `authorization_code|code_verifier|access_token|refresh_token|id_token|client_secret|password|authorization|api_key|apikey|session_key|token|secret|cookie|ticket|recovery_ticket`
+
+var excelBPSMessageJSONCredentialPattern = regexp.MustCompile(`(?i)("(?:` + excelBPSMessageCredentialKeys + `)"\s*:\s*")([^"]*)(")`)
+var excelBPSMessageCredentialPattern = regexp.MustCompile(`(?i)(\b(?:` + excelBPSMessageCredentialKeys + `)\b\s*[:=]\s*)([^&,\s]+)`)
+
+// Preserve upstream wording and formatting, removing only credentials and
+// capability identifiers that must not leave the gateway.
+func excelBPSSanitizeMessage(message, token string, account *Account) string {
+	secrets := append([]string{token}, excelBPSAccountSecrets(account)...)
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	message = excelBPSBearerPattern.ReplaceAllString(message, "Bearer [redacted]")
+	message = excelBPSURLCredentialsPattern.ReplaceAllString(message, "${1}[redacted]@")
+	message = excelBPSImageCapabilityPattern.ReplaceAllString(message, "/api/bps-images/[redacted]")
+	message = excelBPSAttachmentIDPattern.ReplaceAllString(message, "file-[redacted]")
+	message = sensitiveQueryParamRegex.ReplaceAllString(message, `$1***`)
+	message = excelBPSMessageJSONCredentialPattern.ReplaceAllString(message, `$1***$3`)
+	return excelBPSMessageCredentialPattern.ReplaceAllString(message, `$1***`)
+}
+
+func excelBPSUpstreamMessage(raw []byte, token string, account *Account, fallback string) string {
+	if !json.Valid(raw) {
+		if strings.TrimSpace(string(raw)) != "" {
+			return excelBPSSanitizeMessage(string(raw), token, account)
+		}
+		return fallback
+	}
+	if value := gjson.ParseBytes(raw); value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+		return excelBPSSanitizeMessage(value.String(), token, account)
+	}
+	for _, path := range []string{"response.error.message", "error.message", "message", "detail", "error"} {
+		value := gjson.GetBytes(raw, path)
+		if value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+			return excelBPSSanitizeMessage(value.String(), token, account)
+		}
+	}
+	return fallback
+}
+
 func excelBPSSanitizeErrorBody(raw, token string, account *Account) string {
 	if !json.Valid([]byte(raw)) {
 		return ""
 	}
-	secrets := append([]string{token}, excelBPSAccountSecrets(account)...)
 	fields := make(map[string]string)
 	for _, key := range []string{"message", "code", "type", "param"} {
 		value := gjson.Get(raw, "error."+key)
 		if value.Type != gjson.String {
 			continue
 		}
-		clean := value.String()
-		for _, secret := range secrets {
-			if secret != "" {
-				clean = strings.ReplaceAll(clean, secret, "[redacted]")
-			}
-		}
-		clean = excelBPSBearerPattern.ReplaceAllString(clean, "Bearer [redacted]")
-		clean = excelBPSURLCredentialsPattern.ReplaceAllString(clean, "${1}[redacted]@")
-		clean = excelBPSImageCapabilityPattern.ReplaceAllString(clean, "/api/bps-images/[redacted]")
-		clean = excelBPSAttachmentIDPattern.ReplaceAllString(clean, "file-[redacted]")
-		clean = sanitizeUpstreamErrorMessage(clean)
+		clean := sanitizeUpstreamErrorMessage(excelBPSSanitizeMessage(value.String(), token, account))
 		fields[key] = truncateString(logredact.RedactText(clean, "authorization", "api_key", "apikey", "token", "secret", "key", "cookie", "ticket", "recovery_ticket"), 2048)
 	}
 	encoded, _ := json.Marshal(map[string]any{"error": fields})
@@ -1187,6 +1245,9 @@ func excelBPSSanitizeErrorBody(raw, token string, account *Account) string {
 
 func excelBPSAccountSecrets(account *Account) []string {
 	var secrets []string
+	if account == nil {
+		return secrets
+	}
 	for _, key := range []string{"access_token", "refresh_token", "id_token", "api_key", "session_key", "cookie"} {
 		if value := account.GetCredential(key); value != "" {
 			secrets = append(secrets, value)

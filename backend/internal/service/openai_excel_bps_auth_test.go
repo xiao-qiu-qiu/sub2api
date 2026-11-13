@@ -192,7 +192,12 @@ func TestExcelBPSAccessStateIsolation(t *testing.T) {
 				}
 				for _, secret := range []string{"PRIVATE_REQUEST", "PRIVATE_UPSTREAM_BODY", "test-token", "refresh-secret"} {
 					require.NotContains(t, repo.reason, secret)
-					require.NotContains(t, rec.Body.String(), secret)
+					if secret == "test-token" || secret == "refresh-secret" || tc.route == "attachment" {
+						require.NotContains(t, rec.Body.String(), secret)
+					}
+				}
+				if tc.event != "" {
+					require.Contains(t, rec.Body.String(), "PRIVATE_UPSTREAM_BODY")
 				}
 			})
 		}
@@ -367,7 +372,18 @@ func TestExcelBPS401AppliesAuthenticationPolicy(t *testing.T) {
 					require.True(t, IsResponseCommitted(c))
 					if wantRequests == 1 {
 						require.Equal(t, http.StatusUnauthorized, rec.Code)
-						require.Contains(t, rec.Body.String(), "authentication failed")
+						if route == "responses" {
+							switch tc.name {
+							case "expired", "invalidated", "non JSON":
+								require.Contains(t, rec.Body.String(), "PRIVATE_REQUEST")
+							case "unauthorized detail":
+								require.Contains(t, rec.Body.String(), "Unauthorized")
+							default:
+								require.Contains(t, rec.Body.String(), "authentication failed")
+							}
+						} else {
+							require.Contains(t, rec.Body.String(), "authentication failed")
+						}
 					}
 					require.NotContains(t, rec.Body.String(), "scheduling was not changed")
 					require.Equal(t, account.ID, repo.accountID)
@@ -393,7 +409,9 @@ func TestExcelBPS401AppliesAuthenticationPolicy(t *testing.T) {
 					requireNoExcelBPSQuotaWrite(t, &repo.excelBPSQuotaRepo)
 					for _, secret := range []string{"test-token", "refresh-secret", "PRIVATE_REQUEST", "file-private"} {
 						require.NotContains(t, repo.reason, secret)
-						require.NotContains(t, rec.Body.String(), secret)
+						if secret != "PRIVATE_REQUEST" || route != "responses" {
+							require.NotContains(t, rec.Body.String(), secret)
+						}
 					}
 				})
 			}

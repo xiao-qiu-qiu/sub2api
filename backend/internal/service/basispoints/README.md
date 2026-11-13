@@ -232,7 +232,8 @@ these ceilings are not throughput or memory-use guarantees.
 
 - Recognize error, response.failed and response.cancelled as failed terminals.
   Explicit error status takes precedence over known error codes and types;
-  unknown identifiers use a safe 502 fallback. Never forward upstream free text.
+  unknown identifiers use a safe 502 fallback. Preserve the upstream error
+  message; the gateway redacts credentials before returning it to clients.
 - Buffered client responses return the classified HTTP status. Started streams
   retain their HTTP status and carry the classification in the error event.
   Ops records keep the actual upstream HTTP status separate from the semantic

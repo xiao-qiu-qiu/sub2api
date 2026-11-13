@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/qualityqueue"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/qualityqueue/queuetest"
+	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,8 @@ func TestExcelBPSFailureAfterCompactKeepalive(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, 1, strings.Count(rec.Body.String(), "event: response.failed\n"))
-	require.NotContains(t, rec.Body.String(), "PRIVATE_")
+	require.Contains(t, rec.Body.String(), "PRIVATE_UPSTREAM_BODY")
+	require.NotContains(t, rec.Body.String(), "PRIVATE_PARAMETER")
 	require.False(t, json.Valid(rec.Body.Bytes()), "already committed keepalive requires an SSE terminal")
 	require.Contains(t, rec.Body.String(), "rate_limit_exceeded")
 	observed, ok := GetOpsStreamError(c)
@@ -131,8 +133,10 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 				require.True(t, IsResponseCommitted(c))
 				var failover *UpstreamFailoverError
 				require.NotErrorAs(t, err, &failover)
-				require.NotContains(t, rec.Body.String(), "PRIVATE_")
-				require.NotContains(t, err.Error(), "PRIVATE_")
+				require.Contains(t, rec.Body.String(), "PRIVATE_UPSTREAM_BODY")
+				for _, field := range []string{"PRIVATE_ERROR_CODE", "PRIVATE_ERROR_TYPE", "PRIVATE_PARAMETER"} {
+					require.NotContains(t, rec.Body.String(), field)
+				}
 				require.NotContains(t, rec.Body.String(), "basispoints_stream_incomplete")
 				require.NotContains(t, rec.Body.String(), "response.completed")
 				if tc.event != "error" {
@@ -155,13 +159,14 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 						if tc.event == "error" {
 							require.False(t, gjson.Get(raw, "error").Exists())
 							require.Equal(t, tc.wantCode, gjson.Get(raw, "code").String())
-							require.NotEmpty(t, gjson.Get(raw, "message").String())
+							require.Equal(t, "PRIVATE_UPSTREAM_BODY", gjson.Get(raw, "message").String())
 							require.Equal(t, "null", gjson.Get(raw, "param").Raw)
 							require.EqualValues(t, 1, gjson.Get(raw, "sequence_number").Int())
 							require.EqualValues(t, tc.status, gjson.Get(raw, "status").Int())
 						} else {
 							require.Equal(t, tc.wantCode, gjson.Get(raw, "response.error.code").String())
 							require.Equal(t, tc.wantType, gjson.Get(raw, "response.error.type").String())
+							require.Equal(t, "PRIVATE_UPSTREAM_BODY", gjson.Get(raw, "response.error.message").String())
 							require.EqualValues(t, tc.status, gjson.Get(raw, "response.error.status").Int())
 						}
 					}
@@ -170,17 +175,90 @@ func TestExcelBPSFailureClassification(t *testing.T) {
 					require.Equal(t, tc.status, rec.Code)
 					require.Equal(t, tc.wantCode, gjson.GetBytes(rec.Body.Bytes(), "error.code").String())
 					require.Equal(t, tc.wantType, gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+					require.Equal(t, "PRIVATE_UPSTREAM_BODY", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
 				}
 				observed, ok := GetOpsStreamError(c)
 				require.True(t, ok)
 				require.Equal(t, tc.status, observed.IntendedStatus)
 				require.Equal(t, tc.wantCode, observed.Code)
+				require.Equal(t, "PRIVATE_UPSTREAM_BODY", observed.Message)
 				require.Equal(t, http.StatusOK, c.GetInt(OpsUpstreamStatusCodeKey), "mapped status is not an upstream HTTP status")
 				require.Equal(t, tc.status == 429, svc.isExcelBPSCoolingDown(account, "gpt-6-astra"))
 				require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 				require.True(t, account.IsSchedulable())
 				require.True(t, account.IsExcelBPSEnabled(), "an in-band 403 must not disable the account")
 			})
+		}
+	}
+}
+
+func TestExcelBPSOriginalMessage(t *testing.T) {
+	for _, transport := range []string{"sse", "ws"} {
+		for _, tc := range bpsOriginalMessageCases(t) {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%t", transport, tc.name, stream), func(t *testing.T) {
+					account := bpsOriginalMessageAccount()
+					account.Extra[ExcelBPSTransportKey] = transport
+					upstream := &httpUpstreamRecorder{resp: bpsCompletionResponse(tc.status, tc.body)}
+					svc := openAIClientToolsTestService(upstream)
+					ws := &excelBPSWSTestUpstream{httpUpstreamRecorder: upstream}
+					if transport == "ws" {
+						svc.httpUpstream = ws
+					}
+					rec := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(rec)
+					ctx := WithManualAccountTest(t.Context())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+					body := []byte(fmt.Sprintf(`{"model":"gpt-6-astra","input":"Reply OK","stream":%t}`, stream))
+					_, err := svc.Forward(ctx, c, account, body)
+					require.Error(t, err)
+					require.Len(t, upstream.requests, 1)
+					if transport == "ws" {
+						require.Equal(t, 1, ws.wsCalls)
+						require.Zero(t, ws.httpCalls)
+					}
+					if tc.status == http.StatusTooManyRequests {
+						var failover *UpstreamFailoverError
+						require.ErrorAs(t, err, &failover)
+						require.Equal(t, tc.want, failover.ClientMessage)
+						require.Empty(t, rec.Body.String())
+						return
+					}
+					var failover *UpstreamFailoverError
+					require.NotErrorAs(t, err, &failover)
+					require.True(t, IsResponseCommitted(c))
+					if tc.status == http.StatusOK {
+						var upstreamFailure *basispoints.UpstreamFailure
+						require.ErrorAs(t, err, &upstreamFailure)
+						require.Equal(t, tc.want, upstreamFailure.Message)
+						observed, ok := GetOpsStreamError(c)
+						require.True(t, ok)
+						require.Equal(t, strings.TrimSpace(tc.want), observed.Message)
+					}
+					if tc.status != http.StatusOK || !stream {
+						require.Equal(t, tc.want, gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+					} else {
+						terminals := 0
+						for _, line := range strings.Split(rec.Body.String(), "\n") {
+							if !strings.HasPrefix(line, "data: ") {
+								continue
+							}
+							payload := strings.TrimPrefix(line, "data: ")
+							path := "message"
+							if gjson.Get(payload, "type").String() != "error" {
+								path = "response.error.message"
+							}
+							require.Equal(t, tc.want, gjson.Get(payload, path).String())
+							terminals++
+						}
+						require.Equal(t, 1, terminals)
+					}
+					for _, filtered := range []string{"PRIVATE_ERROR_TYPE", "PRIVATE_PARAMETER", "test-token", "refresh-credential", "id-credential", "api-credential", "session-credential", "cookie-credential", "bearer-credential", "privateuser:privatepass", "query-credential", "privateAttachment", "privateCapability", "json-credential"} {
+						require.NotContains(t, rec.Body.String(), filtered)
+					}
+					require.NotContains(t, rec.Body.String(), "response.completed")
+				})
+			}
 		}
 	}
 }
@@ -233,11 +311,19 @@ func TestExcelBPSRequestRejectedClassification(t *testing.T) {
 				var failover *UpstreamFailoverError
 				require.NotErrorAs(t, err, &failover)
 				require.True(t, IsResponseCommitted(c))
-				require.NotContains(t, rec.Body.String(), "PRIVATE_")
 				observed, ok := GetOpsStreamError(c)
 				require.True(t, ok)
 				require.Equal(t, tc.code, observed.Code)
 				require.Equal(t, tc.status, observed.IntendedStatus)
+				message := gjson.Get(tc.payload, "message").String()
+				if nested := gjson.Get(tc.payload, "error.message"); nested.Exists() {
+					message = nested.String()
+				}
+				if nested := gjson.Get(tc.payload, "response.error.message"); nested.Exists() {
+					message = nested.String()
+				}
+				require.Equal(t, strings.TrimSpace(message), observed.Message)
+				require.NotContains(t, rec.Body.String(), "PRIVATE_OTHER_REJECTION")
 				require.Equal(t, http.StatusOK, c.GetInt(OpsUpstreamStatusCodeKey))
 				if stream {
 					require.Equal(t, http.StatusOK, rec.Code)
@@ -315,13 +401,14 @@ func TestExcelBPSResponsesErrorFieldsAndExtractors(t *testing.T) {
 				require.NotNil(t, result)
 				require.Equal(t, "error", result.UpstreamTerminalEvent)
 				require.Len(t, upstream.requests, 1)
-				require.NotContains(t, rec.Body.String(), "PRIVATE")
+				require.Contains(t, rec.Body.String(), "PRIVATE_UPSTREAM_BODY")
 				require.NotContains(t, rec.Body.String(), "response.completed")
 				raw = rec.Body.Bytes()
 				if !stream {
 					require.Equal(t, http.StatusBadRequest, rec.Code)
 					require.Equal(t, "invalid_value", gjson.GetBytes(raw, "error.code").String())
 					require.Equal(t, "input[2].id", gjson.GetBytes(raw, "error.param").String())
+					require.Equal(t, "PRIVATE_UPSTREAM_BODY", gjson.GetBytes(raw, "error.message").String())
 					return
 				}
 				require.Equal(t, http.StatusOK, rec.Code)
@@ -335,7 +422,7 @@ func TestExcelBPSResponsesErrorFieldsAndExtractors(t *testing.T) {
 				require.False(t, IsSuccessfulStreamTerminal(raw))
 				require.Equal(t, "invalid_value", extractUpstreamErrorCode(raw))
 				message := extractOpenAISSEErrorMessage(raw)
-				require.NotEmpty(t, message)
+				require.Equal(t, "PRIVATE_UPSTREAM_BODY", message)
 				failedSSE := buildOpenAIResponseFailedSSE("resp_error", "gpt-6-astra", 1, raw, "")
 				failedJSON := strings.TrimSpace(strings.TrimPrefix(failedSSE, "event: response.failed\ndata: "))
 				for _, failed := range []string{failedJSON, string(buildOpenAIWSHTTPBridgeFailedEvent("resp_error", "gpt-6-astra", 1, raw, ""))} {
@@ -490,7 +577,9 @@ func TestExcelBPSRequestRejectedQuarantinePaths(t *testing.T) {
 					require.Empty(t, repo.reasons)
 				}
 				require.True(t, account.IsExcelBPSEnabled(), "the rejection marker must not silently change BPS configuration")
-				require.NotContains(t, rec.Body.String(), "PRIVATE_TEXT")
+				if strings.Contains(tc.payload, "PRIVATE_TEXT") {
+					require.Contains(t, rec.Body.String(), "PRIVATE_TEXT")
+				}
 			})
 		}
 	}

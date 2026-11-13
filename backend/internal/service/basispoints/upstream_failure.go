@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strings"
 )
 
-// UpstreamFailure is a safe interpretation of an in-band error. Status is a
-// semantic status, not evidence of the HTTP status returned by the upstream.
+// UpstreamFailure classifies an in-band error and preserves its message. The
+// gateway redacts credentials before exposing it. Status is semantic, not
+// evidence of the HTTP status returned by the upstream.
 type UpstreamFailure struct {
 	Status  int
 	Code    string
@@ -26,8 +28,8 @@ func (f *UpstreamFailure) Details() map[string]any {
 	return detail
 }
 
-// ParseUpstreamFailure recognizes failure terminals only. Unknown identifiers
-// and free-form upstream messages never enter client responses or diagnostics.
+// ParseUpstreamFailure recognizes failure terminals only. Error identifiers
+// retain their stable classification while messages preserve the upstream cause.
 func ParseUpstreamFailure(raw []byte) *UpstreamFailure {
 	if ParseBridgeFailure(raw) != nil {
 		return nil
@@ -102,6 +104,9 @@ func classifyUpstreamFailure(kind string, payload object) *UpstreamFailure {
 	case "basispoints_ws_response_too_big":
 		message = "Excel BPS upstream WebSocket response exceeds the local read limit; request was not replayed"
 	}
+	if original := text(detail["message"]); strings.TrimSpace(original) != "" {
+		message = original
+	}
 	return &UpstreamFailure{Status: status, Code: code, Type: errorType, Param: safeFailureParam(text(detail["param"])), Message: message}
 }
 
@@ -158,7 +163,7 @@ func failureIdentifierStatus(identifier string) int {
 }
 
 // normalizeFailureEvent preserves response identity/output/usage after the
-// bridge has withheld tools, but replaces error details with safe identifiers.
+// bridge has withheld tools, and classifies identifiers without hiding the cause.
 func normalizeFailureEvent(kind string, payload object) object {
 	failure := classifyUpstreamFailure(kind, payload)
 	if failure == nil {

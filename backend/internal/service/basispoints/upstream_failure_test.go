@@ -24,7 +24,7 @@ func TestUpstreamFailureClassificationBoundaries(t *testing.T) {
 		status int
 		code   string
 	}{
-		{"flat error", object{"type": "error", "code": "rate_limit_exceeded", "message": "PRIVATE"}, 429, "rate_limit_exceeded"},
+		{"flat error", object{"type": "error", "code": "rate_limit_exceeded", "message": "Rate limit exceeded. Please retry shortly."}, 429, "rate_limit_exceeded"},
 		{"nested status", object{"type": "error", "error": object{"status": 401, "code": "PRIVATE", "type": "invalid_request_error"}}, 401, "basispoints_upstream_error"},
 		{"explicit first", object{"type": "error", "status": 429, "error": object{"status": 400, "code": "invalid_value"}}, 429, "invalid_value"},
 		{"invalid success", object{"type": "error", "status": 200, "error": object{"code": "rate_limit_exceeded"}}, 429, "rate_limit_exceeded"},
@@ -52,6 +52,130 @@ func TestUpstreamFailureClassificationBoundaries(t *testing.T) {
 	require.Nil(t, ParseUpstreamFailure([]byte("invalid JSON")))
 }
 
+func TestUpstreamFailureMessageRoundTrip(t *testing.T) {
+	const fallback = "Excel BPS upstream failure: rate_limit_exceeded; request was not replayed"
+	const plainMessage = "Rate limit exceeded. Please retry shortly."
+	const paddedMessage = "\t  Rate limit exceeded. Please retry shortly. \r\n"
+	const multilineMessage = "Rate limit exceeded.\nPlease retry shortly.\r\nNo response was generated."
+	const unicodeMessage = "请求过于频繁，请稍后重试。Café — 再試行 🕒"
+	longMessage := strings.Repeat("Please retry when capacity is available. ", 512)
+	for _, shape := range []struct {
+		name  string
+		event func(object) object
+	}{
+		{"flat error", func(detail object) object {
+			detail["type"] = "error"
+			return detail
+		}},
+		{"nested error", func(detail object) object {
+			return object{"type": "error", "message": "Envelope message must not be selected", "error": detail}
+		}},
+		{"response.failed", func(detail object) object {
+			return object{"type": "response.failed", "message": "Envelope message must not be selected",
+				"error":    object{"message": "Lower priority error must not be selected"},
+				"response": object{"status": "failed", "output": []any{}, "error": detail}}
+		}},
+		{"response.failed with top level error", func(detail object) object {
+			return object{"type": "response.failed", "message": "Envelope message must not be selected", "error": detail}
+		}},
+		{"response.cancelled", func(detail object) object {
+			return object{"type": "response.cancelled", "message": "Envelope message must not be selected",
+				"error":    object{"message": "Lower priority error must not be selected"},
+				"response": object{"status": "cancelled", "output": []any{}, "error": detail}}
+		}},
+		{"response.cancelled with top level error", func(detail object) object {
+			return object{"type": "response.cancelled", "message": "Envelope message must not be selected", "error": detail}
+		}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				message any
+				want    string
+			}{
+				{"missing", nil, fallback},
+				{"null", nil, fallback},
+				{"empty", "", fallback},
+				{"whitespace", " \t\r\n ", fallback},
+				{"Unicode whitespace", "\u00a0\u2003\u3000", fallback},
+				{"number", 429, fallback},
+				{"boolean", true, fallback},
+				{"object", object{"message": "Not a string message"}, fallback},
+				{"array", []any{"Not a string message"}, fallback},
+				{"plain text", plainMessage, plainMessage},
+				{"surrounding whitespace", paddedMessage, paddedMessage},
+				{"long text", longMessage, longMessage},
+				{"newlines", multilineMessage, multilineMessage},
+				{"non ASCII", unicodeMessage, unicodeMessage},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					detail := object{"code": "rate_limit_exceeded", "type": "rate_limit_error", "param": "input"}
+					if tc.name != "missing" {
+						detail["message"] = tc.message
+					}
+					requireUpstreamFailureRoundTrip(t, shape.event(detail), &UpstreamFailure{
+						Status: http.StatusTooManyRequests, Code: "rate_limit_exceeded", Type: "rate_limit_error",
+						Param: "input", Message: tc.want,
+					})
+				})
+			}
+		})
+	}
+}
+
+func TestUpstreamFailureUnknownIdentifiersKeepMessage(t *testing.T) {
+	const message = "The requested operation could not be completed."
+	for _, tc := range []struct {
+		name   string
+		detail object
+		want   UpstreamFailure
+	}{
+		{"unknown identifiers", object{"code": "PRIVATE_CODE", "type": "PRIVATE_TYPE", "param": "PRIVATE_PARAM"},
+			UpstreamFailure{Status: http.StatusBadGateway, Code: "basispoints_upstream_error", Type: "server_error"}},
+		{"known code", object{"code": "invalid_value", "type": "PRIVATE_TYPE", "param": "PRIVATE_PARAM"},
+			UpstreamFailure{Status: http.StatusBadRequest, Code: "invalid_value", Type: "invalid_request_error"}},
+		{"known type", object{"code": "PRIVATE_CODE", "type": "rate_limit_error", "param": "PRIVATE_PARAM"},
+			UpstreamFailure{Status: http.StatusTooManyRequests, Code: "basispoints_upstream_error", Type: "rate_limit_error"}},
+		{"explicit status", object{"status": 401, "code": "PRIVATE_CODE", "type": "PRIVATE_TYPE", "param": "input"},
+			UpstreamFailure{Status: http.StatusUnauthorized, Code: "basispoints_upstream_error", Type: "authentication_error", Param: "input"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.detail["message"] = message
+			tc.want.Message = message
+			event := requireUpstreamFailureRoundTrip(t, object{"type": "error", "error": tc.detail}, &tc.want)
+			raw, err := json.Marshal(event)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "PRIVATE_")
+		})
+	}
+}
+
+func requireUpstreamFailureRoundTrip(t *testing.T, event object, want *UpstreamFailure) object {
+	t.Helper()
+	raw, err := json.Marshal(event)
+	require.NoError(t, err)
+	failure := ParseUpstreamFailure(raw)
+	require.Equal(t, want, failure)
+	require.Equal(t, want.Message, failure.Error())
+	require.Equal(t, want.Message, failure.Details()["message"])
+
+	_, bridge := mustPrepare(t, testSource(), "", nil)
+	events := repairEvents(t, bridge.Stream(io.NopCloser(strings.NewReader(sse(event)))))
+	require.Len(t, events, 1)
+	normalized := events[0]
+	require.Equal(t, event["type"], normalized["type"])
+	detail := normalized
+	if event["type"] != "error" {
+		response := repairValue[object](t, normalized["response"])
+		detail = repairValue[object](t, response["error"])
+	}
+	require.Equal(t, want.Message, detail["message"])
+	raw, err = json.Marshal(normalized)
+	require.NoError(t, err)
+	require.Equal(t, failure, ParseUpstreamFailure(raw), "normalization must preserve the complete failure classification and message")
+	return normalized
+}
+
 func TestUpstreamFailureWebSocketReadClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string
@@ -61,13 +185,13 @@ func TestUpstreamFailureWebSocketReadClassification(t *testing.T) {
 	}{
 		{"remote message limit", websocket.StatusMessageTooBig, http.StatusRequestEntityTooLarge,
 			"basispoints_ws_message_too_big", "invalid_request_error",
-			"Excel BPS WebSocket request exceeds the upstream message size limit; request was not replayed"},
+			"WebSocket request exceeds the upstream message size limit; request was not retried"},
 		{"ordinary disconnect", websocket.StatusPolicyViolation, http.StatusBadGateway,
 			"basispoints_upstream_error", "server_error",
-			"Excel BPS upstream failure: basispoints_upstream_error; request was not replayed"},
+			"upstream WebSocket closed before a terminal event; request was not retried"},
 		{"local response limit", 0, http.StatusBadGateway,
 			"basispoints_ws_response_too_big", "server_error",
-			"Excel BPS upstream WebSocket response exceeds the local read limit; request was not replayed"},
+			"upstream WebSocket response exceeds the local read limit; request was not retried"},
 	} {
 		for _, clientStream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, clientStream), func(t *testing.T) {
@@ -143,6 +267,7 @@ func TestUpstreamFailureWebSocketReadClassification(t *testing.T) {
 }
 
 func TestUpstreamFailureErrorEventParamRedaction(t *testing.T) {
+	const message = "The request contains an invalid value."
 	for _, tc := range []struct {
 		name  string
 		param any
@@ -166,7 +291,7 @@ func TestUpstreamFailureErrorEventParamRedaction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, bridge := mustPrepare(t, testSource(), "", nil)
 			body := bridge.Stream(io.NopCloser(strings.NewReader(sse(object{
-				"type": "error", "code": "invalid_value", "message": "PRIVATE", "param": tc.param,
+				"type": "error", "code": "invalid_value", "message": message, "param": tc.param,
 			}))))
 			defer func() { _ = body.Close() }()
 			events := repairEvents(t, body)
@@ -174,16 +299,20 @@ func TestUpstreamFailureErrorEventParamRedaction(t *testing.T) {
 			event := events[0]
 			require.Equal(t, "error", event["type"])
 			require.Equal(t, "invalid_value", event["code"])
-			require.Equal(t, "Excel BPS upstream failure: invalid_value; request was not replayed", event["message"])
+			require.Equal(t, message, event["message"])
 			require.Equal(t, tc.want, event["param"])
 			require.Contains(t, event, "param")
 			require.NotContains(t, event, "error")
 			require.Equal(t, json.Number("0"), event["sequence_number"])
+			raw, err := json.Marshal(event)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "PRIVATE")
 		})
 	}
 }
 
 func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
+	const message = "Rate limit exceeded before the response completed."
 	for _, mode := range []string{"bridge", "tool correction", "unknown tool correction", "compaction"} {
 		t.Run(mode, func(t *testing.T) {
 			_, bridge := mustPrepare(t, testSource(), "", nil)
@@ -191,7 +320,7 @@ func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
 			t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
 			wire := sse(object{"type": "response.cancelled", "response": object{
 				"id": "resp_cancelled", "status": "cancelled", "output": []any{},
-				"error": object{"code": "rate_limit_exceeded", "message": "PRIVATE"},
+				"error": object{"code": "rate_limit_exceeded", "message": message},
 				"usage": object{"input_tokens": 7},
 			}})
 			go func() { _, _ = io.WriteString(writer, wire) }()
@@ -202,7 +331,7 @@ func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
 					body := bridge.Stream(reader)
 					defer func() { _ = body.Close() }()
 					raw, err := io.ReadAll(body)
-					if err == nil && (!strings.Contains(string(raw), "rate_limit_exceeded") || strings.Contains(string(raw), "PRIVATE")) {
+					if err == nil && (!strings.Contains(string(raw), "rate_limit_exceeded") || !strings.Contains(string(raw), message)) {
 						err = io.ErrUnexpectedEOF
 					}
 					done <- err
@@ -223,11 +352,12 @@ func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
 					require.NoError(t, err)
 				} else {
 					require.Error(t, err)
-					require.NotContains(t, err.Error(), "PRIVATE")
 					if mode != "compaction" {
 						var failure *UpstreamFailure
 						require.ErrorAs(t, err, &failure)
 						require.Equal(t, 429, failure.Status)
+						require.Equal(t, message, failure.Message)
+						require.EqualError(t, err, message)
 					}
 				}
 			case <-time.After(3 * time.Second):
@@ -238,13 +368,14 @@ func TestUpstreamFailureStopsReadersWithoutEOF(t *testing.T) {
 }
 
 func TestUpstreamFailureWithholdsPendingToolsAndNeverRepairs(t *testing.T) {
+	const message = "The tool request could not be processed."
 	source := testSource()
 	source["tools"] = []any{object{"type": "function", "name": "shell"}}
 	_, bridge := mustPrepare(t, source, "", nil)
 	tool := nativeCall(object{"name": "shell", "arguments": object{"cmd": "PRIVATE_TOOL_ARGUMENTS"}})
 	wire := sse(object{"type": "response.output_item.done", "item": tool, "output_index": 0}) +
 		sse(object{"type": "response.failed", "response": object{
-			"status": "failed", "output": []any{tool}, "error": object{"code": "invalid_value", "message": "PRIVATE"},
+			"status": "failed", "output": []any{tool}, "error": object{"code": "invalid_value", "message": message},
 		}})
 	corrections := 0
 	body := bridge.StreamWithRepairs(context.Background(), io.NopCloser(strings.NewReader(wire)),
@@ -254,9 +385,10 @@ func TestUpstreamFailureWithholdsPendingToolsAndNeverRepairs(t *testing.T) {
 	raw, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Zero(t, corrections)
-	require.NotContains(t, string(raw), "PRIVATE")
+	require.NotContains(t, string(raw), "PRIVATE_TOOL_ARGUMENTS")
 	require.NotContains(t, string(raw), "function_call")
 	require.Contains(t, string(raw), "invalid_value")
+	require.Contains(t, string(raw), message)
 }
 
 func TestCompactedCancellationRetainsWindowAndUsage(t *testing.T) {

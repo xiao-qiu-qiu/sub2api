@@ -37,19 +37,21 @@ func assertBPSStreamErrorTestEvents(t *testing.T, wire, want string) {
 		}
 	}
 	require.Equal(t, 1, errors, "the manual test must emit exactly one error event")
-	require.NotContains(t, wire, "PRIVATE")
+	for _, field := range []string{"PRIVATE_ERROR_CODE", "PRIVATE_ERROR_TYPE", "PRIVATE_PARAMETER"} {
+		require.NotContains(t, wire, field)
+	}
 }
 
 func TestAccountTestBPSStreamError(t *testing.T) {
 	for _, tc := range []struct {
-		name, wire, code string
+		name, wire string
 	}{
-		{"nested rate limit", bpsFailureWire(t, "error", "rate_limit_exceeded", "", 0), "rate_limit_exceeded"},
-		{"flat rate limit", "event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"PRIVATE_UPSTREAM_BODY\",\"param\":\"PRIVATE_PARAMETER\"}\n\n", "rate_limit_exceeded"},
-		{"failed permission", bpsFailureWire(t, "response.failed", "permission_denied", "", 0), "permission_denied"},
-		{"unknown identifiers", bpsFailureWire(t, "error", "PRIVATE_ERROR_CODE", "PRIVATE_ERROR_TYPE", 0), "basispoints_upstream_error"},
-		{"upstream cancelled", bpsFailureWire(t, "response.cancelled", "", "", 0), "basispoints_upstream_cancelled"},
-		{"upstream cancelled with rate limit", bpsFailureWire(t, "response.cancelled", "rate_limit_exceeded", "", 0), "rate_limit_exceeded"},
+		{"nested rate limit", bpsFailureWire(t, "error", "rate_limit_exceeded", "", 0)},
+		{"flat rate limit", "event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"PRIVATE_UPSTREAM_BODY\",\"param\":\"PRIVATE_PARAMETER\"}\n\n"},
+		{"failed permission", bpsFailureWire(t, "response.failed", "permission_denied", "", 0)},
+		{"unknown identifiers", bpsFailureWire(t, "error", "PRIVATE_ERROR_CODE", "PRIVATE_ERROR_TYPE", 0)},
+		{"upstream cancelled", bpsFailureWire(t, "response.cancelled", "", "", 0)},
+		{"upstream cancelled with rate limit", bpsFailureWire(t, "response.cancelled", "rate_limit_exceeded", "", 0)},
 	} {
 		for _, background := range []bool{false, true} {
 			mode := "manual"
@@ -60,7 +62,7 @@ func TestAccountTestBPSStreamError(t *testing.T) {
 				account := excelAccount()
 				upstream := &httpUpstreamRecorder{resp: responsesAccountTestHTTP(tc.wire)}
 				svc := bpsStreamErrorAccountTestService(account, upstream)
-				want := "Excel BPS upstream failure: " + tc.code + "; request was not replayed"
+				want := "PRIVATE_UPSTREAM_BODY"
 				if background {
 					result, err := svc.RunTestBackground(t.Context(), account.ID, "gpt-6-astra")
 					require.NoError(t, err, "execution returns a failed result rather than an infrastructure error")
@@ -68,7 +70,7 @@ func TestAccountTestBPSStreamError(t *testing.T) {
 					require.Equal(t, "failed", result.Status)
 					require.Equal(t, want, result.ErrorMessage)
 					require.Empty(t, result.ResponseText)
-					require.NotContains(t, result.ErrorMessage, "PRIVATE")
+					require.NotContains(t, result.ErrorMessage, "PRIVATE_ERROR_CODE")
 				} else {
 					rec := httptest.NewRecorder()
 					c, _ := gin.CreateTestContext(rec)
@@ -81,6 +83,163 @@ func TestAccountTestBPSStreamError(t *testing.T) {
 				require.Equal(t, "bps.openai.com", upstream.lastReq.URL.Host)
 				require.Equal(t, "/basispoints/api/responses", upstream.lastReq.URL.Path)
 			})
+		}
+	}
+}
+
+type bpsOriginalMessageCase struct {
+	name, body, want string
+	status           int
+}
+
+func bpsOriginalMessageCases(t *testing.T) []bpsOriginalMessageCase {
+	t.Helper()
+	message := "  PRIVATE 原始诊断：encrypted content could not be verified\n" + strings.Repeat("请检查账号的工作区权限。", 240) + "\n保留末尾空白。  "
+	jsonMessage := `  {"message":"上游诊断 JSON 字符串","detail":"encrypted content"}  `
+	var cases []bpsOriginalMessageCase
+	for _, kind := range []string{"error", "response.failed", "response.cancelled"} {
+		for _, flat := range []bool{false, true} {
+			if flat && kind != "error" {
+				continue
+			}
+			name := kind + "/nested"
+			if flat {
+				name = kind + "/flat"
+			}
+			for _, value := range []struct {
+				name    string
+				message any
+				want    string
+			}{
+				{"original", message, message},
+				{"JSON message", jsonMessage, jsonMessage},
+				{"empty", "", "Excel BPS upstream failure: invalid_value; request was not replayed"},
+				{"missing", nil, "Excel BPS upstream failure: invalid_value; request was not replayed"},
+				{"null", nil, "Excel BPS upstream failure: invalid_value; request was not replayed"},
+				{"non-string", map[string]any{"input": "not an error message"}, "Excel BPS upstream failure: invalid_value; request was not replayed"},
+			} {
+				detail := map[string]any{"code": "invalid_value", "type": "PRIVATE_ERROR_TYPE", "param": "PRIVATE_PARAMETER", "message": value.message}
+				if value.name == "missing" {
+					delete(detail, "message")
+				}
+				payload := map[string]any{"type": kind, "error": detail}
+				if kind != "error" {
+					payload = map[string]any{"type": kind, "response": map[string]any{"status": strings.TrimPrefix(kind, "response."), "output": []any{}, "error": detail}}
+				} else if flat {
+					payload = detail
+					payload["type"] = "error"
+				}
+				raw, err := json.Marshal(payload)
+				require.NoError(t, err)
+				cases = append(cases, bpsOriginalMessageCase{name + "/" + value.name, "event: " + kind + "\ndata: " + string(raw) + "\n\n", value.want, http.StatusOK})
+			}
+		}
+	}
+	for _, status := range []int{400, 401, 403, 429, 500} {
+		raw, err := json.Marshal(map[string]any{"error": map[string]any{"message": message}})
+		require.NoError(t, err)
+		cases = append(cases, bpsOriginalMessageCase{http.StatusText(status), string(raw), message, status})
+	}
+	for _, field := range []string{"response.error.message", "message", "detail", "error"} {
+		var payload any = map[string]any{field: message}
+		if field == "response.error.message" {
+			payload = map[string]any{"response": map[string]any{"error": map[string]any{"message": message}}, "error": map[string]any{"message": "wrong error"}, "message": "wrong root"}
+		}
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		cases = append(cases, bpsOriginalMessageCase{"HTTP/" + field, string(raw), message, http.StatusBadGateway})
+	}
+	jsonBody, err := json.Marshal(message)
+	require.NoError(t, err)
+	cases = append(cases,
+		bpsOriginalMessageCase{"HTTP/non-JSON body", message, message, http.StatusBadGateway},
+		bpsOriginalMessageCase{"HTTP/JSON string body", string(jsonBody), message, http.StatusBadGateway},
+		bpsOriginalMessageCase{"HTTP/JSON message", `{"error":{"message":` + string(mustBPSMessageJSON(t, jsonMessage)) + `}}`, jsonMessage, http.StatusBadGateway},
+		bpsOriginalMessageCase{"HTTP/missing message", `{"error":{"code":"invalid_value"},"input":{"message":"not an error message"}}`, "Excel BPS rejected this request; account scheduling was not changed", http.StatusBadRequest},
+		bpsOriginalMessageCase{"HTTP/empty message", `{"error":{"message":""}}`, "Excel BPS rejected this request; account scheduling was not changed", http.StatusBadRequest},
+		bpsOriginalMessageCase{"HTTP/non-string message", `{"error":{"message":42}}`, "Excel BPS rejected this request; account scheduling was not changed", http.StatusBadRequest},
+		bpsOriginalMessageCase{"HTTP/429 empty message", `{"error":{"message":""}}`, excelBPSRateLimitedClientMessage, http.StatusTooManyRequests},
+	)
+	secretMessage := "  PRIVATE 原因仍可见\n" +
+		"test-token refresh-credential id-credential api-credential session-credential cookie-credential\n" +
+		"Bearer bearer-credential https://privateuser:privatepass@example.invalid/?api_key=query-credential\n" +
+		"file-privateAttachment /api/bps-images/privateCapability\n" +
+		`{"access_token":"json-credential","diagnosis":"encrypted content diagnostic"}  `
+	wantSecretMessage := "  PRIVATE 原因仍可见\n" +
+		"[redacted] [redacted] [redacted] [redacted] [redacted] [redacted]\n" +
+		"Bearer [redacted] https://[redacted]@example.invalid/?api_key=***\n" +
+		"file-[redacted] /api/bps-images/[redacted]\n" +
+		`{"access_token":"***","diagnosis":"encrypted content diagnostic"}  `
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusTooManyRequests} {
+		payload := map[string]any{"error": map[string]any{"message": secretMessage}}
+		if status == http.StatusOK {
+			payload["type"] = "error"
+		}
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		body := string(raw)
+		if status == http.StatusOK {
+			body = "event: error\ndata: " + body + "\n\n"
+		}
+		cases = append(cases, bpsOriginalMessageCase{"credentials/" + http.StatusText(status), body, wantSecretMessage, status})
+	}
+	return cases
+}
+
+func bpsOriginalMessageAccount() *Account {
+	account := excelAccount()
+	for key, value := range map[string]string{"refresh_token": "refresh-credential", "id_token": "id-credential", "api_key": "api-credential", "session_key": "session-credential", "cookie": "cookie-credential"} {
+		account.Credentials[key] = value
+	}
+	return account
+}
+
+func mustBPSMessageJSON(t *testing.T, message string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(message)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestAccountTestBPSOriginalMessage(t *testing.T) {
+	for _, transport := range []string{"sse", "ws"} {
+		for _, tc := range bpsOriginalMessageCases(t) {
+			for _, background := range []bool{false, true} {
+				mode := "manual"
+				if background {
+					mode = "background"
+				}
+				t.Run(transport+"/"+tc.name+"/"+mode, func(t *testing.T) {
+					account := bpsOriginalMessageAccount()
+					account.Extra[ExcelBPSTransportKey] = transport
+					upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": {"text/event-stream"}, "Retry-After": {"1"}}, Body: io.NopCloser(strings.NewReader(tc.body))}}
+					svc := bpsStreamErrorAccountTestService(account, upstream)
+					ws := &excelBPSWSTestUpstream{httpUpstreamRecorder: upstream}
+					if transport == "ws" {
+						svc.openaiGatewayService.httpUpstream = ws
+					}
+					if background {
+						result, err := svc.RunTestBackground(t.Context(), account.ID, "gpt-6-astra")
+						require.NoError(t, err)
+						require.Equal(t, "failed", result.Status)
+						require.Equal(t, tc.want, result.ErrorMessage)
+						require.Empty(t, result.ResponseText)
+					} else {
+						rec := httptest.NewRecorder()
+						c, _ := gin.CreateTestContext(rec)
+						c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/300/test", nil).WithContext(WithManualAccountTest(t.Context()))
+						err := svc.TestAccountConnection(c, account.ID, "gpt-6-astra", "Reply OK", AccountTestModeDefault)
+						require.EqualError(t, err, tc.want)
+						assertBPSStreamErrorTestEvents(t, rec.Body.String(), tc.want)
+					}
+					require.Len(t, upstream.requests, 1, "a connectivity test must not retry, switch accounts or fall back to native Codex")
+					require.Equal(t, "/basispoints/api/responses", upstream.lastReq.URL.Path)
+					if transport == "ws" {
+						require.Equal(t, 1, ws.wsCalls)
+						require.Zero(t, ws.httpCalls)
+					}
+				})
+			}
 		}
 	}
 }
