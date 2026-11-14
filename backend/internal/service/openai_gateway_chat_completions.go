@@ -62,6 +62,12 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (result *OpenAIForwardResult, resultErr error) {
+	normalizedBody, err := apicompat.NormalizeChatReasoning(body)
+	if err != nil {
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, err
+	}
+	body = normalizedBody
 	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
 	defer func() {
@@ -202,6 +208,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 1. Parse Chat Completions request
 	var chatReq apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &chatReq); err != nil {
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "Invalid Chat Completions request body: "+err.Error())
 		return nil, fmt.Errorf("parse chat completions request: %w", err)
 	}
 	originalModel := chatReq.Model

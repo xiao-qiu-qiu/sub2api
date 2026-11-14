@@ -42,6 +42,9 @@ func TestForwardAsChatCompletions_OAuthForwardsNestedReasoningEffort(t *testing.
 		{"nested_xhigh", `"reasoning":{"effort":"xhigh"}`, "xhigh"},
 		{"nested_max", `"reasoning":{"effort":"max"}`, "max"},
 		{"flat_max", `"reasoning_effort":"max"`, "max"},
+		{"string_medium", `"reasoning":"medium"`, "medium"},
+		{"string_max", `"reasoning":"max"`, "max"},
+		{"string_wins_over_flat", `"reasoning_effort":"low","reasoning":"high"`, "high"},
 		{"absent", ``, ""},
 	}
 	for _, model := range []string{"gpt-6-sol", "gpt-6.1-sol"} {
@@ -90,5 +93,35 @@ func TestForwardAsChatCompletions_OAuthForwardsNestedReasoningEffort(t *testing.
 				})
 			}
 		}
+	}
+}
+
+func TestForwardAsChatCompletions_InvalidClientFieldsReturn400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{
+		`{"model":"gpt-6.1-sol","messages":[],"reasoning":"unknown-private-value"}`,
+		`{"model":"gpt-6.1-sol","messages":"invalid"}`,
+		`{"model":"gpt-6.1-sol","messages":[],"reasoning":{"effort":true}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			upstream := &httpUpstreamRecorder{}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{
+				ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Credentials: map[string]any{"access_token": "test-token"},
+			}
+
+			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(body), "", "")
+
+			require.Error(t, err)
+			require.Nil(t, result)
+			require.Equal(t, http.StatusBadRequest, recorder.Code)
+			require.Equal(t, "invalid_request_error", gjson.GetBytes(recorder.Body.Bytes(), "error.type").String())
+			require.NotContains(t, recorder.Body.String(), "unknown-private-value")
+			require.Empty(t, upstream.requests)
+		})
 	}
 }

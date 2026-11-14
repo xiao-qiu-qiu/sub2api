@@ -7,7 +7,11 @@ package apicompat
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ---------------------------------------------------------------------------
@@ -694,9 +698,9 @@ type ChatCompletionsRequest struct {
 	ParallelToolCalls   *bool              `json:"parallel_tool_calls,omitempty"`
 	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
 	ReasoningEffort     string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "xhigh"
-	// Reasoning accepts the Responses-style nested form ({"reasoning":{"effort":...}})
-	// that some Chat clients send. EffectiveReasoningEffort gives the nested
-	// value precedence, matching inbound accounting, without mutating either field.
+	// Reasoning accepts the Responses-style nested form and an effort string
+	// alias. EffectiveReasoningEffort gives this field precedence, matching
+	// inbound accounting, without mutating either field.
 	Reasoning      *ChatReasoning  `json:"reasoning,omitempty"`
 	ServiceTier    string          `json:"service_tier,omitempty"`
 	Stop           json.RawMessage `json:"stop,omitempty"` // string or []string
@@ -707,10 +711,91 @@ type ChatCompletionsRequest struct {
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 }
 
-// ChatReasoning is the nested reasoning object accepted on Chat Completions
-// requests for Responses compatibility.
+// ErrInvalidChatReasoning identifies invalid Chat reasoning values without
+// including client-supplied content in the error message.
+var ErrInvalidChatReasoning = errors.New("reasoning must be an object, null, or a supported effort string")
+
+// ChatReasoning is the reasoning object accepted on Chat Completions requests
+// for Responses compatibility. A supported effort string is an input alias.
 type ChatReasoning struct {
 	Effort string `json:"effort,omitempty"`
+}
+
+func (r *ChatReasoning) UnmarshalJSON(data []byte) error {
+	raw := bytes.TrimSpace(data)
+	if bytes.Equal(raw, []byte("null")) {
+		*r = ChatReasoning{}
+		return nil
+	}
+	if len(raw) == 0 {
+		return ErrInvalidChatReasoning
+	}
+	switch raw[0] {
+	case '{':
+		type reasoningObject ChatReasoning
+		var object reasoningObject
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return ErrInvalidChatReasoning
+		}
+		*r = ChatReasoning(object)
+		return nil
+	case '"':
+		var effort string
+		if err := json.Unmarshal(raw, &effort); err != nil {
+			return ErrInvalidChatReasoning
+		}
+		effort = strings.ToLower(strings.TrimSpace(effort))
+		switch effort {
+		case "", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+			*r = ChatReasoning{Effort: effort}
+			return nil
+		}
+	}
+	return ErrInvalidChatReasoning
+}
+
+// NormalizeChatReasoning canonicalizes a top-level effort string alias before
+// request policies inspect the raw body. Other fields and object values retain
+// their original bytes.
+func NormalizeChatReasoning(body []byte) ([]byte, error) {
+	request := gjson.ParseBytes(body)
+	if !request.Get("messages").Exists() && request.Get("input").Exists() {
+		return body, nil
+	}
+	// Raw-body policies use exact field names, while struct decoding also
+	// accepts case-insensitive names and the last duplicate occurrence.
+	var seenReasoning, seenEffort, ambiguous bool
+	request.ForEach(func(key, _ gjson.Result) bool {
+		name := key.String()
+		switch {
+		case strings.EqualFold(name, "reasoning"):
+			ambiguous = name != "reasoning" || seenReasoning
+			seenReasoning = true
+		case strings.EqualFold(name, "reasoning_effort"):
+			ambiguous = name != "reasoning_effort" || seenEffort
+			seenEffort = true
+		}
+		return !ambiguous
+	})
+	if ambiguous {
+		return nil, ErrInvalidChatReasoning
+	}
+	value := request.Get("reasoning")
+	if !value.Exists() || value.Type == gjson.Null || value.IsObject() {
+		return body, nil
+	}
+	if value.Type != gjson.String {
+		return nil, ErrInvalidChatReasoning
+	}
+	var reasoning ChatReasoning
+	if err := json.Unmarshal([]byte(value.Raw), &reasoning); err != nil {
+		return nil, ErrInvalidChatReasoning
+	}
+	normalized, err := sjson.SetBytes(body, "reasoning", reasoning)
+	if err != nil {
+		return nil, ErrInvalidChatReasoning
+	}
+	return normalized, nil
 }
 
 // EffectiveReasoningEffort returns the requested effort using the same
