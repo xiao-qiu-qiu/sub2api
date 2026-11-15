@@ -1013,6 +1013,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 				}
 				terminal = kind
 				terminalSuccessful = IsSuccessfulStreamTerminal(payload)
+				result.stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal(payload, kind)
 				completed = []byte(gjson.GetBytes(payload, "response").Raw)
 				result.ResponseID = gjson.GetBytes(payload, "response.id").String()
 				result.UpstreamResponseModel = gjson.GetBytes(payload, "response.model").String()

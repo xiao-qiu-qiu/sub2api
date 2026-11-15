@@ -76,6 +76,7 @@ type OpenAIAccountScheduleRequest struct {
 	ObservationEffort       string
 	ObservationEffortScoped bool
 	priorityLatencyPool     *priorityLatencyPool
+	stickyMigration         *openAIStickyMigration
 
 	GroupID                 *int64
 	Platform                string
@@ -436,6 +437,16 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	}
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
 		req.RequirePrivacySet = true
+	}
+	req.stickyMigration = s.service.prepareOpenAIStickyMigration(ctx, req)
+	ctx = context.WithValue(ctx, openAIStickyMigrationContextKey{}, req.stickyMigration)
+	if req.stickyMigration != nil {
+		// Successful migrations are useful only if subsequent healthy turns keep
+		// their new owner instead of entering another weighted affinity race.
+		req.StickyWeighted = false
+		if req.stickyMigration.ownerID > 0 {
+			req.StickyAccountID = req.stickyMigration.ownerID
+		}
 	}
 
 	start := time.Now()
@@ -2346,6 +2357,7 @@ func (s *defaultOpenAIAccountScheduler) accountRequestCompatibility(ctx context.
 	// 分组利润控制：不合格账号在候选过滤与抢槽后终检阶段即被排除，
 	// 排序/评分/粘性/熔断只在合格账号之间工作；named reason 进入 filter stats。
 	if vetoed, reason := openAIProfitControlVetoReason(ctx, account); vetoed {
+		preserveOpenAIStickyMigrationForProfit(ctx, account)
 		return false, reason
 	}
 	return true, ""

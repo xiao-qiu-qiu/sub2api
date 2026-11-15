@@ -161,6 +161,9 @@ func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, gr
 	if s == nil || s.cache == nil || accountID <= 0 {
 		return nil
 	}
+	if deferOpenAIStickyBinding(ctx, groupID, sessionHash) {
+		return nil
+	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)
 	if primaryKey == "" {
 		return nil
@@ -211,6 +214,9 @@ func (s *OpenAIGatewayService) refreshStickySessionTTL(ctx context.Context, grou
 
 func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) error {
 	if s == nil || s.cache == nil {
+		return nil
+	}
+	if deferOpenAIStickyBinding(ctx, groupID, sessionHash) {
 		return nil
 	}
 	if s.preserveOAuthRecoveryStickyBinding(ctx, groupID, sessionHash, 0) || s.preserveOpenAIAccountCooldownStickyBinding(ctx, groupID, sessionHash, 0) {

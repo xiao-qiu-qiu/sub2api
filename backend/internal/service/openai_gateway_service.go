@@ -305,6 +305,9 @@ type OpenAIForwardResult struct {
 	// Local stream-read timeout is not an observed upstream terminal event.
 	// Keep observed partial usage without reporting a successful generation.
 	streamReadIncomplete bool
+	// Preserve contradictory completion evidence without changing legacy scheduling.
+	stickyMigrationInvalidTerminal  bool
+	stickyMigrationAwaitingDelivery bool
 }
 
 const maxOpenAIQueueWait = time.Hour

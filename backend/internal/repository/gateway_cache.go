@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -49,13 +50,40 @@ func (c *gatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, s
 }
 
 func (c *gatewayCache) SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error {
-	key := buildSessionKey(groupID, sessionHash)
-	return c.rdb.Set(ctx, key, accountID, ttl).Err()
+	if c == nil || c.rdb == nil {
+		return errors.New("gateway cache unavailable")
+	}
+	if isReservedOpenAISessionOwnershipKey(sessionHash) {
+		return c.rdb.Set(ctx, buildSessionKey(groupID, sessionHash), accountID, ttl).Err()
+	}
+	revision, err := uuid.NewRandom()
+	if err != nil {
+		return err
+	}
+	ttlMillis := ttl.Milliseconds()
+	if ttl == redis.KeepTTL {
+		ttlMillis = -1
+	} else if ttl > 0 && ttlMillis == 0 {
+		ttlMillis = 1
+	} else if ttl < 0 {
+		ttlMillis = 0
+	}
+	return setSessionAccountBindingScript.Run(ctx, c.rdb,
+		stickySessionBindingKeys(groupID, sessionHash, ""), accountID, revision.String(), ttlMillis).Err()
 }
 
 func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
-	key := buildSessionKey(groupID, sessionHash)
-	return c.rdb.Expire(ctx, key, ttl).Err()
+	if c == nil || c.rdb == nil {
+		return errors.New("gateway cache unavailable")
+	}
+	if isReservedOpenAISessionOwnershipKey(sessionHash) {
+		return c.rdb.Expire(ctx, buildSessionKey(groupID, sessionHash), ttl).Err()
+	}
+	ttlMillis := ttl.Milliseconds()
+	if ttl > 0 && ttlMillis == 0 {
+		ttlMillis = 1
+	}
+	return refreshSessionAccountBindingScript.Run(ctx, c.rdb, stickySessionBindingKeys(groupID, sessionHash, ""), ttlMillis).Err()
 }
 
 // DeleteSessionAccountID 删除粘性会话与账号的绑定关系。
@@ -66,8 +94,10 @@ func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, ses
 // Called when the bound account becomes unavailable (e.g., error status, disabled,
 // or unschedulable), allowing subsequent requests to select a new available account.
 func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
-	key := buildSessionKey(groupID, sessionHash)
-	return c.rdb.Del(ctx, key).Err()
+	if isReservedOpenAISessionOwnershipKey(sessionHash) {
+		return c.rdb.Del(ctx, buildSessionKey(groupID, sessionHash)).Err()
+	}
+	return c.rdb.Del(ctx, stickySessionBindingKeys(groupID, sessionHash, "")...).Err()
 }
 
 // scanOpenAISessionBindings returns only session-hash -> account bindings.
@@ -152,7 +182,11 @@ func (c *gatewayCache) ClearStickySessionBindings(ctx context.Context, groupID i
 	deleted := 0
 	for start := 0; start < len(keys); start += 200 {
 		end := min(start+200, len(keys))
-		count, err := c.rdb.Del(ctx, keys[start:end]...).Result()
+		bindingKeys := make([]string, 0, 2*(end-start))
+		for _, key := range keys[start:end] {
+			bindingKeys = append(bindingKeys, key, stickySessionRevisionKeyForOwnerKey(key))
+		}
+		count, err := clearSessionAccountBindingsScript.Run(ctx, c.rdb, bindingKeys).Int64()
 		if err != nil {
 			return deleted, err
 		}

@@ -368,6 +368,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	var usage *OpenAIUsage
 	var firstTokenMs *int
 	var clientDisconnected bool
+	upstreamTerminalEvent := ""
+	stickyMigrationInvalidTerminal := false
 	responseID := ""
 	imageCount := 0
 	var imageOutputSizes []string
@@ -541,6 +543,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				return nil, handleErr
 			}
 			clientDisconnected = result.clientDisconnect
+			upstreamTerminalEvent = result.upstreamTerminalEvent
+			stickyMigrationInvalidTerminal = result.stickyMigrationInvalidTerminal
 			usage = result.usage
 			firstTokenMs = result.firstTokenMs
 			responseID = strings.TrimSpace(result.responseID)
@@ -573,6 +577,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 			usage = result.usage
 			responseID = strings.TrimSpace(result.responseID)
+			upstreamTerminalEvent = result.upstreamTerminalEvent
+			stickyMigrationInvalidTerminal = result.stickyMigrationInvalidTerminal
 			imageCount = result.imageCount
 			imageOutputSizes = result.imageOutputSizes
 		}
@@ -596,22 +602,24 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	forwardResult := &OpenAIForwardResult{
-		RequestID:                     resp.Header.Get("x-request-id"),
-		UpstreamHeaders:               resp.Header,
-		ResponseID:                    responseID,
-		Usage:                         *usage,
-		Model:                         reqModel,
-		UpstreamModel:                 upstreamPassthroughModel,
-		UpstreamResponseModel:         observedUpstreamResponseModel(c),
-		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		ReasoningEffort:               reasoningEffort,
-		Stream:                        reqStream,
-		OpenAIWSMode:                  false,
-		Duration:                      time.Since(startTime),
-		FirstTokenMs:                  firstTokenMs,
-		ClientDisconnect:              clientDisconnected,
+		RequestID:                      resp.Header.Get("x-request-id"),
+		UpstreamHeaders:                resp.Header,
+		ResponseID:                     responseID,
+		Usage:                          *usage,
+		Model:                          reqModel,
+		UpstreamModel:                  upstreamPassthroughModel,
+		UpstreamResponseModel:          observedUpstreamResponseModel(c),
+		UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+		ServiceTier:                    resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+		ReasoningEffort:                reasoningEffort,
+		Stream:                         reqStream,
+		OpenAIWSMode:                   false,
+		Duration:                       time.Since(startTime),
+		FirstTokenMs:                   firstTokenMs,
+		ClientDisconnect:               clientDisconnected,
+		UpstreamTerminalEvent:          upstreamTerminalEvent,
+		stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
 	}
 	if imageCount > 0 {
 		forwardResult.ImageCount = imageCount
@@ -1163,20 +1171,24 @@ func collectOpenAIPassthroughTimeoutHeaders(h http.Header) []string {
 }
 
 type openaiStreamingResultPassthrough struct {
-	clientDisconnect bool
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
+	clientDisconnect               bool
+	upstreamTerminalEvent          string
+	stickyMigrationInvalidTerminal bool
+	usage                          *OpenAIUsage
+	firstTokenMs                   *int
+	responseID                     string
+	imageCount                     int
+	imageOutputSizes               []string
 }
 
 type openaiNonStreamingResultPassthrough struct {
 	*OpenAIUsage
-	usage            *OpenAIUsage
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
+	upstreamTerminalEvent          string
+	stickyMigrationInvalidTerminal bool
+	usage                          *OpenAIUsage
+	responseID                     string
+	imageCount                     int
+	imageOutputSizes               []string
 }
 
 const openAIStreamKeepaliveBytesKey = "openai_stream_keepalive_bytes"
@@ -2137,6 +2149,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	sawResponseFailed := false
 	terminalEventType := ""
 	terminalSuccessful := false
+	stickyMigrationInvalidTerminal := false
 	semanticOutputSeen := false
 	budgetProgressPending := false
 	capacityFailoverSuppressedLogged := false
@@ -2284,12 +2297,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			markPriorityDownstreamDisconnect(ctx)
 		}
 		return &openaiStreamingResultPassthrough{
-			usage:            usage,
-			clientDisconnect: clientDisconnected,
-			firstTokenMs:     firstTokenMs,
-			responseID:       responseID,
-			imageCount:       imageCounter.Count(),
-			imageOutputSizes: imageCounter.Sizes(),
+			upstreamTerminalEvent:          openAIStickyMigrationTerminalEvent(terminalEventType),
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
+			usage:                          usage,
+			clientDisconnect:               clientDisconnected,
+			firstTokenMs:                   firstTokenMs,
+			responseID:                     responseID,
+			imageCount:                     imageCounter.Count(),
+			imageOutputSizes:               imageCounter.Sizes(),
 		}
 	}
 
@@ -2448,6 +2463,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if openAIStreamEventIsTerminalWithType(trimmedData, eventType) {
 				sawTerminalEvent = true
 				terminalSuccessful = IsSuccessfulStreamTerminal(dataBytes)
+				if trimmedData != "[DONE]" {
+					stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal(dataBytes, eventType)
+				}
 				if trimmedData != "[DONE]" {
 					terminalEventType = eventType
 				}
@@ -2717,11 +2735,13 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 		c.Data(resp.StatusCode, contentType, body)
 	}
 	return &openaiNonStreamingResultPassthrough{
-		OpenAIUsage:      usage,
-		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
-		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
+		OpenAIUsage:                    usage,
+		upstreamTerminalEvent:          openAIStickyMigrationResponseStatus(gjson.GetBytes(body, "status").String()),
+		stickyMigrationInvalidTerminal: openAIStickyMigrationInvalidJSONResponse(body),
+		usage:                          usage,
+		responseID:                     extractOpenAIResponseIDFromJSONBytes(body),
+		imageCount:                     countOpenAIResponseImageOutputsFromJSONBytes(body),
+		imageOutputSizes:               collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
 	}, nil
 }
 
@@ -2803,11 +2823,13 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	}
 
 	return &openaiNonStreamingResultPassthrough{
-		OpenAIUsage:      usage,
-		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
-		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
+		OpenAIUsage:                    usage,
+		upstreamTerminalEvent:          openAIStickyMigrationTerminalEvent(terminalType),
+		stickyMigrationInvalidTerminal: openAIStickyMigrationInvalidResponseTerminal(terminalPayload, terminalType),
+		usage:                          usage,
+		responseID:                     extractOpenAIResponseIDFromJSONBytes(body),
+		imageCount:                     countOpenAIImageOutputsFromSSEBody(bodyText),
+		imageOutputSizes:               collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 	}, nil
 }
 

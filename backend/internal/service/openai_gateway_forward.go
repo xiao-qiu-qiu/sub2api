@@ -91,6 +91,12 @@ func prismBrowserResponsesURL(baseURL string) string {
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, resultErr error) {
+	renderErrorsBefore := openAIStickyMigrationRenderErrors(c)
+	defer func() {
+		if result != nil && openAIStickyMigrationRenderErrors(c) > renderErrorsBefore {
+			result.ClientDisconnect = true
+		}
+	}()
 	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
 	defer func() {
@@ -1564,6 +1570,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		var usage *OpenAIUsage
 		var firstTokenMs *int
 		var clientDisconnected bool
+		upstreamTerminalEvent := ""
+		stickyMigrationInvalidTerminal := false
 		responseID := ""
 		imageCount := 0
 		searchCount := 0
@@ -1646,6 +1654,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, err
 			}
 			clientDisconnected = streamResult.clientDisconnect
+			upstreamTerminalEvent = streamResult.upstreamTerminalEvent
+			stickyMigrationInvalidTerminal = streamResult.stickyMigrationInvalidTerminal
 			usage = streamResult.usage
 			firstTokenMs = streamResult.firstTokenMs
 			responseID = strings.TrimSpace(streamResult.responseID)
@@ -1674,6 +1684,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, err
 			}
 			usage = nonStreamResult.usage
+			upstreamTerminalEvent = nonStreamResult.upstreamTerminalEvent
+			stickyMigrationInvalidTerminal = nonStreamResult.stickyMigrationInvalidTerminal
 			responseID = strings.TrimSpace(nonStreamResult.responseID)
 			imageCount = nonStreamResult.imageCount
 			imageOutputSizes = nonStreamResult.imageOutputSizes
@@ -1696,23 +1708,25 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		forwardResult := &OpenAIForwardResult{
-			RequestID:                     resp.Header.Get("x-request-id"),
-			UpstreamHeaders:               resp.Header,
-			ResponseID:                    responseID,
-			Usage:                         *usage,
-			Model:                         originalModel,
-			BillingModel:                  billingModel,
-			UpstreamModel:                 upstreamModel,
-			UpstreamResponseModel:         observedUpstreamResponseModel(c),
-			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-			UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-			ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-			ReasoningEffort:               reasoningEffort,
-			Stream:                        reqStream,
-			OpenAIWSMode:                  false,
-			Duration:                      time.Since(startTime),
-			FirstTokenMs:                  firstTokenMs,
-			ClientDisconnect:              clientDisconnected,
+			RequestID:                      resp.Header.Get("x-request-id"),
+			UpstreamHeaders:                resp.Header,
+			ResponseID:                     responseID,
+			Usage:                          *usage,
+			Model:                          originalModel,
+			BillingModel:                   billingModel,
+			UpstreamModel:                  upstreamModel,
+			UpstreamResponseModel:          observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+			UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+			ServiceTier:                    resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+			ReasoningEffort:                reasoningEffort,
+			Stream:                         reqStream,
+			OpenAIWSMode:                   false,
+			Duration:                       time.Since(startTime),
+			FirstTokenMs:                   firstTokenMs,
+			ClientDisconnect:               clientDisconnected,
+			UpstreamTerminalEvent:          upstreamTerminalEvent,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
 		}
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount

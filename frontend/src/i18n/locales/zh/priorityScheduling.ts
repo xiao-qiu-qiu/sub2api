@@ -49,6 +49,8 @@ export default {
   priority: '优先级',
   balanceProtocols: '在兼容的 BPS 与原生账号间均衡分流',
   balanceProtocolsHint: '只选择通过分组、模型、配额与传输检查的账号，不改账号协议、不自动开启 BPS。关闭后恢复 BPS 优先。',
+  stickyMigrationOnSuccess: '换号成功后迁移粘性',
+  stickyMigrationOnSuccessHint: '可迁移会话换号成功后继续使用新账号，减少反复切换造成的缓存冷启动。',
   modelAliases: '模型映射仅作为别名，保留默认模型范围',
   modelAliasesHint: '适用于 OpenAI OAuth。未命中别名的请求继续使用默认模型准入；关闭时，非空映射仍是白名单。确认账号应服务这些模型后再开启。',
   changeModelScope: '修改所选 OAuth 账号的模型映射范围',

@@ -62,6 +62,12 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (result *OpenAIForwardResult, resultErr error) {
+	renderErrorsBefore := openAIStickyMigrationRenderErrors(c)
+	defer func() {
+		if result != nil && openAIStickyMigrationRenderErrors(c) > renderErrorsBefore {
+			result.ClientDisconnect = true
+		}
+	}()
 	normalizedBody, err := apicompat.NormalizeChatReasoning(body)
 	if err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -841,17 +847,19 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	c.JSON(http.StatusOK, chatResp)
 
 	result := &OpenAIForwardResult{
-		RequestID:                     requestID,
-		UpstreamHeaders:               resp.Header,
-		Usage:                         usage,
-		Model:                         originalModel,
-		BillingModel:                  billingModel,
-		UpstreamModel:                 upstreamModel,
-		UpstreamResponseModel:         observedUpstreamResponseModel(c),
-		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-		Stream:                        false,
-		Duration:                      time.Since(startTime),
+		RequestID:                      requestID,
+		UpstreamHeaders:                resp.Header,
+		Usage:                          usage,
+		Model:                          originalModel,
+		BillingModel:                   billingModel,
+		UpstreamModel:                  upstreamModel,
+		UpstreamResponseModel:          observedUpstreamResponseModel(c),
+		UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+		Stream:                         false,
+		UpstreamTerminalEvent:          firstNonEmpty(priorModels.terminalEvent, openAIStickyMigrationResponseStatus(finalResponse.Status)),
+		stickyMigrationInvalidTerminal: priorModels.terminalInvalid || finalResponse.Error != nil || openAIStickyMigrationInvalidResponseStatus(finalResponse.Status),
+		Duration:                       time.Since(startTime),
 	}
 	// Grok chat bridge: bill native search tools found in the terminal Responses body.
 	if account != nil && account.IsGrok() && finalResponse != nil {
@@ -953,6 +961,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
 	terminalEventType := ""
+	stickyMigrationInvalidTerminal := false
 	// Grok chat bridge reuses Responses SSE; count native search tools for surcharge.
 	searchCount := 0
 	streamSearchSeen := make(map[string]struct{})
@@ -980,19 +989,22 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 	resultWithUsage := func() *OpenAIForwardResult {
 		out := &OpenAIForwardResult{
-			RequestID:                     requestID,
-			UpstreamHeaders:               resp.Header,
-			Usage:                         usage,
-			ObservedUsageOnError:          usageObserved,
-			Model:                         originalModel,
-			BillingModel:                  billingModel,
-			UpstreamModel:                 upstreamModel,
-			UpstreamResponseModel:         observedUpstreamResponseModel(c),
-			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-			UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-			Stream:                        true,
-			Duration:                      time.Since(startTime),
-			FirstTokenMs:                  firstTokenMs,
+			RequestID:                      requestID,
+			UpstreamHeaders:                resp.Header,
+			Usage:                          usage,
+			ObservedUsageOnError:           usageObserved,
+			Model:                          originalModel,
+			BillingModel:                   billingModel,
+			UpstreamModel:                  upstreamModel,
+			UpstreamResponseModel:          observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+			UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+			Stream:                         true,
+			Duration:                       time.Since(startTime),
+			FirstTokenMs:                   firstTokenMs,
+			ClientDisconnect:               clientDisconnected,
+			UpstreamTerminalEvent:          terminalEventType,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
 		}
 		if searchCount > 0 {
 			out.SearchCount = searchCount
@@ -1030,6 +1042,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		isTerminalEvent := isOpenAICompatResponsesTerminalEvent(event.Type)
 		if isTerminalEvent {
 			terminalEventType = strings.TrimSpace(event.Type)
+			stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal([]byte(payload), terminalEventType)
 			if event.Usage != nil {
 				usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
 			}

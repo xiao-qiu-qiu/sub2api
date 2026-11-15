@@ -11,7 +11,7 @@ vi.mock('vue-i18n', () => ({ useI18n: () => ({
   t: (key: string, params?: Record<string, unknown>) => [key, ...Object.values(params ?? {})].join(' '),
 }) }))
 vi.mock('@/api/admin/priorityScheduling', () => ({ getPriorityConfig: vi.fn(), getPrioritySnapshot: vi.fn(), savePriorityConfig: vi.fn(), getPriorityLatency: vi.fn(), recomputePriorityScheduling: vi.fn(), getPriorityStickyBindings: vi.fn(), clearPriorityStickyBindings: vi.fn() }))
-const config: PrioritySchedulingConfig = { error_rate_weight: 25, error_rate_window_minutes: 10, error_rate_prior_samples: 5, latency_percentile: 90, latency_measurement: 'legacy_forward', recovery_exploration_percent: 0, oauth_quota_priority: false, oauth_quota_threshold: 90, balance_protocols: true, enabled: false, mode: 'balanced', group_ids: [], models: [], window_minutes: 60, min_samples: 5, target_ttft_ms: 3000, latency_penalty_mode: 'deprioritize', latency_penalty_minutes: 10, max_load_percent: 80, min_quality_percent: 90, quality_max_age_hours: 24, quality_weight: 30, latency_weight: 25, load_weight: 25, cost_weight: 20 }
+const config: PrioritySchedulingConfig = { error_rate_weight: 25, error_rate_window_minutes: 10, error_rate_prior_samples: 5, latency_percentile: 90, latency_measurement: 'legacy_forward', recovery_exploration_percent: 0, oauth_quota_priority: false, oauth_quota_threshold: 90, balance_protocols: true, sticky_migration_on_success: false, enabled: false, mode: 'balanced', group_ids: [], models: [], window_minutes: 60, min_samples: 5, target_ttft_ms: 3000, latency_penalty_mode: 'deprioritize', latency_penalty_minutes: 10, max_load_percent: 80, min_quality_percent: 90, quality_max_age_hours: 24, quality_weight: 30, latency_weight: 25, load_weight: 25, cost_weight: 20 }
 beforeEach(() => {
   vi.resetAllMocks()
   state.auth = reactive({ user: { id: 1, role: 'admin' } })
@@ -25,6 +25,47 @@ beforeEach(() => {
   vi.spyOn(window, 'confirm').mockReturnValue(true)
 })
 describe('priority scheduling', () => {
+  it('saves and reloads sticky migration independently of protocol balance and preserves scope', async () => {
+    let stored: PrioritySchedulingConfig = { ...config, enabled: true, group_ids: [11], models: ['gpt-test'] }
+    vi.mocked(getPriorityConfig).mockImplementation(async () => ({ ...stored }))
+    vi.mocked(savePriorityConfig).mockImplementation(async value => {
+      stored = { ...value }
+      return { ...stored }
+    })
+    let wrapper = mount(PrioritySchedulingView); await flushPromises()
+    const toggle = wrapper.get('[data-testid="sticky-migration-on-success"]')
+    expect(toggle.element).toHaveProperty('checked', false)
+    expect(toggle.attributes('role')).toBe('switch')
+    expect(toggle.element.closest('label')?.textContent).toContain('priorityScheduling.stickyMigrationOnSuccessHint')
+    await toggle.setValue(true)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(savePriorityConfig).toHaveBeenLastCalledWith({ ...config, enabled: true, group_ids: [11], models: ['gpt-test'], sticky_migration_on_success: true })
+    wrapper.unmount()
+
+    wrapper = mount(PrioritySchedulingView); await flushPromises()
+    expect(wrapper.get('[data-testid="sticky-migration-on-success"]').element).toHaveProperty('checked', true)
+    await wrapper.get('[data-testid="sticky-migration-on-success"]').setValue(false)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(savePriorityConfig).toHaveBeenLastCalledWith({ ...config, enabled: true, group_ids: [11], models: ['gpt-test'], sticky_migration_on_success: false })
+    expect(wrapper.get('[data-testid="balance-protocols"]').element).toHaveProperty('checked', true)
+    wrapper.unmount()
+  })
+
+  it('defaults sticky migration off for older servers on both load and save responses', async () => {
+    const legacy = { ...config }; delete legacy.sticky_migration_on_success
+    vi.mocked(getPriorityConfig).mockResolvedValue(legacy)
+    vi.mocked(savePriorityConfig).mockResolvedValue(legacy)
+    const wrapper = mount(PrioritySchedulingView); await flushPromises()
+    expect(wrapper.get('[data-testid="sticky-migration-on-success"]').element).toHaveProperty('checked', false)
+    await wrapper.get('[data-testid="sticky-migration-on-success"]').setValue(true)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(savePriorityConfig).toHaveBeenLastCalledWith({ ...config, sticky_migration_on_success: true })
+    expect(wrapper.get('[data-testid="sticky-migration-on-success"]').element).toHaveProperty('checked', false)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(savePriorityConfig).toHaveBeenLastCalledWith(config)
+    wrapper.unmount()
+  })
+
   it('shows scoped error evidence and unknown samples, and saves an explicit zero weight', async () => {
     const candidate: PriorityCandidate = { account_id: 1, account_name: 'Mock attempt evidence', score: 72, tier: 'eligible', reasons: [], priority: 1, concurrency: 10, load_factor: 10, load_percent: 0, waiting: 0, rate: 0.1, revenue: 0, theoretical_cost: 0, profit: null, margin: null, economics_source: 'rate', profit_samples: 0, samples: 0, p90_ttft_ms: 0, quality_passed: 1, quality_samples: 1, error_rate: 0.25, error_successes: 3, error_failures: 1, error_window_minutes: 10, error_prior_samples: 5, error_observed_at: '2026-10-22T01:02:03Z', error_endpoint: '/v1/responses', error_penalty: 0.9, base_score: 80 }
     vi.mocked(getPrioritySnapshot).mockResolvedValue({ at: '2026-10-22T01:00:00Z', model: 'mock-model', group_id: 1, mode: 'balanced', history_ready: true, candidates: [candidate, { ...candidate, account_id: 2, error_rate: null, error_successes: 0, error_failures: 0 }, { ...candidate, account_id: 3, error_rate: 0.1, error_successes: 9, error_failures: 1 }] })

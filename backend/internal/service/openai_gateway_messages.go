@@ -33,6 +33,12 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (result *OpenAIForwardResult, resultErr error) {
+	renderErrorsBefore := openAIStickyMigrationRenderErrors(c)
+	defer func() {
+		if result != nil && openAIStickyMigrationRenderErrors(c) > renderErrorsBefore {
+			result.ClientDisconnect = true
+		}
+	}()
 	requestMetadata := openAIAccountRequestMetadata(body)
 	ctx, finishAccountRequest := beginAccountGatewayRequest(ctx, account)
 	defer func() {
@@ -736,18 +742,20 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	c.JSON(http.StatusOK, anthropicResp)
 
 	result := &OpenAIForwardResult{
-		RequestID:                     requestID,
-		UpstreamHeaders:               resp.Header,
-		ResponseID:                    finalResponse.ID,
-		Usage:                         usage,
-		Model:                         originalModel,
-		BillingModel:                  billingModel,
-		UpstreamModel:                 upstreamModel,
-		UpstreamResponseModel:         observedUpstreamResponseModel(c),
-		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-		Stream:                        false,
-		Duration:                      time.Since(startTime),
+		RequestID:                      requestID,
+		UpstreamHeaders:                resp.Header,
+		ResponseID:                     finalResponse.ID,
+		Usage:                          usage,
+		Model:                          originalModel,
+		BillingModel:                   billingModel,
+		UpstreamModel:                  upstreamModel,
+		UpstreamResponseModel:          observedUpstreamResponseModel(c),
+		UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+		Stream:                         false,
+		UpstreamTerminalEvent:          firstNonEmpty(prior.terminalEvent, openAIStickyMigrationResponseStatus(finalResponse.Status)),
+		stickyMigrationInvalidTerminal: prior.terminalInvalid || finalResponse.Error != nil || openAIStickyMigrationInvalidResponseStatus(finalResponse.Status),
+		Duration:                       time.Since(startTime),
 	}
 	// Grok /v1/messages uses Responses upstream; count native search for surcharge.
 	if account != nil && account.IsGrok() && finalResponse != nil {
@@ -847,10 +855,12 @@ func openAICompatBufferedPriorModel(event *apicompat.ResponsesStreamEvent) (stri
 // 只有 Grok 折叠非终止 model：保留一条按既有上限截断的声明和冲突位。
 // 后面的不同声明只置冲突，不按事件数量或原文长度继续保存。
 type openAICompatPriorModelAudit struct {
-	enabled        bool
-	observer       upstreamResponseModelObserver
-	semanticOutput bool
-	usageObserved  bool
+	terminalEvent   string
+	terminalInvalid bool
+	enabled         bool
+	observer        upstreamResponseModelObserver
+	semanticOutput  bool
+	usageObserved   bool
 }
 
 func newOpenAICompatPriorModelAudit(account *Account) openAICompatPriorModelAudit {
@@ -916,6 +926,10 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 	prior := newOpenAICompatPriorModelAudit(account)
 	recordPrior := func(event *apicompat.ResponsesStreamEvent, payload []byte) {
 		prior.record(event)
+		if isOpenAICompatResponsesTerminalEvent(event.Type) {
+			prior.terminalEvent = strings.TrimSpace(event.Type)
+			prior.terminalInvalid = openAIStickyMigrationInvalidResponseTerminal(payload, event.Type)
+		}
 		if _, observed := extractOpenAIUsageFromJSONBytes(payload); observed {
 			prior.usageObserved = true
 		}
@@ -1106,6 +1120,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	var streamFailoverErr error
 	var streamNonFailoverErr error
 	terminalEventType := ""
+	stickyMigrationInvalidTerminal := false
 	searchCount := 0
 	streamSearchSeen := make(map[string]struct{})
 	countSearch := account != nil && account.IsGrok()
@@ -1133,21 +1148,23 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	// resultWithUsage builds the final result snapshot.
 	resultWithUsage := func() *OpenAIForwardResult {
 		out := &OpenAIForwardResult{
-			RequestID:                     requestID,
-			UpstreamHeaders:               resp.Header,
-			ResponseID:                    responseID,
-			Usage:                         usage,
-			ObservedUsageOnError:          usageObserved,
-			Model:                         originalModel,
-			BillingModel:                  billingModel,
-			UpstreamModel:                 upstreamModel,
-			UpstreamResponseModel:         observedUpstreamResponseModel(c),
-			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-			UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-			Stream:                        true,
-			Duration:                      time.Since(startTime),
-			FirstTokenMs:                  firstTokenMs,
-			ClientDisconnect:              clientDisconnected,
+			RequestID:                      requestID,
+			UpstreamHeaders:                resp.Header,
+			ResponseID:                     responseID,
+			Usage:                          usage,
+			ObservedUsageOnError:           usageObserved,
+			Model:                          originalModel,
+			BillingModel:                   billingModel,
+			UpstreamModel:                  upstreamModel,
+			UpstreamResponseModel:          observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+			UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+			Stream:                         true,
+			Duration:                       time.Since(startTime),
+			FirstTokenMs:                   firstTokenMs,
+			ClientDisconnect:               clientDisconnected,
+			UpstreamTerminalEvent:          terminalEventType,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
 		}
 		if searchCount > 0 {
 			out.SearchCount = searchCount
@@ -1189,6 +1206,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		isTerminalEvent := isOpenAICompatResponsesTerminalEvent(eventType) || isBareErrorEvent
 		if isTerminalEvent {
 			terminalEventType = eventType
+			stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal([]byte(payload), eventType)
 			if event.Response != nil {
 				if id := strings.TrimSpace(event.Response.ID); id != "" {
 					responseID = id

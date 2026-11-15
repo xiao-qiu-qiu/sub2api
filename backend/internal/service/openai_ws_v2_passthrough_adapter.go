@@ -1444,6 +1444,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		firstTurnStartedAt = hooks.InitialTurnStartedAt
 	}
 	failureAccountSideEffectsApplied := false
+	var pendingStickyMigration atomic.Pointer[OpenAIForwardResult]
 	relayResult, relayExit := openaiwsv2.RunEntry(openaiwsv2.EntryInput{
 		Ctx:                ctx,
 		ClientConn:         &openAIWSOAuthStagedConn{openAIWSOAuthFrameConn: policyClientConn, stager: openAIWSOAuthStager{enabled: oauthReplay.enabled}},
@@ -1520,25 +1521,27 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						CacheReadInputTokens:     turn.Usage.CacheReadInputTokens,
 						ImageOutputTokens:        turn.Usage.ImageOutputTokens,
 					},
-					Model:                         turnRequestModel,
-					UpstreamModel:                 openAIWSDifferentModel(turnRequestModel, turnUpstreamModel),
-					UpstreamResponseModel:         turn.ResponseModel,
-					UpstreamResponseModelConflict: turn.ResponseModelConflict,
-					UpstreamResponseServiceTier:   normalizeObservedOpenAIServiceTier(turn.ResponseServiceTier),
-					ServiceTier:                   usageMeta.serviceTier.Load(),
-					ReasoningEffort:               usageMeta.reasoningEffort.Load(),
-					RequestedReasoningEffort:      usageMeta.requestedReasoningEffort.Load(),
-					Stream:                        true,
-					OpenAIWSMode:                  true,
-					UpstreamTerminalEvent:         normalizeOpenAIWSTerminalEvent(turn.TerminalEventType),
-					ResponseHeaders:               cloneHeader(handshakeHeaders),
-					Duration:                      turn.Duration,
-					FirstTokenMs:                  turn.FirstTokenMs,
-					FirstUpstreamEventMs:          turn.FirstUpstreamEventMs,
-					FirstActualContentMs:          turn.FirstActualContentMs,
-					FirstActualContentKind:        turn.FirstActualContentKind,
-					UpstreamProtocol:              "ws",
-					UsageUnavailable:              smartProtocolStrict(ctx) && !turn.UsageObserved,
+					Model:                           turnRequestModel,
+					UpstreamModel:                   openAIWSDifferentModel(turnRequestModel, turnUpstreamModel),
+					UpstreamResponseModel:           turn.ResponseModel,
+					UpstreamResponseModelConflict:   turn.ResponseModelConflict,
+					UpstreamResponseServiceTier:     normalizeObservedOpenAIServiceTier(turn.ResponseServiceTier),
+					ServiceTier:                     usageMeta.serviceTier.Load(),
+					ReasoningEffort:                 usageMeta.reasoningEffort.Load(),
+					RequestedReasoningEffort:        usageMeta.requestedReasoningEffort.Load(),
+					Stream:                          true,
+					OpenAIWSMode:                    true,
+					UpstreamTerminalEvent:           normalizeOpenAIWSTerminalEvent(turn.TerminalEventType),
+					stickyMigrationInvalidTerminal:  turn.TerminalResponseInvalid,
+					stickyMigrationAwaitingDelivery: true,
+					ResponseHeaders:                 cloneHeader(handshakeHeaders),
+					Duration:                        turn.Duration,
+					FirstTokenMs:                    turn.FirstTokenMs,
+					FirstUpstreamEventMs:            turn.FirstUpstreamEventMs,
+					FirstActualContentMs:            turn.FirstActualContentMs,
+					FirstActualContentKind:          turn.FirstActualContentKind,
+					UpstreamProtocol:                "ws",
+					UsageUnavailable:                smartProtocolStrict(ctx) && !turn.UsageObserved,
 				}
 				if forward := acceptedTurnForwardAt.Swap(nil); forward != nil {
 					arrival := time.Time{}
@@ -1561,6 +1564,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnResult.Usage.OutputTokens,
 					turnResult.Usage.CacheReadInputTokens,
 				)
+				if turnNo == 1 {
+					// AfterTurn can submit the original result to asynchronous billing.
+					// Freeze independent completion evidence before publishing it there.
+					snapshot := *turnResult
+					pendingStickyMigration.Store(&snapshot)
+				}
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turnNo, turnResult, nil)
 				}
@@ -1580,6 +1589,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 				if msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload) {
 					turnLifecycle.finishTerminalWrite(writeErr == nil, clientFrameConn.markTurnCompleted)
+					if pending := pendingStickyMigration.Swap(nil); pending != nil && writeErr == nil {
+						completed := *pending
+						completed.stickyMigrationAwaitingDelivery = false
+						s.CompleteOpenAIStickyMigration(ctx, account, &completed, nil)
+					}
 				}
 			},
 			BeforeRelayCancel: func(exit openaiwsv2.RelayExit) {

@@ -585,6 +585,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	firstEventType := ""
 	lastEventType := ""
 	upstreamTerminalEvent := ""
+	stickyMigrationInvalidTerminal := false
 	clientDisconnected := false
 	clientDisconnectDrainStartedAt := time.Time{}
 	readTimeout := s.openAIWSReadTimeout()
@@ -619,23 +620,24 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
-			RequestID:                     responseID,
-			ResponseID:                    responseID,
-			Usage:                         *usage,
-			Model:                         originalModel,
-			UpstreamModel:                 mappedModel,
-			UpstreamResponseModel:         responseModelObserver.Model(),
-			UpstreamResponseModelConflict: responseModelObserver.Conflict(),
-			UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
-			ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTier(reqBody)),
-			ReasoningEffort:               extractOpenAIReasoningEffort(reqBody, mappedModel, originalModel),
-			Stream:                        reqStream,
-			OpenAIWSMode:                  true,
-			UpstreamTerminalEvent:         upstreamTerminalEvent,
-			ResponseHeaders:               lease.HandshakeHeaders(),
-			Duration:                      time.Since(startTime),
-			FirstTokenMs:                  firstTokenMs,
-			ClientDisconnect:              clientDisconnected,
+			RequestID:                      responseID,
+			ResponseID:                     responseID,
+			Usage:                          *usage,
+			Model:                          originalModel,
+			UpstreamModel:                  mappedModel,
+			UpstreamResponseModel:          responseModelObserver.Model(),
+			UpstreamResponseModelConflict:  responseModelObserver.Conflict(),
+			UpstreamResponseServiceTier:    responseModelObserver.ServiceTier(),
+			ServiceTier:                    resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTier(reqBody)),
+			ReasoningEffort:                extractOpenAIReasoningEffort(reqBody, mappedModel, originalModel),
+			Stream:                         reqStream,
+			OpenAIWSMode:                   true,
+			UpstreamTerminalEvent:          upstreamTerminalEvent,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
+			ResponseHeaders:                lease.HandshakeHeaders(),
+			Duration:                       time.Since(startTime),
+			FirstTokenMs:                   firstTokenMs,
+			ClientDisconnect:               clientDisconnected,
 		}
 	}
 
@@ -997,6 +999,7 @@ readLoop:
 				markOpenAIWSClientVisibleFailure(c, eventType, message)
 			}
 			upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal(message, eventType)
 			// A terminal event must be the final JSON document in its WS message.
 			// Ignore any tail for the completed client turn, but never reuse the
 			// ambiguous upstream connection for another request.

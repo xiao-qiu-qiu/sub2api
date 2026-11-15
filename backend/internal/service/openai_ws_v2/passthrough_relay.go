@@ -59,20 +59,21 @@ type RelayResult struct {
 }
 
 type RelayTurnResult struct {
-	UsageObserved          bool
-	RequestModel           string
-	ResponseModel          string
-	ResponseModelConflict  bool
-	ResponseServiceTier    string
-	Usage                  Usage
-	RequestID              string
-	TerminalEventType      string
-	StartedAt              time.Time
-	Duration               time.Duration
-	FirstTokenMs           *int
-	FirstUpstreamEventMs   *int
-	FirstActualContentMs   *int
-	FirstActualContentKind string
+	TerminalResponseInvalid bool
+	UsageObserved           bool
+	RequestModel            string
+	ResponseModel           string
+	ResponseModelConflict   bool
+	ResponseServiceTier     string
+	Usage                   Usage
+	RequestID               string
+	TerminalEventType       string
+	StartedAt               time.Time
+	Duration                time.Duration
+	FirstTokenMs            *int
+	FirstUpstreamEventMs    *int
+	FirstActualContentMs    *int
+	FirstActualContentKind  string
 }
 
 type RelayExit struct {
@@ -144,20 +145,21 @@ type relayExitSignal struct {
 }
 
 type observedUpstreamEvent struct {
-	usageObserved          bool
-	terminal               bool
-	eventType              string
-	responseID             string
-	usage                  Usage
-	startedAt              time.Time
-	responseModel          string
-	responseConflict       bool
-	responseServiceTier    string
-	duration               time.Duration
-	firstToken             *int
-	firstUpstreamEvent     *int
-	firstActualContent     *int
-	firstActualContentKind string
+	terminalResponseInvalid bool
+	usageObserved           bool
+	terminal                bool
+	eventType               string
+	responseID              string
+	usage                   Usage
+	startedAt               time.Time
+	responseModel           string
+	responseConflict        bool
+	responseServiceTier     string
+	duration                time.Duration
+	firstToken              *int
+	firstUpstreamEvent      *int
+	firstActualContent      *int
+	firstActualContentKind  string
 }
 
 type relayTurnTiming struct {
@@ -836,6 +838,15 @@ func observeUpstreamMessage(
 		responseID: responseID,
 		usage:      parsedUsage,
 	}
+	if eventType == "response.completed" || eventType == "response.done" {
+		status := strings.TrimSpace(gjson.GetBytes(message, "response.status").String())
+		observed.terminalResponseInvalid = status != "" && status != "completed"
+		for _, path := range []string{"response.error", "error", "response.incomplete_details"} {
+			if value := gjson.GetBytes(message, path); value.Exists() && value.Type != gjson.Null {
+				observed.terminalResponseInvalid = true
+			}
+		}
+	}
 	var turnTiming *relayTurnTiming
 	if responseID != "" {
 		turnTiming = openAIWSRelayGetOrInitTurnTiming(state, responseID, now)
@@ -996,20 +1007,21 @@ func emitTurnComplete(
 		requestModel = state.currentRequestModel()
 	}
 	onTurnComplete(RelayTurnResult{
-		UsageObserved:          observed.usageObserved,
-		RequestModel:           requestModel,
-		ResponseModel:          observed.responseModel,
-		ResponseModelConflict:  observed.responseConflict,
-		ResponseServiceTier:    observed.responseServiceTier,
-		Usage:                  observed.usage,
-		RequestID:              responseID,
-		TerminalEventType:      observed.eventType,
-		StartedAt:              observed.startedAt,
-		Duration:               observed.duration,
-		FirstTokenMs:           openAIWSRelayCloneIntPtr(observed.firstToken),
-		FirstUpstreamEventMs:   openAIWSRelayCloneIntPtr(observed.firstUpstreamEvent),
-		FirstActualContentMs:   openAIWSRelayCloneIntPtr(observed.firstActualContent),
-		FirstActualContentKind: observed.firstActualContentKind,
+		TerminalResponseInvalid: observed.terminalResponseInvalid,
+		UsageObserved:           observed.usageObserved,
+		RequestModel:            requestModel,
+		ResponseModel:           observed.responseModel,
+		ResponseModelConflict:   observed.responseConflict,
+		ResponseServiceTier:     observed.responseServiceTier,
+		Usage:                   observed.usage,
+		RequestID:               responseID,
+		TerminalEventType:       observed.eventType,
+		StartedAt:               observed.startedAt,
+		Duration:                observed.duration,
+		FirstTokenMs:            openAIWSRelayCloneIntPtr(observed.firstToken),
+		FirstUpstreamEventMs:    openAIWSRelayCloneIntPtr(observed.firstUpstreamEvent),
+		FirstActualContentMs:    openAIWSRelayCloneIntPtr(observed.firstActualContent),
+		FirstActualContentKind:  observed.firstActualContentKind,
 	})
 }
 

@@ -49,6 +49,8 @@ export default {
   priority: 'Priority',
   balanceProtocols: 'Balance compatible BPS and native accounts',
   balanceProtocolsHint: 'Only group-, model-, quota- and transport-compatible accounts participate. Account protocols stay intact and BPS is never enabled automatically. Disable to restore BPS preference.',
+  stickyMigrationOnSuccess: 'Move session affinity after a successful account switch',
+  stickyMigrationOnSuccessHint: 'Movable sessions keep using the new account after a successful switch, reducing cache cold starts from repeated switching.',
   modelAliases: 'Treat model mappings as aliases while keeping the default model scope',
   modelAliasesHint: 'OpenAI OAuth only. Unmatched aliases use default model admission; when disabled, nonempty mappings remain allowlists. Enable only for accounts intended to serve those models.',
   changeModelScope: 'Change the selected OAuth accounts’ model mapping scope',

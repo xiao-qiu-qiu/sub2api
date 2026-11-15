@@ -346,6 +346,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	stickyMigrationInvalidTerminal := false
 	var regionalUsagePayload []byte
 	var normalizationErr error
 
@@ -397,6 +398,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
 			terminal.ObserveDataLine(trimmedPayload)
+			if trimmedPayload != "[DONE]" && (gjson.Get(payload, "type").String() == "error" || openAIStickyMigrationHasError([]byte(payload), "error") || openAIStickyMigrationInvalidChatFinish([]byte(payload))) {
+				stickyMigrationInvalidTerminal = true
+			}
 			if trimmedPayload == "[DONE]" && c.Request != nil {
 				regionalMeterObserveUsage(c.Request.Context(), regionalUsagePayload, "json")
 			}
@@ -426,21 +430,28 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	resultWithUsage := func() *OpenAIForwardResult {
+		terminalEvent := ""
+		if terminal.sawDone || terminal.sawFinishReason {
+			terminalEvent = "response.completed"
+		}
 		return &OpenAIForwardResult{
-			RequestID:                     requestID,
-			UpstreamHeaders:               resp.Header,
-			Usage:                         usage,
-			Model:                         originalModel,
-			BillingModel:                  billingModel,
-			UpstreamModel:                 upstreamModel,
-			UpstreamResponseModel:         observedUpstreamResponseModel(c),
-			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-			UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-			ReasoningEffort:               reasoningEffort,
-			ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-			Stream:                        true,
-			Duration:                      requesttiming.Now(c.Request.Context()).Sub(startTime),
-			FirstTokenMs:                  firstTokenMs,
+			RequestID:                      requestID,
+			UpstreamHeaders:                resp.Header,
+			Usage:                          usage,
+			Model:                          originalModel,
+			BillingModel:                   billingModel,
+			UpstreamModel:                  upstreamModel,
+			UpstreamResponseModel:          observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+			UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+			ReasoningEffort:                reasoningEffort,
+			ServiceTier:                    resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+			Stream:                         true,
+			Duration:                       requesttiming.Now(c.Request.Context()).Sub(startTime),
+			FirstTokenMs:                   firstTokenMs,
+			ClientDisconnect:               clientDisconnected,
+			UpstreamTerminalEvent:          terminalEvent,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
 		}
 	}
 
@@ -609,22 +620,24 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 		c.Writer.Header().Set("Content-Type", "application/json")
 	}
 	c.Writer.WriteHeader(http.StatusOK)
-	_, _ = c.Writer.Write(respBody)
+	_, writeErr := c.Writer.Write(respBody)
 
 	return &OpenAIForwardResult{
-		RequestID:                     requestID,
-		UpstreamHeaders:               resp.Header,
-		Usage:                         usage,
-		Model:                         originalModel,
-		BillingModel:                  billingModel,
-		UpstreamModel:                 upstreamModel,
-		UpstreamResponseModel:         observedUpstreamResponseModel(c),
-		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
-		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
-		ReasoningEffort:               reasoningEffort,
-		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		Stream:                        false,
-		Duration:                      requesttiming.Now(c.Request.Context()).Sub(startTime),
+		RequestID:                      requestID,
+		UpstreamHeaders:                resp.Header,
+		Usage:                          usage,
+		Model:                          originalModel,
+		BillingModel:                   billingModel,
+		UpstreamModel:                  upstreamModel,
+		UpstreamResponseModel:          observedUpstreamResponseModel(c),
+		UpstreamResponseModelConflict:  observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:    observedUpstreamResponseServiceTier(c),
+		ReasoningEffort:                reasoningEffort,
+		ServiceTier:                    resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+		Stream:                         false,
+		ClientDisconnect:               writeErr != nil,
+		stickyMigrationInvalidTerminal: openAIStickyMigrationInvalidJSONResponse(respBody),
+		Duration:                       requesttiming.Now(c.Request.Context()).Sub(startTime),
 	}, nil
 }
 

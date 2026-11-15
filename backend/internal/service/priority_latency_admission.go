@@ -260,6 +260,9 @@ func (s *OpenAIGatewayService) priorityLatencyBeforeSend(ctx context.Context, ac
 func ownedPriorityScheduleRequest(req OpenAIAccountScheduleRequest) OpenAIAccountScheduleRequest {
 	// Retain only identity and feature applicability, never session/response IDs.
 	copy := OpenAIAccountScheduleRequest{Platform: req.Platform, RequestedModel: req.RequestedModel, HistoryModel: req.HistoryModel, InboundEndpoint: req.InboundEndpoint, UseUpstreamTokenCost: req.UseUpstreamTokenCost, RequiredImageCapability: req.RequiredImageCapability, RequireCompact: req.RequireCompact, RequiredCapability: req.RequiredCapability, RequiredTransport: req.RequiredTransport, RequirePrivacySet: req.RequirePrivacySet, ExcludedIDs: cloneExcludedAccountIDs(req.ExcludedIDs), priorityLatencyPool: req.priorityLatencyPool}
+	// The private completion token is shared across admission and retries; it
+	// never enters candidate snapshots or public scheduling diagnostics.
+	copy.stickyMigration = req.stickyMigration
 	if req.GroupID != nil {
 		id := *req.GroupID
 		copy.GroupID = &id
@@ -272,6 +275,7 @@ func ContextWithSelectionPriorityRequest(ctx context.Context, selection *Account
 	if selection == nil || selection.priorityRequest == nil {
 		return ctx
 	}
+	ctx = context.WithValue(ctx, openAIStickyMigrationContextKey{}, selection.priorityRequest.stickyMigration)
 	return context.WithValue(ctx, prioritySelectionRequestKey{}, *selection.priorityRequest)
 }
 func (s *OpenAIGatewayService) CheckPriorityLatencySelection(ctx context.Context, selection *AccountSelectionResult) error {

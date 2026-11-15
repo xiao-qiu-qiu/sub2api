@@ -6,6 +6,7 @@ export interface PrioritySchedulingConfig {
   oauth_quota_priority?: boolean
   oauth_quota_threshold?: number
   balance_protocols?: boolean
+  sticky_migration_on_success?: boolean
   enabled: boolean
   mode: 'experience' | 'balanced' | 'profit' | 'custom'
   group_ids: number[]

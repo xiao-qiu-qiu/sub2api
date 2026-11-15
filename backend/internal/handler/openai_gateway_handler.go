@@ -1400,6 +1400,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.CompleteOpenAIStickyMigration(c.Request.Context(), account, result, err)
 		if result != nil {
 			// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
@@ -2044,6 +2045,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.CompleteOpenAIStickyMigration(c.Request.Context(), account, result, err)
 		if result != nil {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), true, result.FirstTokenMs)
 		} else {
@@ -4032,6 +4034,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				if result == nil {
 					return
+				}
+				if turn == 1 {
+					// Only the initially movable turn owns the staged migration.
+					// Later turns already belong to this upstream connection.
+					h.gatewayService.CompleteOpenAIStickyMigration(ctx, account, result, turnErr)
 				}
 				result.BillingModel = openAIWSTurnBillingModel(result, turnMapping, service.MapAPIKeyModel(apiKey, turnRequestedModel), turnUpstreamModel)
 				reqLog.Debug("openai.websocket_turn_billing",

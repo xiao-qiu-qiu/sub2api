@@ -27,6 +27,81 @@ func (r *priorityCompatSettings) Set(_ context.Context, _ string, value string) 
 	return nil
 }
 
+func TestPriorityStickyMigrationSettingCompatibility(t *testing.T) {
+	for _, stored := range []string{"legacy", "disabled", "enabled"} {
+		for _, sent := range []string{"omitted", "null", "disabled", "enabled", "invalid"} {
+			t.Run(stored+"/"+sent, func(t *testing.T) {
+				cfg := service.DefaultPrioritySchedulingConfig()
+				cfg.StickyMigrationOnSuccess = stored == "enabled"
+				raw, err := json.Marshal(cfg)
+				require.NoError(t, err)
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(raw, &body))
+				if stored == "legacy" {
+					delete(body, "sticky_migration_on_success")
+				}
+				raw, err = json.Marshal(body)
+				require.NoError(t, err)
+				repo := &priorityCompatSettings{value: string(raw)}
+				settings := service.NewSettingService(repo, nil)
+				initial, err := settings.GetPrioritySchedulingConfig(context.Background())
+				require.NoError(t, err)
+				require.Equal(t, stored == "enabled", initial.StickyMigrationOnSuccess)
+				h := &SettingHandler{settingService: settings}
+				router := gin.New()
+				router.PUT("/config", h.SavePriorityScheduling)
+				router.GET("/config", h.GetPriorityScheduling)
+
+				// The other optional fields remain present: omission of only the new
+				// switch must still load and preserve its current server value.
+				delete(body, "sticky_migration_on_success")
+				body["enabled"] = true
+				switch sent {
+				case "null":
+					body["sticky_migration_on_success"] = nil
+				case "enabled", "disabled":
+					body["sticky_migration_on_success"] = sent == "enabled"
+				case "invalid":
+					body["sticky_migration_on_success"] = "true"
+				}
+				raw, err = json.Marshal(body)
+				require.NoError(t, err)
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodPut, "/config", bytes.NewReader(raw))
+				request.Header.Set("Content-Type", "application/json")
+				router.ServeHTTP(recorder, request)
+				if sent == "invalid" {
+					require.Equal(t, http.StatusBadRequest, recorder.Code)
+					saved, err := settings.GetPrioritySchedulingConfig(context.Background())
+					require.NoError(t, err)
+					require.Equal(t, initial, saved, "invalid values must not change stored settings")
+					return
+				}
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+				want := stored == "enabled"
+				if sent == "enabled" || sent == "disabled" {
+					want = sent == "enabled"
+				}
+				var result struct {
+					Data service.PrioritySchedulingConfig `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &result))
+				require.Equal(t, want, result.Data.StickyMigrationOnSuccess)
+				saved, err := settings.GetPrioritySchedulingConfig(context.Background())
+				require.NoError(t, err)
+				require.Equal(t, want, saved.StickyMigrationOnSuccess)
+				require.True(t, saved.Enabled, "old clients can still save other settings")
+
+				recorder = httptest.NewRecorder()
+				router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/config", nil))
+				require.Equal(t, http.StatusOK, recorder.Code)
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &result))
+				require.Equal(t, saved, result.Data, "saved setting must survive an API readback")
+			})
+		}
+	}
+}
+
 func TestPrioritySavePreservesOmittedProtocolPreference(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		cfg := service.DefaultPrioritySchedulingConfig()

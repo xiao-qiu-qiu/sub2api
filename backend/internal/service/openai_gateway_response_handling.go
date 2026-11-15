@@ -28,22 +28,26 @@ import (
 
 // openaiStreamingResult streaming response result
 type openaiStreamingResult struct {
-	clientDisconnect bool
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
-	searchCount      int
+	clientDisconnect               bool
+	upstreamTerminalEvent          string
+	stickyMigrationInvalidTerminal bool
+	usage                          *OpenAIUsage
+	firstTokenMs                   *int
+	responseID                     string
+	imageCount                     int
+	imageOutputSizes               []string
+	searchCount                    int
 }
 
 type openaiNonStreamingResult struct {
 	*OpenAIUsage
-	usage            *OpenAIUsage
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
-	searchCount      int
+	upstreamTerminalEvent          string
+	stickyMigrationInvalidTerminal bool
+	usage                          *OpenAIUsage
+	responseID                     string
+	imageCount                     int
+	imageOutputSizes               []string
+	searchCount                    int
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string) (*openaiStreamingResult, error) {
@@ -263,6 +267,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	sawResponseFailed := false
 	terminalEventType := ""
 	terminalSuccessful := false
+	stickyMigrationInvalidTerminal := false
 	responsesSemanticOutputSeen := false
 	capacityFailoverSuppressedLogged := false
 	failedMessage := ""
@@ -378,13 +383,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			markPriorityDownstreamDisconnect(ctx)
 		}
 		return &openaiStreamingResult{
-			usage:            usage,
-			clientDisconnect: clientDisconnected,
-			firstTokenMs:     firstTokenMs,
-			responseID:       responseID,
-			imageCount:       imageCounter.Count(),
-			imageOutputSizes: imageCounter.Sizes(),
-			searchCount:      searchCounter,
+			upstreamTerminalEvent:          openAIStickyMigrationTerminalEvent(terminalEventType),
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
+			usage:                          usage,
+			clientDisconnect:               clientDisconnected,
+			firstTokenMs:                   firstTokenMs,
+			responseID:                     responseID,
+			imageCount:                     imageCounter.Count(),
+			imageOutputSizes:               imageCounter.Sizes(),
+			searchCount:                    searchCounter,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -551,6 +558,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				sawTerminalEvent = true
 				terminalSuccessful = IsSuccessfulStreamTerminal(dataBytes)
 				terminalEventType = eventType
+				if strings.TrimSpace(data) != "[DONE]" {
+					stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal(dataBytes, eventType)
+				}
 				if strings.TrimSpace(data) == "[DONE]" {
 					terminalEventType = "[DONE]"
 				}
@@ -1787,12 +1797,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	}
 
 	return &openaiNonStreamingResult{
-		OpenAIUsage:      usage,
-		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
-		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
-		searchCount:      countGrokNativeSearchCallsFromJSONBytes(body),
+		OpenAIUsage:                    usage,
+		upstreamTerminalEvent:          openAIStickyMigrationResponseStatus(gjson.GetBytes(body, "status").String()),
+		stickyMigrationInvalidTerminal: openAIStickyMigrationInvalidJSONResponse(body),
+		usage:                          usage,
+		responseID:                     extractOpenAIResponseIDFromJSONBytes(body),
+		imageCount:                     countOpenAIResponseImageOutputsFromJSONBytes(body),
+		imageOutputSizes:               collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
+		searchCount:                    countGrokNativeSearchCallsFromJSONBytes(body),
 	}, nil
 }
 
@@ -1904,12 +1916,14 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	}
 
 	return &openaiNonStreamingResult{
-		OpenAIUsage:      usage,
-		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
-		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
-		searchCount:      countGrokNativeSearchCallsFromSSEBody(bodyText),
+		OpenAIUsage:                    usage,
+		upstreamTerminalEvent:          openAIStickyMigrationTerminalEvent(terminalType),
+		stickyMigrationInvalidTerminal: openAIStickyMigrationInvalidResponseTerminal(terminalPayload, terminalType),
+		usage:                          usage,
+		responseID:                     extractOpenAIResponseIDFromJSONBytes(body),
+		imageCount:                     countOpenAIImageOutputsFromSSEBody(bodyText),
+		imageOutputSizes:               collectOpenAIImageOutputSizesFromSSEBody(bodyText),
+		searchCount:                    countGrokNativeSearchCallsFromSSEBody(bodyText),
 	}, nil
 }
 

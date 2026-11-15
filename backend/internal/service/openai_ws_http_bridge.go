@@ -727,6 +727,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	firstEventType := ""
 	lastEventType := ""
 	upstreamTerminalEvent := ""
+	stickyMigrationInvalidTerminal := false
 	sawDone := false
 	wroteDownstream := false
 	pendingClientMessages := make([][]byte, 0, 4)
@@ -752,29 +753,31 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	resultWithUsage := func() *OpenAIForwardResult {
 		imageCount := imageCounter.Count()
 		result := &OpenAIForwardResult{
-			RequestID:                     responseID,
-			Usage:                         usage,
-			UsageUnavailable:              strictSession && !usageObserved,
-			ObservedUsageOnError:          usageObserved,
-			streamReadIncomplete:          strictSession && upstreamTerminalEvent == "",
-			Model:                         originalModel,
-			UpstreamModel:                 mappedModel,
-			UpstreamResponseModel:         responseModelObserver.Model(),
-			UpstreamResponseModelConflict: responseModelObserver.Conflict(),
-			UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
-			ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(body)),
-			ReasoningEffort:               ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(body, mappedModel, originalModel), body, mappedModel),
-			RequestedReasoningEffort:      CanonicalRequestedReasoningEffort(body, originalModel, mappedModel),
-			Stream:                        reqStream,
-			OpenAIWSMode:                  true,
-			UpstreamTerminalEvent:         upstreamTerminalEvent,
-			ResponseHeaders:               cloneHeader(resp.Header),
-			Duration:                      requesttiming.Now(ctx).Sub(turnStart),
-			FirstTokenMs:                  firstTokenMs,
-			FirstUpstreamEventMs:          firstEventMs,
-			FirstActualContentMs:          firstActualContentMs,
-			FirstActualContentKind:        firstActualContentKind,
-			UpstreamProtocol:              "http",
+			RequestID:                      responseID,
+			Usage:                          usage,
+			UsageUnavailable:               strictSession && !usageObserved,
+			ObservedUsageOnError:           usageObserved,
+			streamReadIncomplete:           strictSession && upstreamTerminalEvent == "",
+			Model:                          originalModel,
+			UpstreamModel:                  mappedModel,
+			UpstreamResponseModel:          responseModelObserver.Model(),
+			UpstreamResponseModelConflict:  responseModelObserver.Conflict(),
+			UpstreamResponseServiceTier:    responseModelObserver.ServiceTier(),
+			ServiceTier:                    resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(body)),
+			ReasoningEffort:                ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(body, mappedModel, originalModel), body, mappedModel),
+			RequestedReasoningEffort:       CanonicalRequestedReasoningEffort(body, originalModel, mappedModel),
+			Stream:                         reqStream,
+			OpenAIWSMode:                   true,
+			UpstreamTerminalEvent:          upstreamTerminalEvent,
+			ClientDisconnect:               clientDisconnected,
+			stickyMigrationInvalidTerminal: stickyMigrationInvalidTerminal,
+			ResponseHeaders:                cloneHeader(resp.Header),
+			Duration:                       requesttiming.Now(ctx).Sub(turnStart),
+			FirstTokenMs:                   firstTokenMs,
+			FirstUpstreamEventMs:           firstEventMs,
+			FirstActualContentMs:           firstActualContentMs,
+			FirstActualContentKind:         firstActualContentKind,
+			UpstreamProtocol:               "http",
 		}
 		applyOpenAIQueueTiming(result, openAIWSQueueArrival(ctx), forwardStart, turnStart, "ws_frame_http_bridge", "first_forward_including_internal_retries")
 		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
@@ -1086,6 +1089,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			return resultWithUsage(), &grokContentPolicyError{message: extractOpenAISSEErrorMessage(upstreamMessage)}
 		}
 		if isOpenAIWSTerminalEvent(eventType) && !bareErrorPending {
+			stickyMigrationInvalidTerminal = openAIStickyMigrationInvalidResponseTerminal(upstreamMessage, eventType)
 			if eventType == "response.failed" {
 				upstreamTerminalEvent = "response.failed"
 			} else {

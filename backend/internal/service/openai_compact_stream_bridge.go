@@ -85,7 +85,9 @@ func writeOpenAICompactSSEBridge(c *gin.Context, statusCode int, finalResponse [
 		header.Set("X-Accel-Buffering", "no")
 		c.Writer.WriteHeader(statusCode)
 	}
-	_, _ = c.Writer.Write(payload)
+	if _, err := c.Writer.Write(payload); err != nil {
+		markOpenAIStickyMigrationWriteFailure(c)
+	}
 	c.Writer.Flush()
 	return true
 }
