@@ -76,8 +76,8 @@ type routingAvailabilityEvaluation struct {
 
 // RoutingAvailability only observes eligibility and live capacity. In
 // particular it never calls Select, creates bindings, reserves RPM, or forwards.
-func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *APIKey, input RoutingAvailabilityRequest) RoutingAvailability {
-	result := RoutingAvailability{Object: "routing.availability", Model: strings.TrimSpace(input.Model), State: "unknown", Reason: "evaluation_unavailable", CheckedAt: time.Now().Unix(), RetryAfterSeconds: 3}
+func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *APIKey, input RoutingAvailabilityRequest) (result RoutingAvailability) {
+	result = RoutingAvailability{Object: "routing.availability", Model: strings.TrimSpace(input.Model), State: "unknown", Reason: "evaluation_unavailable", CheckedAt: time.Now().Unix(), RetryAfterSeconds: 3}
 	if input.Validate() != nil {
 		return result
 	}
@@ -152,6 +152,22 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 		RequiredCapability: capability, RequireCompact: input.RequireCompact,
 		routingAvailability: evaluation,
 	}
+	defer func() {
+		// The receiving gateway owns the request's recovery budget. An upstream
+		// router must send the request here instead of treating a login as an
+		// empty pool or spending a separate capacity-wait budget first.
+		if result.State != "empty" && result.State != "busy" {
+			return
+		}
+		pending, readErr := s.routingOAuthRecoveryPending(ctx, key, req, input.ServiceTier)
+		if readErr != nil {
+			result.State, result.Reason = "unknown", "evaluation_unavailable"
+			return
+		}
+		if pending {
+			result.State, result.Reason, result.RetryAfterSeconds = "busy", "upstream_auth_recovery_pending", 1
+		}
+	}()
 	scheduler := &defaultOpenAIAccountScheduler{service: s}
 	ctx, accounts, loads, _, err := scheduler.loadOpenAIEligibleAccounts(ctx, req)
 	if err != nil {
@@ -227,6 +243,83 @@ func (s *OpenAIGatewayService) RoutingAvailability(ctx context.Context, key *API
 	}
 	result.State, result.Reason = "empty", "no_eligible_accounts"
 	return result
+}
+
+// Observe both local verification and durable login tasks without starting a
+// login, verification probe, scheduler selection, or concurrency reservation.
+func (s *OpenAIGatewayService) routingOAuthRecoveryPending(ctx context.Context, key *APIKey, req OpenAIAccountScheduleRequest, tier string) (bool, error) {
+	if s.oauthRecovery == nil || s.accountRepo == nil {
+		return false, nil
+	}
+	// Regional snapshots may intentionally omit otherwise valid accounts.
+	// A central database query must never widen that assignment.
+	if s.schedulerSnapshot != nil && s.schedulerSnapshot.localSnapshotReader != nil {
+		return false, nil
+	}
+	accounts, err := s.accountRepo.ListAllWithFilters(ctx, PlatformOpenAI, "", "active,error", "", derefGroupID(req.GroupID), "")
+	if err != nil {
+		return false, err
+	}
+	ctx, err = s.withOpenAIRPMPrefetch(ctx, accounts)
+	if err != nil {
+		return false, err
+	}
+	var fastPolicy *OpenAIFastPolicySettings
+	if s.settingService != nil {
+		fastPolicy, err = s.settingService.GetOpenAIFastPolicySettings(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
+	var thresholds map[string]int
+	if s.rateLimitService != nil && s.rateLimitService.settingService != nil {
+		thresholds = s.rateLimitService.settingService.GetAccountSchedulingThresholds(ctx)
+	}
+	scheduler := &defaultOpenAIAccountScheduler{service: s}
+	for i := range accounts {
+		account := &accounts[i]
+		if !oauth401CanRecover(account, nil) || account.IsCredentialShadow() || account.HasManagedOpenAIConnections() ||
+			account.IsPrismBrowserEnabledForModel(req.RequestedModel) || !account.Schedulable ||
+			!s.openAIAccountMatchesSchedulingGroup(account, req.GroupID) ||
+			(account.Status != StatusActive && (account.Status != StatusError || account.ErrorMessage != ImmediateOAuthRecoveryErrorMessage)) {
+			continue
+		}
+		candidate := *account
+		candidate.Status = StatusActive
+		if !candidate.IsSchedulableForModelWithContext(ctx, req.RequestedModel) ||
+			!s.isOpenAIAccountTransportCompatible(&candidate, req.RequiredTransport, req.RequestedModel) ||
+			(req.RequireCompact && openAICompactSupportTier(&candidate) == 0) {
+			continue
+		}
+		if decision := EvaluateAccountSchedulingThreshold(&candidate, thresholds, time.Now()); decision.ShouldPause && decision.Until != nil && decision.Until.After(time.Now()) {
+			continue
+		}
+		if compatible, _ := scheduler.accountRequestCompatibility(ctx, &candidate, req, true); !compatible {
+			continue
+		}
+		if s.isExcelBPSCoolingDown(&candidate, req.RequestedModel, true) ||
+			s.isExcelBPSModelCoolingDown(&candidate, req.RequestedModel, true) ||
+			s.isOpenAIAccountModelRuntimeBlocked(&candidate, req.RequestedModel, true) {
+			continue
+		}
+		if rpm, ok := accountRPMStateFromContext(ctx, &candidate); ok && candidate.CheckRPMSchedulability(rpm.Current) == WindowCostNotSchedulable {
+			continue
+		}
+		if action, _ := evaluateOpenAIFastPolicyWithSettings(fastPolicy, key.UserID, &candidate, req.RequestedModel, tier); action == BetaPolicyActionBlock {
+			continue
+		}
+		if s.oauthRecovery.active(account.ID) {
+			return true, nil
+		}
+		task, err := s.oauthRecovery.guard.GetImmediateReauthTask(ctx, account.ID)
+		if err != nil {
+			return false, err
+		}
+		if task != nil && task.AccountID == account.ID && (task.Status == OpenAIOAuthReauthStatusQueued || task.Status == OpenAIOAuthReauthStatusRunning || task.Status == OpenAIOAuthReauthStatusCallbackProcessing) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Use the scheduler's group/platform candidate authority, then its shared

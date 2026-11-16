@@ -59,6 +59,10 @@ func (r *routingAvailabilityTestRepo) ListSchedulableByGroupIDAndPlatform(ctx co
 	return r.schedulerTestOpenAIAccountRepo.ListSchedulableByGroupIDAndPlatform(ctx, id, platform)
 }
 
+func (r *routingAvailabilityTestRepo) ListAllWithFilters(_ context.Context, _, _, _, _ string, _ int64, _ string) ([]Account, error) {
+	return append([]Account(nil), r.accounts...), r.err
+}
+
 type routingAvailabilitySnapshotCache struct {
 	*openAISnapshotCacheStub
 	buckets map[SchedulerBucket][]*Account
@@ -75,6 +79,18 @@ func (c *routingAvailabilitySnapshotCache) GetSnapshot(_ context.Context, bucket
 
 func (c *routingAvailabilitySnapshotCache) GetLocalSnapshot(ctx context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
 	return c.GetSnapshot(ctx, bucket)
+}
+
+func (c *routingAvailabilitySnapshotCache) GetLocalAccounts(_ context.Context, ids []int64) (map[int64]*Account, error) {
+	accounts := make(map[int64]*Account, len(ids))
+	for _, id := range ids {
+		accounts[id] = c.accountsByID[id]
+	}
+	return accounts, c.err
+}
+
+func (c *routingAvailabilitySnapshotCache) GetLocalGroup(_ context.Context, id int64) (*Group, error) {
+	return &Group{ID: id, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true}, c.err
 }
 
 func routingAvailabilityFixture() (*OpenAIGatewayService, *APIKey, *routingAvailabilityTestRepo, *routingAvailabilityTestCache) {
@@ -119,6 +135,85 @@ func TestRoutingAvailabilityAPIFormatValidation(t *testing.T) {
 			} else {
 				assert.Equal(t, tc.transport, request.Transport)
 			}
+		})
+	}
+}
+
+func TestRoutingAvailabilityOAuthRecoveryKeepsEligiblePrimary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*OpenAIGatewayService, *APIKey, *routingAvailabilityTestRepo, *oauthRecoveryTestGuard)
+		state  string
+		reason string
+	}{
+		{name: "durable_login", state: "busy", reason: "upstream_auth_recovery_pending"},
+		{name: "local_verification", state: "busy", reason: "upstream_auth_recovery_pending", change: func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, g *oauthRecoveryTestGuard) {
+			g.task.Status = OpenAIOAuthReauthStatusSucceeded
+			s.oauthRecovery.flights[1] = &oauthRecoveryFlight{accountID: 1, done: make(chan struct{})}
+		}},
+		{name: "healthy_alternative", state: "ready", reason: "capacity_available", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			other := r.accounts[0]
+			other.ID, other.Status, other.ErrorMessage = 2, StatusActive, ""
+			r.accounts = append(r.accounts, other)
+		}},
+		{name: "manual_stop", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			r.accounts[0].Schedulable = false
+		}},
+		{name: "permanent_error", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			r.accounts[0].ErrorMessage = "account deactivated"
+		}},
+		{name: "wrong_group", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			r.accounts[0].GroupIDs = []int64{99}
+		}},
+		{name: "wrong_model", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			r.accounts[0].Credentials["model_mapping"] = map[string]any{"other-model": "other-model"}
+		}},
+		{name: "privacy_gate", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, k *APIKey, _ *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			k.Group.RequirePrivacySet = true
+		}},
+		{name: "quota_cooldown", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			until := time.Now().Add(time.Hour)
+			r.accounts[0].RateLimitResetAt = &until
+		}},
+		{name: "rpm_exhausted", state: "empty", reason: "no_eligible_accounts", change: func(s *OpenAIGatewayService, _ *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			r.accounts[0].Extra = map[string]any{"base_rpm": 10}
+			s.rpmCache = &groupCapacityRPMCacheStub{counts: map[int64]int{1: 10}}
+		}},
+		{name: "model_cooldown", state: "empty", reason: "no_eligible_accounts", change: func(s *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			modelKey, _ := openAIAccountModelTransientKey(1, "gpt-5.4")
+			s.getOpenAIAccountModelTransientState().entries[modelKey] = openAIAccountModelTransientEntry{blockUntil: time.Now().Add(time.Hour)}
+		}},
+		{name: "regional_scope", state: "empty", reason: "no_eligible_accounts", change: func(s *OpenAIGatewayService, k *APIKey, r *routingAvailabilityTestRepo, _ *oauthRecoveryTestGuard) {
+			regionalAccount := r.accounts[0]
+			regionalAccount.ID = 2
+			snapshot := &routingAvailabilitySnapshotCache{
+				openAISnapshotCacheStub: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{2: &regionalAccount}},
+				buckets:                 map[SchedulerBucket][]*Account{{GroupID: *k.GroupID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}: {&regionalAccount}},
+			}
+			s.schedulerSnapshot = &SchedulerSnapshotService{cache: snapshot, localSnapshotReader: snapshot}
+		}},
+		{name: "completed_task", state: "empty", reason: "no_eligible_accounts", change: func(_ *OpenAIGatewayService, _ *APIKey, _ *routingAvailabilityTestRepo, g *oauthRecoveryTestGuard) {
+			g.task.Status = OpenAIOAuthReauthStatusFailed
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, key, repo, _ := routingAvailabilityFixture()
+			repo.accounts[0].Type = AccountTypeOAuth
+			repo.accounts[0].Status = StatusError
+			repo.accounts[0].ErrorMessage = ImmediateOAuthRecoveryErrorMessage
+			guard := &oauthRecoveryTestGuard{task: OpenAIOAuthReauthTask{ID: 8, AccountID: 1, Status: OpenAIOAuthReauthStatusRunning}}
+			svc.SetOpenAIOAuthRecovery(guard)
+			t.Cleanup(svc.oauthRecovery.stop)
+			if tc.change != nil {
+				tc.change(svc, key, repo, guard)
+			}
+			before := svc.SnapshotOpenAIAccountSchedulerMetrics()
+			got := svc.RoutingAvailability(t.Context(), key, RoutingAvailabilityRequest{Model: "gpt-5.4"})
+			assert.Equal(t, tc.state, got.State)
+			assert.Equal(t, tc.reason, got.Reason)
+			assert.Equal(t, before, svc.SnapshotOpenAIAccountSchedulerMetrics())
+			assert.Zero(t, guard.creates, "availability must not create login tasks")
+			assert.Zero(t, guard.verifies, "availability must not probe credentials")
 		})
 	}
 }

@@ -27,6 +27,36 @@ type accountTokenGuardV2RecoveryProber interface {
 	FetchOpenAIRecoveryModelsList(context.Context, *Account) (*OpenAIModelsResponse, error)
 }
 
+// CheckImmediateReauthAvailable lets existing waiters notice a manual stop or
+// removed configuration without requesting another login task.
+func (s *AccountTokenGuardV2Service) CheckImmediateReauthAvailable(ctx context.Context, accountID int64) error {
+	if s == nil || s.repo == nil || s.reauth == nil || s.reauth.repo == nil || !s.reauth.encryptionKeyConfigured {
+		return ErrOAuthRecoveryUnavailable
+	}
+	record, err := s.repo.GetAccount(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if record == nil || !record.AutoReloginEnabled {
+		return ErrOAuthRecoveryUnavailable
+	}
+	stored, err := s.reauth.repo.GetConfig(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if stored == nil {
+		return ErrOAuthRecoveryUnavailable
+	}
+	view, err := s.reauth.configView(ctx, stored)
+	if err != nil {
+		return err
+	}
+	if view == nil || !view.Configured {
+		return ErrOAuthRecoveryUnavailable
+	}
+	return nil
+}
+
 func immediateOAuthRecoveryAccount(account *Account) bool {
 	return account != nil && account.ID > 0 && account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth &&
 		!account.IsCredentialShadow() && !account.IsOpenAIPersonalAccessToken() && !account.IsOpenAIAgentIdentity()
@@ -144,12 +174,20 @@ func (p immediateOAuthFreshProbe) FetchOpenAIModelsList(ctx context.Context, acc
 // Accounting and probe persistence use a credential CAS, so an overlapping
 // refresh cannot turn an old probe into proof that newer credentials work.
 func (s *AccountTokenGuardV2Service) VerifyImmediateReauth(ctx context.Context, accountID int64) error {
+	_, err := s.VerifyImmediateReauthSnapshot(ctx, accountID)
+	return err
+}
+
+// VerifyImmediateReauthSnapshot returns exactly the credential version proven by
+// the fresh probe and persistence CAS, so cache publication cannot bless a later
+// concurrent credential replacement.
+func (s *AccountTokenGuardV2Service) VerifyImmediateReauthSnapshot(ctx context.Context, accountID int64) (*Account, error) {
 	if s == nil || s.repo == nil || s.accounts == nil || s.prober == nil {
-		return ErrOAuthRecoveryUnavailable
+		return nil, ErrOAuthRecoveryUnavailable
 	}
 	repo, ok := s.repo.(AccountTokenGuardV2RecoveryRepository)
 	if !ok {
-		return ErrOAuthRecoveryUnavailable
+		return nil, ErrOAuthRecoveryUnavailable
 	}
 	prober := s.prober
 	if fresh, ok := prober.(accountTokenGuardV2RecoveryProber); ok {
@@ -157,14 +195,14 @@ func (s *AccountTokenGuardV2Service) VerifyImmediateReauth(ctx context.Context, 
 	}
 	account, err := s.accounts.GetAccount(ctx, accountID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !immediateOAuthRecoveryAccount(account) || !account.Schedulable || (account.Status != StatusActive && account.Status != StatusError) {
-		return ErrOAuthRecoveryUnavailable
+		return nil, ErrOAuthRecoveryUnavailable
 	}
 	rules, err := s.GetRules(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	started := s.clockNow()
 	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -176,10 +214,14 @@ func (s *AccountTokenGuardV2Service) VerifyImmediateReauth(ctx context.Context, 
 	}
 	completion := AccountTokenGuardV2ProbeCompletion{ProbeState: state, ProbeDetail: detail, LastProbeAt: started, NextProbeAt: next}
 	if err := repo.CompleteImmediateReauthVerification(ctx, accountID, account.Credentials, completion, rules); err != nil {
-		return err
+		return nil, err
 	}
 	if state != AccountTokenGuardV2ProbeOK {
-		return infraerrors.New(http.StatusBadGateway, "TOKEN_GUARD_V2_RECOVERY_VERIFY_FAILED", detail)
+		err := infraerrors.New(http.StatusBadGateway, "TOKEN_GUARD_V2_RECOVERY_VERIFY_FAILED", detail)
+		if state == AccountTokenGuardV2ProbeAuth {
+			return nil, errors.Join(ErrOAuthRecoveryCredentialsRejected, err)
+		}
+		return nil, err
 	}
-	return nil
+	return account, nil
 }

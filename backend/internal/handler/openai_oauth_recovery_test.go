@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -118,6 +119,17 @@ type oauthRecoveryHandlerGuard struct {
 	onRequest func()
 }
 
+func (g *oauthRecoveryHandlerGuard) CheckImmediateReauthAvailable(context.Context, int64) error {
+	if g.failed {
+		select {
+		case <-g.ready:
+			return service.ErrOAuthRecoveryUnavailable
+		default:
+		}
+	}
+	return nil
+}
+
 func (g *oauthRecoveryHandlerGuard) RequestImmediateReauth(context.Context, *service.Account) (*service.OpenAIOAuthReauthTask, error) {
 	g.requests.Add(1)
 	g.repo.mutate(func(a *service.Account) {
@@ -165,6 +177,13 @@ func (g *oauthRecoveryHandlerGuard) VerifyImmediateReauth(context.Context, int64
 		g.onVerify()
 	}
 	return nil
+}
+
+func (g *oauthRecoveryHandlerGuard) VerifyImmediateReauthSnapshot(ctx context.Context, accountID int64) (*service.Account, error) {
+	if err := g.VerifyImmediateReauth(ctx, accountID); err != nil {
+		return nil, err
+	}
+	return g.repo.GetByID(ctx, accountID)
 }
 
 type oauthRecoveryHandlerUpstream struct {
@@ -381,6 +400,42 @@ func TestOpenAIOAuthRecoveryHTTP_ClientCancellationDoesNotReplay(t *testing.T) {
 	require.Empty(t, rec.Body.String())
 	require.Zero(t, usage.count.Load())
 	close(ready)
+}
+
+func TestOpenAIOAuthRecoveryHTTP_StreamingWaitStaysSilentUntil60Second503(t *testing.T) {
+	for _, endpoint := range []string{"responses", "chat/completions", "messages"} {
+		t.Run(endpoint, func(t *testing.T) {
+			ready := make(chan struct{})
+			h, guard, slots, usage := newOAuthRecoveryHandler(t, &oauthRecoveryHandlerUpstream{}, ready)
+			synctest.Test(t, func(t *testing.T) {
+				// Keep unrelated constructor-owned cache janitors outside the clock
+				// bubble; only this request and its recovery coordinator use it.
+				h.gatewayService.SetOpenAIOAuthRecovery(guard)
+				defer h.gatewayService.CloseOpenAIWSPool()
+				h.concurrencyHelper.pingFormat = SSEPingFormatComment
+				h.concurrencyHelper.pingInterval = time.Second
+				c, rec := oauthRecoveryHandlerRequest(t, context.Background(), endpoint)
+				body := `{"model":"gpt-5.1","stream":true,"input":"wait for original account","messages":[{"role":"user","content":"wait for original account"}],"max_tokens":20}`
+				c.Request.Body = io.NopCloser(strings.NewReader(body))
+				c.Request.ContentLength = int64(len(body))
+				done := make(chan struct{})
+				go func() { runOAuthRecoveryHandler(h, c, endpoint); close(done) }()
+				<-guard.started
+				synctest.Wait()
+				time.Sleep(59 * time.Second)
+				synctest.Wait()
+				require.False(t, c.Writer.Written(), "an SSE ping/200 would commit the downstream connection before fallback is possible")
+				require.Empty(t, rec.Body.String())
+				require.EqualValues(t, 1, atomic.LoadInt32(&slots.releaseAccountCalled))
+				require.EqualValues(t, 1, atomic.LoadInt32(&slots.releaseUserCalled))
+				time.Sleep(time.Second)
+				<-done
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+				require.Contains(t, rec.Body.String(), "upstream_auth_recovery_timeout")
+				require.Zero(t, usage.count.Load())
+			})
+		})
+	}
 }
 
 func TestOpenAIOAuthRecoveryHTTP_NewRequestsWaitBeforeUserAdmission(t *testing.T) {

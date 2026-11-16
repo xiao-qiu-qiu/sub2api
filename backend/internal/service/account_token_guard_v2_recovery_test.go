@@ -206,3 +206,28 @@ func TestImmediateReauthTaskLookupPreservesIdentityAndSanitizes(t *testing.T) {
 	require.EqualValues(t, 88, task.ID)
 	require.NotContains(t, task.Error, "synthetic private")
 }
+
+func TestImmediateReauthAvailabilityNoticesRemovedConfiguration(t *testing.T) {
+	for _, mode := range []string{"enabled", "auto_disabled", "config_removed", "config_incomplete", "encryption_disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, repo, _, tasks := immediateReauthFixture(t)
+			switch mode {
+			case "auto_disabled":
+				repo.record.AutoReloginEnabled = false
+			case "config_removed":
+				tasks.config = nil
+			case "config_incomplete":
+				tasks.config.OTPURLCiphertext = ""
+			case "encryption_disabled":
+				svc.reauth.encryptionKeyConfigured = false
+			}
+			err := svc.CheckImmediateReauthAvailable(context.Background(), 42)
+			if mode == "enabled" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrOAuthRecoveryUnavailable)
+			}
+			require.Zero(t, tasks.createCalls)
+		})
+	}
+}

@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -233,10 +234,22 @@ func TestOAuthRecoveryFinishingBeforeBackupBindingKeepsOriginalOwner(t *testing.
 					t.Fatal("recovery did not finish before backup binding")
 				}
 			}})
-			selection, err := selectOAuthRecoveryRoutingAccount(svc, WithOpenAIOAuthRecoveryBudget(context.Background()), hash)
+			ctx := WithOpenAIOAuthRecoveryBudget(context.Background())
+			selection, err := selectOAuthRecoveryRoutingAccount(svc, ctx, hash)
+			waitedForPublication := errors.Is(err, ErrOAuthRecoveryAdmissionInterrupted)
+			if waitedForPublication {
+				guard.complete(OpenAIOAuthReauthStatusSucceeded)
+				_, waitErr := svc.WaitForOpenAIOAuthRecovery(ctx, &groupID, "gpt-test")
+				require.NoError(t, waitErr)
+				selection, err = selectOAuthRecoveryRoutingAccount(svc, ctx, hash)
+			}
 			require.NoError(t, err)
 			require.NotNil(t, selection)
-			require.EqualValues(t, 2, selection.Account.ID)
+			if waitedForPublication {
+				require.Equal(t, account.ID, selection.Account.ID)
+			} else {
+				require.EqualValues(t, 2, selection.Account.ID)
+			}
 			releaseLegacySchedulerDecisionSelection(selection)
 			require.Equal(t, account.ID, cache.sessionBindings[svc.openAISessionCacheKey(hash)])
 			require.Empty(t, cache.deletedSessions)

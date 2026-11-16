@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +43,7 @@ func requireOAuthRecoveryFlights(t *testing.T, expected, actual []*oauthRecovery
 	}
 }
 
-func TestOAuthRecoverySharedWindowIncludesLateWaiters(t *testing.T) {
+func TestOAuthRecoveryLateWaitersKeepTheirOwnRequestBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, guard, account := newOAuthRecoveryFixture(t)
 		defer svc.oauthRecovery.stop()
@@ -68,18 +69,22 @@ func TestOAuthRecoverySharedWindowIncludesLateWaiters(t *testing.T) {
 		time.Sleep(time.Second)
 		synctest.Wait()
 		require.ErrorIs(t, <-first, ErrOAuthRecoveryTimeout)
-		require.ErrorIs(t, <-late, ErrOAuthRecoveryTimeout)
+		require.Empty(t, late, "another request's timeout must not shorten this connection's wait")
 		require.Equal(t, time.Minute, time.Since(start))
-		require.Zero(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).waiters)
+		require.Equal(t, 1, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).waiters)
 		require.True(t, svc.oauthRecovery.active(account.ID))
 		requireOAuthRecoveryFlights(t, []*oauthRecoveryFlight{flight}, snapshotOAuthRecoveryBudgetFlights(lateCtx, false))
-		// An even later client sees an expired window immediately.
-		_, err := svc.RecoverOpenAIOAuth401(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
-		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
-		require.Equal(t, time.Minute, time.Since(start))
+		time.Sleep(44 * time.Second)
+		synctest.Wait()
+		require.Empty(t, late)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.ErrorIs(t, <-late, ErrOAuthRecoveryTimeout)
+		require.Equal(t, 105*time.Second, time.Since(start))
+		require.Zero(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).waiters)
 		guard.complete(OpenAIOAuthReauthStatusSucceeded)
 		<-flight.done
-		require.NoError(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).err)
+		require.ErrorIs(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).err, ErrOAuthRecoveryTimeout)
 	})
 }
 
@@ -125,7 +130,7 @@ func TestOAuthRecoveryQueueLimitAndCanceledWaiterReleasesCapacity(t *testing.T) 
 	})
 }
 
-func TestOAuthRecoveryPersistentTaskKeepsOriginalDeadline(t *testing.T) {
+func TestOAuthRecoveryPersistentTaskDoesNotShortenRequestDeadline(t *testing.T) {
 	for _, queue := range []bool{false, true} {
 		t.Run(map[bool]string{false: "pool_discovery", true: "selected_account"}[queue], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -135,6 +140,7 @@ func TestOAuthRecoveryPersistentTaskKeepsOriginalDeadline(t *testing.T) {
 				guard.task.CreatedAt = time.Now().Add(-50 * time.Second)
 				guard.task.UpdatedAt = time.Now() // Worker progress cannot renew the window.
 				guard.repo.accounts[0].Status = StatusError
+				guard.repo.accounts[0].ErrorMessage = ImmediateOAuthRecoveryErrorMessage
 				ctx := context.WithValue(WithOpenAIOAuthRecoveryBudget(context.Background()), oauthRecoveryDiscoveryKey{}, true)
 				if queue {
 					require.True(t, svc.QueueOpenAIOAuthRecoveryForAccount(ctx, account.ID))
@@ -145,9 +151,9 @@ func TestOAuthRecoveryPersistentTaskKeepsOriginalDeadline(t *testing.T) {
 				waited, err := svc.WaitForOpenAIOAuthRecovery(ctx, &groupID, "gpt-test")
 				require.True(t, waited)
 				require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
-				require.Equal(t, 10*time.Second, time.Since(start))
+				require.Equal(t, time.Minute, time.Since(start))
 				require.Zero(t, guard.creates)
-				require.True(t, svc.oauthRecovery.active(account.ID))
+				require.Equal(t, OpenAIOAuthReauthStatusRunning, guard.task.Status)
 				require.Len(t, snapshotOAuthRecoveryBudgetFlights(ctx, false), 1)
 				require.True(t, PrepareOpenAIOAuthRecoveryFallback(ctx, err))
 				require.False(t, svc.QueueOpenAIOAuthRecoveryForAccount(ctx, account.ID))
@@ -158,7 +164,7 @@ func TestOAuthRecoveryPersistentTaskKeepsOriginalDeadline(t *testing.T) {
 	}
 }
 
-func TestOAuthRecoveryDiscoveryDoesNotRenewExpiredTask(t *testing.T) {
+func TestOAuthRecoveryDiscoveryWaitsForExistingTaskWithFreshRequestBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, guard, account := newOAuthRecoveryFixture(t)
 		defer svc.oauthRecovery.stop()
@@ -170,7 +176,7 @@ func TestOAuthRecoveryDiscoveryDoesNotRenewExpiredTask(t *testing.T) {
 		waited, err := svc.WaitForOpenAIOAuthRecovery(ctx, nil, "gpt-test")
 		require.True(t, waited)
 		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
-		require.Zero(t, time.Since(start))
+		require.Equal(t, time.Minute, time.Since(start))
 		require.Zero(t, guard.creates)
 		require.Zero(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, lookupOAuthRecoveryFlight(svc.oauthRecovery, account.ID)).waiters)
 	})
@@ -232,7 +238,14 @@ func (g *oauthRecoveryControlledGuard) VerifyImmediateReauth(ctx context.Context
 	return g.oauthRecoveryTestGuard.VerifyImmediateReauth(ctx, accountID)
 }
 
-func TestOAuthRecoveryBeginDeadlineIncludesTaskCreationAndEarlierDurableTask(t *testing.T) {
+func (g *oauthRecoveryControlledGuard) VerifyImmediateReauthSnapshot(ctx context.Context, accountID int64) (*Account, error) {
+	if g.beforeVerify != nil {
+		g.beforeVerify()
+	}
+	return g.oauthRecoveryTestGuard.VerifyImmediateReauthSnapshot(ctx, accountID)
+}
+
+func TestOAuthRecoveryRequestDeadlineIncludesTaskCreationButNotTaskAge(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(map[bool]string{false: "creation_latency", true: "existing_task"}[existing], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -260,12 +273,8 @@ func TestOAuthRecoveryBeginDeadlineIncludesTaskCreationAndEarlierDurableTask(t *
 				close(release)
 				require.Same(t, flight, <-begun)
 				require.ErrorIs(t, <-result, ErrOAuthRecoveryTimeout)
-				expected := time.Minute
-				if existing {
-					expected = 10 * time.Second
-				}
-				require.Equal(t, expected, time.Since(start))
-				require.True(t, svc.oauthRecovery.active(account.ID))
+				require.Equal(t, time.Minute, time.Since(start))
+				require.Equal(t, OpenAIOAuthReauthStatusRunning, guard.task.Status)
 			})
 		})
 	}
@@ -311,7 +320,7 @@ func TestOAuthRecoveryPublishesOnlyAfterVerificationAndCacheRefresh(t *testing.T
 	})
 }
 
-func TestOAuthRecoveryCacheRefreshFailureDoesNotAllowReplay(t *testing.T) {
+func TestOAuthRecoveryPersistentCacheRefreshFailureWaitsUntilRequestTimeout(t *testing.T) {
 	for _, tokenCache := range []bool{false, true} {
 		t.Run(map[bool]string{false: "snapshot", true: "token_cache"}[tokenCache], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -330,8 +339,198 @@ func TestOAuthRecoveryCacheRefreshFailureDoesNotAllowReplay(t *testing.T) {
 				require.True(t, handled)
 				guard.complete(OpenAIOAuthReauthStatusSucceeded)
 				err := svc.oauthRecovery.wait(context.Background(), []*oauthRecoveryFlight{flight})
-				require.ErrorIs(t, err, ErrOAuthRecoveryFailed)
-				require.ErrorIs(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).err, cacheErr)
+				require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
+				state := snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight)
+				require.True(t, state.err == nil || errors.Is(state.err, ErrOAuthRecoveryTimeout))
+				require.Equal(t, 1, guard.verifies, "cache retry must not repeat credential verification")
+			})
+		})
+	}
+}
+
+func TestOAuthRecoveryTransientVerificationKeepsAllWaitersUntilVerified(t *testing.T) {
+	for _, reason := range []string{"TOKEN_GUARD_V2_RECOVERY_TASK_PENDING", "TOKEN_GUARD_V2_RECOVERY_CREDENTIALS_CHANGED", "TOKEN_GUARD_V2_RECOVERY_VERIFY_FAILED"} {
+		t.Run(reason, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, guard, account := newOAuthRecoveryFixture(t)
+				defer svc.oauthRecovery.stop()
+				svc.oauthRecovery.pollTime = time.Second
+				guard.verifyErr = infraerrors.Conflict(reason, "synthetic transient recovery state")
+				flight, handled := svc.oauthRecovery.begin(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
+				require.True(t, handled)
+				const count = 6
+				results := make(chan error, count)
+				for range count {
+					go func() {
+						_, err := svc.RecoverOpenAIOAuth401(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
+						results <- err
+					}()
+				}
+				guard.complete(OpenAIOAuthReauthStatusSucceeded)
+				time.Sleep(time.Second)
+				synctest.Wait()
+				require.Empty(t, results, "one failed verification must not broadcast failure to all six requests")
+				require.True(t, svc.oauthRecovery.active(account.ID))
+				require.Equal(t, 1, guard.verifies)
+				guard.mu.Lock()
+				guard.verifyErr = nil
+				guard.mu.Unlock()
+				time.Sleep(2 * time.Second)
+				synctest.Wait()
+				for range count {
+					require.NoError(t, <-results)
+				}
+				require.Equal(t, 2, guard.verifies)
+				require.Equal(t, 1, guard.creates)
+				require.NoError(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).err)
+			})
+		})
+	}
+}
+
+func TestOAuthRecoveryCachePublicationRetriesWithoutAnotherFreshProbe(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, guard, account := newOAuthRecoveryFixture(t)
+		defer svc.oauthRecovery.stop()
+		svc.oauthRecovery.pollTime = time.Second
+		cache := &oauthRecoverySnapshotCache{err: errors.New("temporary cache failure")}
+		svc.schedulerSnapshot = &SchedulerSnapshotService{cache: cache}
+		_, handled := svc.oauthRecovery.begin(context.Background(), account, oauthRecoveryTest401)
+		require.True(t, handled)
+		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		result := make(chan error, 1)
+		go func() {
+			_, err := svc.RecoverOpenAIOAuth401(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
+			result <- err
+		}()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.Empty(t, result)
+		require.Equal(t, 1, guard.verifies)
+		cache.err = nil
+		time.Sleep(2 * time.Second)
+		require.NoError(t, <-result)
+		require.Equal(t, 1, guard.verifies)
+	})
+}
+
+func TestOAuthRecoveryFailedAttemptCanObserveNextTaskWithinSameRequestBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, guard, account := newOAuthRecoveryFixture(t)
+		defer svc.oauthRecovery.stop()
+		svc.oauthRecovery.pollTime = time.Second
+		guard.allowFailedRetry = true
+		ctx := WithOpenAIOAuthRecoveryBudget(context.Background())
+		flight, handled := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
+		require.True(t, handled)
+		result := make(chan error, 1)
+		go func() {
+			_, err := svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
+			result <- err
+		}()
+		synctest.Wait()
+		time.Sleep(8 * time.Second)
+		guard.complete(OpenAIOAuthReauthStatusFailed)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.Empty(t, result)
+		require.True(t, svc.oauthRecovery.active(account.ID))
+		guard.mu.Lock()
+		guard.previousTasks = map[int64]OpenAIOAuthReauthTask{guard.task.ID: guard.task}
+		guard.task.ID++
+		guard.task.Status = OpenAIOAuthReauthStatusRunning
+		guard.mu.Unlock()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		require.Equal(t, guard.task.ID, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).taskID)
+		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		time.Sleep(time.Second)
+		require.NoError(t, <-result)
+		require.Equal(t, 1, guard.creates, "the waiting connection must not create another login task")
+	})
+}
+
+func TestOAuthRecoveryRejectedCredentialWaitsWithoutRepeatedAuthProbes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, guard, account := newOAuthRecoveryFixture(t)
+		defer svc.oauthRecovery.stop()
+		svc.oauthRecovery.pollTime = time.Second
+		guard.verifyErr = ErrOAuthRecoveryCredentialsRejected
+		flight, _ := svc.oauthRecovery.begin(context.Background(), account, oauthRecoveryTest401)
+		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		start := time.Now()
+		_, err := svc.RecoverOpenAIOAuth401(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
+		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
+		require.Equal(t, time.Minute, time.Since(start))
+		require.Equal(t, 1, guard.verifies)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.False(t, svc.oauthRecovery.active(account.ID), "no waiter may leave an unbounded fresh-probe loop")
+		require.ErrorIs(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, flight).err, ErrOAuthRecoveryTimeout)
+	})
+}
+
+type oauthRecoverySnapshotSwapGuard struct {
+	*oauthRecoveryTestGuard
+	first bool
+}
+
+func (g *oauthRecoverySnapshotSwapGuard) VerifyImmediateReauthSnapshot(ctx context.Context, accountID int64) (*Account, error) {
+	snapshot, err := g.oauthRecoveryTestGuard.VerifyImmediateReauthSnapshot(ctx, accountID)
+	if err == nil && !g.first {
+		g.first = true
+		g.repo.mu.Lock()
+		g.repo.accounts[0].Credentials = map[string]any{"access_token": "replacement-after-probe", "refresh_token": "replacement-refresh"}
+		g.repo.mu.Unlock()
+	}
+	return snapshot, err
+}
+
+func TestOAuthRecoverySnapshotCASRequiresReplacementCredentialsToBeProbed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, guard, account := newOAuthRecoveryFixture(t)
+		defer svc.oauthRecovery.stop()
+		svc.oauthRecovery.pollTime = time.Second
+		svc.oauthRecovery.guard = &oauthRecoverySnapshotSwapGuard{oauthRecoveryTestGuard: guard}
+		flight, _ := svc.oauthRecovery.begin(context.Background(), account, oauthRecoveryTest401)
+		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		result := make(chan error, 1)
+		go func() {
+			result <- svc.oauthRecovery.wait(WithOpenAIOAuthRecoveryBudget(context.Background()), []*oauthRecoveryFlight{flight})
+		}()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.Empty(t, result, "snapshot A's proof must never publish unprobed credential B")
+		require.Equal(t, 1, guard.verifies)
+		time.Sleep(2 * time.Second)
+		require.NoError(t, <-result)
+		require.Equal(t, 2, guard.verifies)
+	})
+}
+
+func TestOAuthRecoveryManualStopEndsWaitWithoutClearingAccountPolicy(t *testing.T) {
+	for _, status := range []string{StatusDisabled, StatusError} {
+		t.Run(status, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, guard, account := newOAuthRecoveryFixture(t)
+				defer svc.oauthRecovery.stop()
+				svc.oauthRecovery.pollTime = time.Second
+				flight, _ := svc.oauthRecovery.begin(context.Background(), account, oauthRecoveryTest401)
+				result := make(chan error, 1)
+				go func() {
+					result <- svc.oauthRecovery.wait(WithOpenAIOAuthRecoveryBudget(context.Background()), []*oauthRecoveryFlight{flight})
+				}()
+				synctest.Wait()
+				guard.repo.mu.Lock()
+				guard.repo.accounts[0].Status = status
+				guard.repo.accounts[0].ErrorMessage = "account deactivated or manually disabled"
+				guard.repo.mu.Unlock()
+				time.Sleep(time.Second)
+				require.ErrorIs(t, <-result, ErrOAuthRecoveryFailed)
+				require.Equal(t, 0, guard.verifies)
+				current, err := guard.repo.GetByID(context.Background(), account.ID)
+				require.NoError(t, err)
+				require.Equal(t, status, current.Status)
 			})
 		})
 	}
@@ -356,7 +555,7 @@ func TestOAuthRecoveryWaitObservesOnlyCurrentTargets(t *testing.T) {
 	require.True(t, oauthRecoveryAccountExcluded(ctx, second.accountID))
 }
 
-func TestOAuthRecoveryPoolWaitKeepsOtherTasksUntilTheirOwnDeadline(t *testing.T) {
+func TestOAuthRecoveryPoolWaitKeepsAllTasksWithinRequestDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, account := newOAuthRecoveryFixture(t)
 		defer svc.oauthRecovery.stop()
@@ -374,12 +573,13 @@ func TestOAuthRecoveryPoolWaitKeepsOtherTasksUntilTheirOwnDeadline(t *testing.T)
 		require.Equal(t, 1, snapshotOAuthRecoveryFlight(r, later).waiters)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		require.Zero(t, snapshotOAuthRecoveryFlight(r, earlier).waiters)
+		require.Equal(t, 1, snapshotOAuthRecoveryFlight(r, earlier).waiters)
 		require.Equal(t, 1, snapshotOAuthRecoveryFlight(r, later).waiters)
-		require.Empty(t, result, "the other task still has fifty seconds left")
+		require.Empty(t, result, "task age must not shorten this request's wait")
 		time.Sleep(5 * time.Second)
 		r.finish(later, nil)
 		require.NoError(t, <-result)
+		require.Zero(t, snapshotOAuthRecoveryFlight(r, earlier).waiters)
 		require.Zero(t, snapshotOAuthRecoveryFlight(r, later).waiters)
 		requireOAuthRecoveryFlights(t, []*oauthRecoveryFlight{earlier, later, later}, targets)
 		requireOAuthRecoveryFlights(t, []*oauthRecoveryFlight{earlier, later}, snapshotOAuthRecoveryBudgetFlights(ctx, false))
@@ -455,7 +655,6 @@ func TestOAuthRecoverySameCredentialsAdoptNewDurableTask(t *testing.T) {
 				require.Equal(t, first.token, second.token)
 				secondState := snapshotOAuthRecoveryFlight(svc.oauthRecovery, second)
 				require.Equal(t, firstState.taskID+1, secondState.taskID)
-				require.Equal(t, created.Add(OpenAIOAuthRecoveryWait), secondState.deadline)
 				late, handled := svc.oauthRecovery.begin(WithOpenAIOAuthRecoveryBudget(context.Background()), account, oauthRecoveryTest401)
 				require.True(t, handled)
 				require.Same(t, second, late)
@@ -468,11 +667,18 @@ func TestOAuthRecoverySameCredentialsAdoptNewDurableTask(t *testing.T) {
 					_, err = svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
 				}
 				require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
-				require.Equal(t, 15*time.Second, time.Since(start))
-				require.True(t, svc.oauthRecovery.active(account.ID))
-				guard.complete(OpenAIOAuthReauthStatusSucceeded)
+				require.Equal(t, time.Minute, time.Since(start))
+				time.Sleep(time.Second)
+				synctest.Wait()
 				<-second.done
-				require.NoError(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, second).err)
+				require.ErrorIs(t, snapshotOAuthRecoveryFlight(svc.oauthRecovery, second).err, ErrOAuthRecoveryTimeout)
+				freshCtx := WithOpenAIOAuthRecoveryBudget(context.Background())
+				require.True(t, svc.QueueOpenAIOAuthRecoveryForAccount(freshCtx, account.ID))
+				fresh := lookupOAuthRecoveryFlight(svc.oauthRecovery, account.ID)
+				require.NotSame(t, second, fresh, "the same durable task needs a new observer after an idle timeout")
+				guard.complete(OpenAIOAuthReauthStatusSucceeded)
+				_, err = svc.WaitForOpenAIOAuthRecovery(freshCtx, nil, "gpt-test")
+				require.NoError(t, err)
 				require.Equal(t, 1, guard.verifies)
 			})
 		})

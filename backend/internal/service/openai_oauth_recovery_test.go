@@ -60,14 +60,27 @@ func (r *oauthRecoveryTestRepo) SetError(_ context.Context, _ int64, _ string) e
 }
 
 type oauthRecoveryTestGuard struct {
-	mu         sync.Mutex
-	repo       *oauthRecoveryTestRepo
-	task       OpenAIOAuthReauthTask
-	creates    int
-	verifies   int
-	seenToken  string
-	requestErr error
-	verifyErr  error
+	mu               sync.Mutex
+	repo             *oauthRecoveryTestRepo
+	task             OpenAIOAuthReauthTask
+	creates          int
+	verifies         int
+	seenToken        string
+	requestErr       error
+	verifyErr        error
+	allowFailedRetry bool
+	previousTasks    map[int64]OpenAIOAuthReauthTask
+}
+
+func (g *oauthRecoveryTestGuard) CheckImmediateReauthAvailable(context.Context, int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Existing terminal-failure fixtures model a disabled recovery policy.
+	// Recoverable failed attempts opt in to observing the next durable task.
+	if g.task.Status == OpenAIOAuthReauthStatusFailed && !g.allowFailedRetry {
+		return ErrOAuthRecoveryUnavailable
+	}
+	return nil
 }
 
 func (g *oauthRecoveryTestGuard) RequestImmediateReauth(_ context.Context, account *Account) (*OpenAIOAuthReauthTask, error) {
@@ -86,6 +99,7 @@ func (g *oauthRecoveryTestGuard) RequestImmediateReauth(_ context.Context, accou
 				return nil, nil
 			}
 			g.repo.accounts[i].Status = StatusError
+			g.repo.accounts[i].ErrorMessage = ImmediateOAuthRecoveryErrorMessage
 		}
 	}
 	g.repo.mu.Unlock()
@@ -103,9 +117,12 @@ func (g *oauthRecoveryTestGuard) GetImmediateReauthTask(_ context.Context, accou
 	return &task, nil
 }
 
-func (g *oauthRecoveryTestGuard) GetImmediateReauthTaskByID(_ context.Context, _ int64) (*OpenAIOAuthReauthTask, error) {
+func (g *oauthRecoveryTestGuard) GetImmediateReauthTaskByID(_ context.Context, id int64) (*OpenAIOAuthReauthTask, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if previous, ok := g.previousTasks[id]; ok {
+		return &previous, nil
+	}
 	task := g.task
 	return &task, nil
 }
@@ -115,6 +132,17 @@ func (g *oauthRecoveryTestGuard) VerifyImmediateReauth(context.Context, int64) e
 	defer g.mu.Unlock()
 	g.verifies++
 	return g.verifyErr
+}
+
+func (g *oauthRecoveryTestGuard) VerifyImmediateReauthSnapshot(ctx context.Context, accountID int64) (*Account, error) {
+	snapshot, err := g.repo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.VerifyImmediateReauth(ctx, accountID); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
 }
 
 func (g *oauthRecoveryTestGuard) complete(status string) {
@@ -217,18 +245,16 @@ func TestOAuthRecoveryTimeoutAndCancellationDoNotCancelLogin(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
 			}
-			require.True(t, svc.oauthRecovery.active(account.ID))
+			require.Equal(t, OpenAIOAuthReauthStatusRunning, guard.task.Status, "request timeout must leave the durable login running")
 			guard.complete(OpenAIOAuthReauthStatusSucceeded)
-			// The shared window has expired, so a new request cannot wait for
-			// another minute. It may consume the outcome once verification ends.
+			// This request's window expired without cancelling the login. A new
+			// request can consume the successfully verified outcome.
 			select {
 			case <-flight.done:
 			case <-time.After(time.Second):
 				t.Fatal("recovery observer did not finish")
 			}
-			freshCtx := WithOpenAIOAuthRecoveryBudget(context.Background())
-			_, err = svc.RecoverOpenAIOAuth401(freshCtx, account, oauthRecoveryTest401)
-			require.NoError(t, err)
+			require.Equal(t, OpenAIOAuthReauthStatusSucceeded, guard.task.Status)
 		})
 	}
 }
@@ -238,7 +264,7 @@ func TestOAuthRecoveryRejectsFailedLoginAndFailedFreshProbe(t *testing.T) {
 		t.Run(map[bool]string{false: "login", true: "probe"}[verifyFail], func(t *testing.T) {
 			svc, guard, account := newOAuthRecoveryFixture(t)
 			if verifyFail {
-				guard.verifyErr = errors.New("credential rejected")
+				guard.verifyErr = ErrOAuthRecoveryUnavailable
 			}
 			ctx := WithOpenAIOAuthRecoveryBudget(context.Background())
 			_, handled := svc.oauthRecovery.begin(ctx, account, oauthRecoveryTest401)
@@ -278,6 +304,7 @@ func TestOAuthRecoveryGroupIsolationAndRestartDiscovery(t *testing.T) {
 	// A durable task already exists, but this process has no local flight.
 	guard.repo.mu.Lock()
 	guard.repo.accounts[0].Status = StatusError
+	guard.repo.accounts[0].ErrorMessage = ImmediateOAuthRecoveryErrorMessage
 	guard.repo.mu.Unlock()
 	ctx := context.WithValue(WithOpenAIOAuthRecoveryBudget(context.Background()), oauthRecoveryDiscoveryKey{}, true)
 	unrelated := int64(9)
@@ -474,14 +501,16 @@ func TestOAuthRecoveryExactlyOneMinuteAndFreshTurnBudget(t *testing.T) {
 		_, err := svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
 		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
 		require.Equal(t, time.Minute, time.Since(start))
-		guard.complete(OpenAIOAuthReauthStatusSucceeded)
-		synctest.Wait()
-		<-flight.done
 		// A ready flight does not make an expired request eligible again.
 		_, err = svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
 		require.ErrorIs(t, err, ErrOAuthRecoveryTimeout)
 		ctx = NewOpenAIOAuthRecoveryBudget(ctx)
-		_, err = svc.RecoverOpenAIOAuth401(ctx, account, oauthRecoveryTest401)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		<-flight.done
+		require.True(t, svc.QueueOpenAIOAuthRecoveryForAccount(ctx, account.ID))
+		guard.complete(OpenAIOAuthReauthStatusSucceeded)
+		_, err = svc.WaitForOpenAIOAuthRecovery(ctx, nil, "gpt-test")
 		require.NoError(t, err)
 	})
 }
