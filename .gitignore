@@ -155,6 +155,7 @@ docs/*
 !docs/proxy-exit-geolocation.md
 !docs/codeq-release.md
 !docs/account-rotation.md
+!docs/account-cache-scheduling.md
 !docs/openai-2fa-dual-oauth.md
 !docs/openai-siwc.md
 !docs/admin-api-keys.md

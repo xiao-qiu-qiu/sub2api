@@ -626,6 +626,28 @@ func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeout(c *gin.Context, ac
 	return h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
 }
 
+// AcquireAccountSlotWithWaitPlan enforces the selected account's queue limit
+// and releases its waiter on acquisition, cancellation, timeout or rotation.
+func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitPlan(c *gin.Context, plan *service.AccountWaitPlan, isStream bool, streamStarted *bool) (func(), error) {
+	if plan == nil {
+		return nil, fmt.Errorf("account wait plan is required")
+	}
+	ctx := c.Request.Context()
+	release, acquired, err := h.TryAcquireAccountSlot(ctx, plan.AccountID, plan.MaxConcurrency)
+	if err != nil || acquired {
+		return release, err
+	}
+	canWait, err := h.IncrementAccountWaitCount(ctx, plan.AccountID, plan.MaxWaiting)
+	if err != nil {
+		return nil, err
+	}
+	if !canWait {
+		return nil, &WaitQueueFullError{SlotType: "account"}
+	}
+	defer h.DecrementAccountWaitCount(ctx, plan.AccountID)
+	return h.AcquireAccountSlotWithWaitTimeout(c, plan.AccountID, plan.MaxConcurrency, plan.Timeout, isStream, streamStarted)
+}
+
 // nextBackoff 计算下一次退避时间
 // 性能优化：使用指数退避 + 随机抖动，避免惊群效应
 // current: 当前退避时间

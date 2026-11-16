@@ -87,7 +87,7 @@ func (s *OpenAIGatewayService) OpenAIRPMSchedulable(ctx context.Context, account
 	if !state.Enabled {
 		return true, state, nil
 	}
-	if account.CheckRPMSchedulability(state.Current) == WindowCostNotSchedulable {
+	if state.Current >= state.Limit {
 		return false, state, nil
 	}
 	if movable && state.Utilization() >= accountRPMWarningRatio {

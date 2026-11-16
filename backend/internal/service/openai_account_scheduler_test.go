@@ -1211,7 +1211,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_EnabledUsesAdvancedPrev
 	require.True(t, decision.StickyPreviousHit)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionInTopKUsesStickyFirst(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionRetainsCacheOwner(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
 	ctx := context.Background()
@@ -1271,9 +1271,9 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionIn
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
 	require.Equal(t, int64(37101), selection.Account.ID)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
 	require.True(t, decision.StickySessionHit)
-	require.Equal(t, 2, decision.TopK)
+	require.Zero(t, decision.TopK, "existing cache owners bypass the weighted race")
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
@@ -1389,7 +1389,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_AccountModelRouteDBRech
 	}
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedPreviousRequiresMovableContext(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedPreviousRetainsOwnerEvenWhenMovable(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
 	ctx := context.Background()
@@ -1480,9 +1480,9 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedPreviousR
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(37112), selection.Account.ID)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	require.False(t, decision.StickyPreviousHit)
+	require.Equal(t, int64(37111), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerPreviousResponse, decision.Layer)
+	require.True(t, decision.StickyPreviousHit)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
@@ -2502,7 +2502,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyKeepsS
 	require.True(t, decision.StickySessionHit)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTTFT(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyKeepsOwnerDespiteSlowTTFT(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10101)
 	accounts := []Account{
@@ -2566,9 +2566,9 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTT
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(21102), selection.Account.ID)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	require.False(t, decision.StickySessionHit)
+	require.Equal(t, int64(21101), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
 	require.Equal(t, int64(21101), cache.sessionBindings["openai:session_hash_sticky_ttft"])
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
@@ -2625,7 +2625,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByEr
 	}
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyEscapes(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyWaitsDespiteEscapeEnabled(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10103)
 	accounts := []Account{
@@ -2659,10 +2659,12 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyEscape
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(21302), selection.Account.ID)
-	require.Nil(t, selection.WaitPlan)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	require.False(t, decision.StickySessionHit)
+	require.Equal(t, int64(21301), selection.Account.ID)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, 45*time.Second, selection.WaitPlan.Timeout)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
+	require.Equal(t, int64(21301), cache.sessionBindings["openai:session_hash_sticky_busy_escape"])
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}

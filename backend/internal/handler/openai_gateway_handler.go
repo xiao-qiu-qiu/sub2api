@@ -3378,11 +3378,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return nil
 	}
 
+	c.Request = c.Request.WithContext(ctx)
 	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(
 		c,
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	wsSessionAffinitySeed := uuid.NewString()
+	service.BindOpenAIAccountSessionAffinity(c, firstMessage, true, wsSessionAffinitySeed)
+	ctx = c.Request.Context()
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -3781,6 +3785,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			BeforeRequestWithClientPayload: func(turn int, payload, clientPayload []byte, originalModel string) error {
+				service.BindOpenAIAccountSessionAffinity(c, clientPayload, true, wsSessionAffinitySeed)
 				if turn > 1 {
 					oauthRecoveryTurns.beginTurn()
 				}
@@ -3891,7 +3896,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return newOpenAIWSLocalAdmissionCloseError(cyberSessionBlockedClientMsg)
 				}
-				turnBillingCtx := turnBillingAPIKeys.begin(ctx, h.apiKeyService, turn, apiKey)
+				affinity, _ := service.AccountSessionAffinityFromContext(c.Request.Context())
+				turnAffinityCtx := service.WithAccountSessionAffinity(ctx, affinity)
+				turnBillingCtx := turnBillingAPIKeys.begin(turnAffinityCtx, h.apiKeyService, turn, apiKey)
 				// MapRequestModel 已在当前 turn 的 payload 解析阶段完成。这里
 				// 再用最终出站模型做一次权威资格终检，确保账号被禁用、移组、
 				// 到期或该模型票据失效后，不会先抢槽再把请求交给旧账号。
@@ -4122,6 +4129,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			hooks.InitialFrameArrivedAt = firstFrameArrivedAt
 			oauthRecoveryFallbackErr = nil
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
+			// The relay has joined before returning. Carry this turn's immutable
+			// identity into a same-account retry or a new account-selection pass.
+			affinity, _ := service.AccountSessionAffinityFromContext(c.Request.Context())
+			ctx = service.WithAccountSessionAffinity(ctx, affinity)
 			if err == nil {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
 				return

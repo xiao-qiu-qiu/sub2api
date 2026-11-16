@@ -1264,7 +1264,7 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyWaitPlan(t *testing.T) {
 	}
 }
 
-func TestOpenAISelectAccountWithLoadAwareness_StickyCapacitySpilloverKeepsBinding(t *testing.T) {
+func TestOpenAISelectAccountWithLoadAwareness_StickyFullQueueKeepsOwnerAndBinding(t *testing.T) {
 	sessionHash := "sticky-spillover"
 	groupID := int64(1)
 	repo := stubOpenAIAccountRepo{
@@ -1299,9 +1299,12 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyCapacitySpilloverKeepsBindin
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(2), selection.Account.ID, "capacity spillover should use the other account for this request")
-	require.True(t, selection.Acquired)
-	require.Equal(t, int64(1), cache.sessionBindings["openai:"+sessionHash], "capacity spillover must not migrate the durable sticky binding")
+	require.Equal(t, int64(1), selection.Account.ID, "a full queue cannot redirect the conversation to a cold account")
+	require.False(t, selection.Acquired)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, 1, selection.WaitPlan.MaxWaiting, "admission must still enforce the configured queue capacity")
+	require.Equal(t, 10*time.Second, selection.WaitPlan.Timeout)
+	require.Equal(t, int64(1), cache.sessionBindings["openai:"+sessionHash])
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}

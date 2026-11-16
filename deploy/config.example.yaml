@@ -543,9 +543,9 @@ gateway:
       upstream_cost: 0.0
   # OpenAI 高级调度器补充配置
   openai_scheduler:
-    # 是否允许 session_hash sticky 在账号健康度恶化时临时逃逸；false 可一键回退旧行为
+    # 是否允许 session_hash sticky 在近期错误率过高时临时逃逸
     sticky_escape_enabled: true
-    # TTFT EWMA 超过该阈值（毫秒）时跳过 sticky，默认 15s，避免轻微抖动就逃逸
+    # 保留旧配置兼容；从 2.19.66 起，TTFT 不再单独触发会话换号
     sticky_escape_ttft_ms: 15000
     # 错误率 EWMA 超过该阈值时跳过 sticky，默认 0.5，仅在明显降级时触发
     sticky_escape_error_rate: 0.5

@@ -312,6 +312,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	} else if apiKey.Group != nil {
 		platform = apiKey.Group.Platform
 	}
+	service.BindGatewayAccountSessionAffinity(c, apiKey, parsedReq, platform)
 	sessionKey := sessionHash
 	if platform == service.PlatformGemini && sessionHash != "" {
 		sessionKey = "gemini:" + sessionHash
@@ -1052,6 +1053,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						ctx := context.WithValue(c.Request.Context(), ctxkey.ForcePlatform, "")
 						c.Request = c.Request.WithContext(ctx)
 						currentAPIKey = fallbackAPIKey
+						service.BindGatewayAccountSessionAffinity(c, currentAPIKey, parsedReq, fallbackGroup.Platform)
 						currentSubscription = nil
 						fallbackUsed = true
 						retryWithFallback = true

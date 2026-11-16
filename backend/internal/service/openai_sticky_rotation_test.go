@@ -281,14 +281,23 @@ func TestOpenAIStickyRotationWaitBypassesTicketPriority(t *testing.T) {
 	}
 }
 
-func TestOpenAIStickyRotationSoftEscapeStillAppliesWithoutWait(t *testing.T) {
+func TestOpenAIStickyRotationCacheOwnerYieldsOnlyToErrorHealth(t *testing.T) {
 	for _, strategy := range []string{"ttft", "error_rate", "latency", "rebalance", "full"} {
 		t.Run(strategy, func(t *testing.T) {
 			_, scheduler, _, req := newStickyRotationSoftEscapeFixture(t, strategy)
 			selection, escaped, err := scheduler.selectBySessionHash(t.Context(), req)
 			require.NoError(t, err)
-			require.Nil(t, selection)
-			require.True(t, escaped)
+			if strategy == "error_rate" {
+				require.Nil(t, selection)
+				require.True(t, escaped)
+			} else {
+				require.NotNil(t, selection)
+				require.EqualValues(t, 1, selection.Account.ID)
+				require.False(t, escaped)
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+			}
 		})
 	}
 }

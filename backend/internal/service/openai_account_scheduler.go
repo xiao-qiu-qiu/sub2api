@@ -429,10 +429,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
 	ctx = s.service.withAccountRotationSession(ctx, req.GroupID, req.SessionHash)
 	ctx = WithAccountRotationSticky(ctx, req.StickyAccountID, req.StickyPreviousAccountID)
-	if req.StickyWeighted && (s.service.openAIStickyWaitProtected(ctx, req.StickyPreviousAccountID) ||
-		s.service.openAIStickyWaitProtected(ctx, req.StickyAccountID)) {
-		// A confirmed HOLD/recovery keeps the existing owner out of the
-		// weighted race. The ordinary sticky paths retain all hard filters.
+	if req.StickyWeighted && req.StickyAccountID <= 0 && req.SessionHash != "" && s.service.cache != nil {
+		req.StickyAccountID, _ = s.service.getStickySessionAccountID(ctx, req.GroupID, req.SessionHash)
+	}
+	if req.StickyWeighted && (req.StickyPreviousAccountID > 0 || req.StickyAccountID > 0 || req.PreviousResponseID != "") {
+		// Existing conversations retain their cache owner. The ordinary sticky
+		// paths still apply hard eligibility, cooldown and health checks before
+		// falling back to the scored pool.
 		req.StickyWeighted = false
 	}
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
@@ -574,7 +577,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			}
 		}
 		if selection != nil && selection.Account != nil && selection.Account.IsOpenAIOAuth() {
-			allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, selection.Account, req.PreviousResponseCanMove)
+			allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, selection.Account, false)
 			if rpmErr != nil {
 				if selection.ReleaseFunc != nil {
 					selection.ReleaseFunc()
@@ -733,8 +736,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		}
 	}
 	if account.IsOpenAIOAuth() {
-		movable := req.PreviousResponseCanMove || strings.TrimSpace(req.PreviousResponseID) == ""
-		allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, account, movable)
+		allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, account, false)
 		if rpmErr != nil {
 			return nil, false, rpmErr
 		}
@@ -771,21 +773,11 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		}
 		return nil, true, nil
 	}
-	// Ordinary affinity is a preference. A current measured latency penalty
-	// must enter the same scored pool as a freely routed request, independently
-	// of the optional EWMA/capacity escape setting. Ownership paths stay pinned.
-	if !rotationWaiting && s.shouldYieldPriorityLatencySticky(req, account) {
-		return nil, true, nil
-	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
 	if rotationWaiting {
 		// Performance, rebalance and capacity escapes cannot redirect a
 		// request already assigned to this account's rest/recovery queue.
 		escapeCfg.enabled = false
-	}
-	if escapeCfg.enabled && s.shouldRebalancePrioritySticky(ctx, req, account) {
-		slog.Info("sticky_escape_triggered", "account_id", accountID, "reason", "priority_capacity_imbalance")
-		return nil, true, nil
 	}
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyForRequest(req, accountID, escapeCfg); shouldEscape && !req.DisableStickyEscape && !req.EncryptedReasoning {
 		slog.Info("sticky_escape_triggered",
@@ -819,22 +811,12 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	cfg := s.service.schedulingConfig()
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	if s.service.concurrencyService != nil {
-		if escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
-			errorRate, ttft, _ := s.stats.snapshot(accountID)
-			slog.Info("sticky_escape_triggered",
-				"account_id", accountID,
-				"reason", "concurrency_full",
-				"error_rate", errorRate,
-				"ttft", ttft,
-			)
-			return nil, true, nil
-		}
 		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 			Account: account,
 			WaitPlan: &AccountWaitPlan{
 				AccountID:      accountID,
 				MaxConcurrency: account.Concurrency,
-				Timeout:        cfg.StickySessionWaitTimeout,
+				Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
 				MaxWaiting:     cfg.StickySessionMaxWaiting,
 			},
 		}), false, nil
@@ -877,10 +859,7 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccountAt(accountID in
 	if !cfg.enabled || s == nil || s.stats == nil || accountID <= 0 {
 		return "", 0, 0, false
 	}
-	errorRate, ttft, hasTTFT := s.stats.snapshotAt(accountID, now)
-	if hasTTFT && ttft > cfg.ttftMs {
-		return "ttft", errorRate, ttft, true
-	}
+	errorRate, ttft, _ = s.stats.snapshotAt(accountID, now)
 	if errorRate > cfg.errorRate {
 		return "error_rate", errorRate, ttft, true
 	}
@@ -948,8 +927,8 @@ func isOpenAIAccountCandidateBetter(left openAIAccountCandidateScore, right open
 	if left.account.Priority != right.account.Priority {
 		return left.account.Priority < right.account.Priority
 	}
-	leftLoad := accountLoadPreferenceRate(left.account, left.loadInfo.LoadRate)
-	rightLoad := accountLoadPreferenceRate(right.account, right.loadInfo.LoadRate)
+	leftLoad := accountSchedulingLoadRate(left.account, left.loadInfo)
+	rightLoad := accountSchedulingLoadRate(right.account, right.loadInfo)
 	if leftLoad != rightLoad {
 		return leftLoad < rightLoad
 	}
@@ -1180,6 +1159,10 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	hasTTFTSample := false
 	for i := range candidates {
 		candidate := &candidates[i]
+		if candidate.loadInfo.ReservedConcurrency > 0 {
+			// Keep alternate capacity available even when legacy Top-K is small.
+			plan.includeOverflowFallback = true
+		}
 		candidate.priority = openAIAccountSchedulingPriority(candidate.account)
 		if candidate.priority < minPriority {
 			minPriority = candidate.priority
@@ -1263,7 +1246,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		if maxPriority > minPriority {
 			priorityFactor = 1 - float64(item.priority-minPriority)/float64(maxPriority-minPriority)
 		}
-		loadFactor := 1 - clamp01(float64(accountLoadPreferenceRate(item.account, item.loadInfo.LoadRate))/100.0)
+		loadFactor := 1 - clamp01(float64(accountSchedulingLoadRate(item.account, item.loadInfo))/100.0)
 		queueFactor := 1 - clamp01(float64(item.loadInfo.WaitingCount)/float64(maxWaiting))
 		errorFactor := 1 - clamp01(item.errorRate)
 		ttftFactor := 0.5
@@ -1465,8 +1448,8 @@ func sortOpenAICompactRetryCandidates(pool []openAIAccountCandidateScore) []open
 		if a.account.Priority != b.account.Priority {
 			return a.account.Priority < b.account.Priority
 		}
-		aLoad := accountLoadPreferenceRate(a.account, a.loadInfo.LoadRate)
-		bLoad := accountLoadPreferenceRate(b.account, b.loadInfo.LoadRate)
+		aLoad := accountSchedulingLoadRate(a.account, a.loadInfo)
+		bLoad := accountSchedulingLoadRate(b.account, b.loadInfo)
 		if aLoad != bLoad {
 			return aLoad < bLoad
 		}
@@ -1663,8 +1646,7 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 			continue
 		}
 		if account.IsOpenAIOAuth() {
-			movable := req.PreviousResponseCanMove || strings.TrimSpace(req.PreviousResponseID) == ""
-			allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, account, movable)
+			allowed, _, rpmErr := s.service.OpenAIRPMSchedulable(ctx, account, false)
 			if rpmErr != nil {
 				return nil, rpmErr
 			}
@@ -1688,11 +1670,6 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 			if priorityLatencyOwnershipBound(req) {
 				return nil, denied
 			}
-			continue
-		}
-		// Primary scored candidates have already been tried. Do not reintroduce
-		// a measured slow ordinary affinity through this separate shortcut.
-		if !s.service.openAIStickyWaitProtected(ctx, account.ID) && s.shouldYieldPriorityLatencySticky(req, account) {
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
@@ -1720,7 +1697,7 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 				WaitPlan: &AccountWaitPlan{
 					AccountID:      account.ID,
 					MaxConcurrency: account.Concurrency,
-					Timeout:        cfg.StickySessionWaitTimeout,
+					Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
 					MaxWaiting:     cfg.StickySessionMaxWaiting,
 				},
 			}), nil
@@ -2934,7 +2911,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 			return nil, decision, err
 		} else if hit {
 			if selection != nil && selection.Account != nil && selection.Account.IsOpenAIOAuth() {
-				allowed, _, rpmErr := s.OpenAIRPMSchedulable(ctx, selection.Account, previousResponseCanMove)
+				allowed, _, rpmErr := s.OpenAIRPMSchedulable(ctx, selection.Account, false)
 				if rpmErr != nil {
 					if selection.ReleaseFunc != nil {
 						selection.ReleaseFunc()
@@ -3511,7 +3488,7 @@ func buildOpenAIAccountSchedulerScoreSnapshot(
 		if maxPriority > minPriority {
 			priorityFactor = 1 - float64(candidate.priority-minPriority)/float64(maxPriority-minPriority)
 		}
-		loadFactor := 1 - clamp01(float64(accountLoadPreferenceRate(candidate.account, candidate.loadInfo.LoadRate))/100.0)
+		loadFactor := 1 - clamp01(float64(accountSchedulingLoadRate(candidate.account, candidate.loadInfo))/100.0)
 		queueFactor := 1 - clamp01(float64(candidate.loadInfo.WaitingCount)/float64(maxWaiting))
 		errorFactor := 1.0
 		ttftFactor := 0.5

@@ -493,6 +493,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	if cachedContentBinding == nil {
 		sessionHash = extractGeminiCLISessionHash(c, body)
 	}
+	explicitGeminiSessionHash := sessionHash
 	if sessionHash == "" && cachedContentBinding == nil {
 		// Fallback: 使用通用的会话哈希生成逻辑（适用于其他客户端）
 		parsedReq, _ := service.ParseGatewayRequest(service.NewRequestBodyRef(body), domain.PlatformGemini)
@@ -509,6 +510,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	if sessionHash != "" {
 		sessionKey = "gemini:" + sessionHash
 	}
+	service.BindGatewayAccountSessionAffinity(c, apiKey, &service.ParsedRequest{Body: service.NewRequestBodyRef(body)}, effectiveAPIKeyPlatform(c, apiKey), explicitGeminiSessionHash)
 
 	// 查询粘性会话绑定的账号 ID（用于检测账号切换）
 	var sessionBoundAccountID int64

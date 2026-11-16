@@ -52,7 +52,7 @@ func TestOpenAIRPMExpiredReservationCannotChargeOldMinute(t *testing.T) {
 	require.ErrorIs(t, s.acquireOpenAIRPMForSend(ctx, account), ErrOpenAIRPMExhausted)
 }
 
-func TestOpenAIRPMSchedulerSpreadsLoadAndPreservesLastHeadroom(t *testing.T) {
+func TestOpenAIRPMSchedulerPreservesStickyHeadroomUntilHardLimit(t *testing.T) {
 	for _, mode := range []string{"legacy", "legacy_batch", "advanced"} {
 		t.Run(mode, func(t *testing.T) {
 			resetOpenAIAdvancedSchedulerSettingCacheForTest()
@@ -82,12 +82,12 @@ func TestOpenAIRPMSchedulerSpreadsLoadAndPreservesLastHeadroom(t *testing.T) {
 			}
 			selection, err := selectAccount()
 			require.NoError(t, err)
-			require.Equal(t, int64(2), selection.Account.ID, "near-full sticky account must yield to cooler capacity")
-			cache.counts[2] = 10
+			require.Equal(t, int64(1), selection.Account.ID, "soft RPM headroom must preserve the existing prompt cache")
+			cache.counts[1] = 10
 			selection, err = selectAccount()
 			require.NoError(t, err)
-			require.Equal(t, int64(1), selection.Account.ID, "80%% is a scheduling preference, not the hard cap")
-			cache.counts[1] = 10
+			require.Equal(t, int64(2), selection.Account.ID, "the strict RPM ceiling still permits immediate failover")
+			cache.counts[2] = 10
 			_, err = selectAccount()
 			require.ErrorIs(t, err, ErrOpenAIRPMExhausted)
 		})
@@ -182,5 +182,18 @@ func TestOpenAIRPMHeadroomAndSharedParent(t *testing.T) {
 	}
 	if allowed, _, err := s.TryAcquireOpenAIOAuthRPM(ctx, &accounts[1]); allowed || !errors.Is(err, ErrOpenAIRPMExhausted) {
 		t.Fatalf("stale scheduler snapshot must not bypass final reservation: %v", err)
+	}
+}
+
+func TestOpenAIRPMStickyOwnerCannotExceedStrictLimit(t *testing.T) {
+	for _, strategy := range []string{"strict", "tiered", "sticky_exempt"} {
+		t.Run(strategy, func(t *testing.T) {
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{"base_rpm": 10, "rpm_strategy": strategy}}
+			cache := &openAIRPMTestCache{counts: map[int64]int{1: 10}}
+			svc := &OpenAIGatewayService{rpmCache: cache}
+			allowed, _, err := svc.OpenAIRPMSchedulable(t.Context(), account, false)
+			require.NoError(t, err)
+			require.False(t, allowed, "OpenAI OAuth's strict send limit must already exclude a full sticky owner")
+		})
 	}
 }

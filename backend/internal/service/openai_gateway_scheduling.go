@@ -171,6 +171,7 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 	if c == nil {
 		return ""
 	}
+	BindOpenAIAccountSessionAffinity(c, body, false, "")
 
 	sessionID := explicitOpenAIRequestSessionID(c, body)
 	if sessionID == "" && len(body) > 0 {
@@ -1282,7 +1283,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				}
 				return nil, noAvailableOpenAISelectionError(requestedModel, false, openAISelectionFilterStats{}.summary(""))
 			}
-			allowed, rpmState, rpmErr := s.OpenAIRPMSchedulable(ctx, account, true)
+			allowed, rpmState, rpmErr := s.OpenAIRPMSchedulable(ctx, account, !stickyHit)
 			if rpmErr != nil {
 				return nil, rpmErr
 			}
@@ -1319,16 +1320,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return markStickySessionHit(selection, stickyHit), selectErr
 		}
 		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
-			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-			if waitingCount < cfg.StickySessionMaxWaiting {
-				selection, selectErr := s.newSelectionResult(ctx, account, false, nil, "", &AccountWaitPlan{
-					AccountID:      account.ID,
-					MaxConcurrency: account.Concurrency,
-					Timeout:        cfg.StickySessionWaitTimeout,
-					MaxWaiting:     cfg.StickySessionMaxWaiting,
-				})
-				return markStickySessionHit(selection, stickyHit), selectErr
-			}
+			selection, selectErr := s.newSelectionResult(ctx, account, false, nil, "", &AccountWaitPlan{
+				AccountID:      account.ID,
+				MaxConcurrency: account.Concurrency,
+				Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
+				MaxWaiting:     cfg.StickySessionMaxWaiting,
+			})
+			return markStickySessionHit(selection, stickyHit), selectErr
 		}
 		selection, selectErr := s.newSelectionResult(ctx, account, false, nil, "", &AccountWaitPlan{
 			AccountID:      account.ID,
@@ -1361,10 +1359,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	// ============ Layer 1: Sticky session ============
-	// A healthy sticky account whose bounded wait queue is full may be used as a
-	// one-request capacity spillover in Layer 2. Keep that spillover temporary:
-	// rewriting the durable binding here would make a short burst migrate the
-	// whole conversation to a cache-cold account.
+	// Capacity keeps a healthy owner in its bounded queue. Admission rejects a
+	// full queue without sending the conversation to a cache-cold account.
 	stickySpillover := false
 	if sessionHash != "" {
 		accountID := stickyAccountID
@@ -1374,9 +1370,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				clearSticky := shouldClearStickySession(account, requestedModel)
 				stickyRPMAllowed := true
 				if !clearSticky && account != nil && account.IsOpenAIOAuth() {
-					// Movable sessions yield at 80%; the load-aware fallback still
-					// admits them below the hard ceiling when other capacity is scarce.
-					stickyRPMAllowed, _, err = s.OpenAIRPMSchedulable(ctx, account, true)
+					// Existing cache owners keep the last RPM headroom; only the
+					// strict per-minute ceiling sends them to another account.
+					stickyRPMAllowed, _, err = s.OpenAIRPMSchedulable(ctx, account, false)
 					if err != nil {
 						return nil, err
 					}
@@ -1415,12 +1411,11 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							return markStickySessionHit(selection, true), nil
 						}
 
-						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting && (result == nil || !result.RotationBlocked) {
+						if result == nil || !result.RotationBlocked {
 							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, "", &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
+								Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							})
 							return markStickySessionHit(selection, true), selectErr
@@ -1547,8 +1542,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if a.account.Priority != b.account.Priority {
 				return a.account.Priority < b.account.Priority
 			}
-			aLoad := accountLoadPreferenceRate(a.account, a.loadInfo.LoadRate)
-			bLoad := accountLoadPreferenceRate(b.account, b.loadInfo.LoadRate)
+			aLoad := accountSchedulingLoadRate(a.account, a.loadInfo)
+			bLoad := accountSchedulingLoadRate(b.account, b.loadInfo)
 			if aLoad != bLoad {
 				return aLoad < bLoad
 			}
@@ -1571,8 +1566,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if a.account.Priority != b.account.Priority {
 				return a.account.Priority < b.account.Priority
 			}
-			aLoad := float64(openAIRPMEffectiveLoad(ctx, a.account, accountLoadPreferenceRate(a.account, a.loadInfo.LoadRate))) + feedback[a.account.ID]
-			bLoad := float64(openAIRPMEffectiveLoad(ctx, b.account, accountLoadPreferenceRate(b.account, b.loadInfo.LoadRate))) + feedback[b.account.ID]
+			aLoad := float64(openAIRPMEffectiveLoad(ctx, a.account, accountSchedulingLoadRate(a.account, a.loadInfo))) + feedback[a.account.ID]
+			bLoad := float64(openAIRPMEffectiveLoad(ctx, b.account, accountSchedulingLoadRate(b.account, b.loadInfo))) + feedback[b.account.ID]
 			return aLoad < bLoad
 		})
 		if rateOrder.enabled {

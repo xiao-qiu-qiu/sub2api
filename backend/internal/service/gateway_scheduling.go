@@ -205,15 +205,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
-				waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-				if waitingCount < cfg.StickySessionMaxWaiting {
-					return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-						AccountID:      account.ID,
-						MaxConcurrency: account.Concurrency,
-						Timeout:        cfg.StickySessionWaitTimeout,
-						MaxWaiting:     cfg.StickySessionMaxWaiting,
-					})
-				}
+				return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+					AccountID:      account.ID,
+					MaxConcurrency: account.Concurrency,
+					Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
+					MaxWaiting:     cfg.StickySessionMaxWaiting,
+				})
 			}
 			return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 				AccountID:      account.ID,
@@ -406,28 +403,20 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							}
 
 							if stickyCacheMissReason == "" && !rotationBlocked[stickyAccountID] {
-								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-								if waitingCount < cfg.StickySessionMaxWaiting {
-									// 会话数量限制检查（等待计划也需要占用会话配额）
-									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
-										stickyCacheMissReason = "session_limit"
-										// 会话限制已满，继续到负载感知选择
-									} else {
-										// 必须走 newSelectionResult 以 hydrate 账号凭证：
-										// 调度快照中的账号是精简版（OAuth token 等被剥离），
-										// 直接返回会导致后续转发缺少凭证而鉴权失败。
-										return s.newSelectionResult(ctx, stickyAccount, false, nil, &AccountWaitPlan{
-											AccountID:      stickyAccountID,
-											MaxConcurrency: stickyAccount.Concurrency,
-											Timeout:        cfg.StickySessionWaitTimeout,
-											MaxWaiting:     cfg.StickySessionMaxWaiting,
-										})
-									}
+								// Queue capacity is enforced atomically by admission;
+								// a full queue must not move this conversation's owner.
+								if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+									stickyCacheMissReason = "session_limit"
 								} else {
-									stickyCacheMissReason = "wait_queue_full"
+									// Hydrate snapshot credentials before forwarding.
+									return s.newSelectionResult(ctx, stickyAccount, false, nil, &AccountWaitPlan{
+										AccountID:      stickyAccountID,
+										MaxConcurrency: stickyAccount.Concurrency,
+										Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
+										MaxWaiting:     cfg.StickySessionMaxWaiting,
+									})
 								}
 							}
-							// 粘性账号槽位满且等待队列已满，继续使用负载感知选择
 						} else if !gatePass {
 							stickyCacheMissReason = "gate_check"
 						} else {
@@ -481,8 +470,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if a.account.Priority != b.account.Priority {
 						return a.account.Priority < b.account.Priority
 					}
-					aLoad := accountLoadPreferenceRate(a.account, a.loadInfo.LoadRate)
-					bLoad := accountLoadPreferenceRate(b.account, b.loadInfo.LoadRate)
+					aLoad := accountSchedulingLoadRate(a.account, a.loadInfo)
+					bLoad := accountSchedulingLoadRate(b.account, b.loadInfo)
 					if aLoad != bLoad {
 						return aLoad < bLoad
 					}
@@ -630,8 +619,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						)
 					}
 
-					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-					if !rotationBlocked[accountID] && waitingCount < cfg.StickySessionMaxWaiting {
+					if !rotationBlocked[accountID] {
 						// 会话数量限制检查（等待计划也需要占用会话配额）
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							// 会话限制已满，继续到 Layer 2
@@ -644,7 +632,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
+								Timeout:        stickySessionWaitTimeout(cfg.StickySessionWaitTimeout),
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							})
 						}
@@ -1671,16 +1659,16 @@ func filterByMinLoadRate(accounts []accountWithLoad) []accountWithLoad {
 	if len(accounts) == 0 {
 		return accounts
 	}
-	minLoadRate := accountLoadPreferenceRate(accounts[0].account, accounts[0].loadInfo.LoadRate)
+	minLoadRate := accountSchedulingLoadRate(accounts[0].account, accounts[0].loadInfo)
 	for _, acc := range accounts[1:] {
-		loadRate := accountLoadPreferenceRate(acc.account, acc.loadInfo.LoadRate)
+		loadRate := accountSchedulingLoadRate(acc.account, acc.loadInfo)
 		if loadRate < minLoadRate {
 			minLoadRate = loadRate
 		}
 	}
 	result := make([]accountWithLoad, 0, len(accounts))
 	for _, acc := range accounts {
-		if accountLoadPreferenceRate(acc.account, acc.loadInfo.LoadRate) == minLoadRate {
+		if accountSchedulingLoadRate(acc.account, acc.loadInfo) == minLoadRate {
 			result = append(result, acc)
 		}
 	}
@@ -1829,7 +1817,7 @@ func sameAccountWithLoadGroup(a, b accountWithLoad) bool {
 	if a.account.Priority != b.account.Priority {
 		return false
 	}
-	if accountLoadPreferenceRate(a.account, a.loadInfo.LoadRate) != accountLoadPreferenceRate(b.account, b.loadInfo.LoadRate) {
+	if accountSchedulingLoadRate(a.account, a.loadInfo) != accountSchedulingLoadRate(b.account, b.loadInfo) {
 		return false
 	}
 	return sameLastUsedAt(a.account.LastUsedAt, b.account.LastUsedAt)

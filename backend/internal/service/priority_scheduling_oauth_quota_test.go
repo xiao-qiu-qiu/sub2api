@@ -225,13 +225,12 @@ func TestPriorityOAuthQuotaConfigCompatibility(t *testing.T) {
 	}
 }
 
-func TestPriorityOAuthQuotaStickyEscapeRespectsOwnershipAndScope(t *testing.T) {
+func TestPriorityOAuthQuotaStickyKeepsExistingOwner(t *testing.T) {
 	for _, tc := range []struct {
 		name                                    string
 		preserve, disable, previous, otherGroup bool
-		want                                    bool
 	}{
-		{name: "movable_api", want: true}, {name: "hard_binding", preserve: true}, {name: "escape_disabled", disable: true}, {name: "previous_response", previous: true}, {name: "other_group", otherGroup: true},
+		{name: "movable_api"}, {name: "hard_binding", preserve: true}, {name: "escape_disabled", disable: true}, {name: "previous_response", previous: true}, {name: "other_group", otherGroup: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, oauth, signal := quotaPriorityFixture(time.Now())
@@ -256,8 +255,15 @@ func TestPriorityOAuthQuotaStickyEscapeRespectsOwnershipAndScope(t *testing.T) {
 				return ready
 			}, time.Second, time.Millisecond)
 			scheduler := &defaultOpenAIAccountScheduler{service: gateway, stats: newOpenAIAccountRuntimeStats()}
-			require.Equal(t, tc.want, scheduler.shouldRebalancePrioritySticky(context.Background(), req, api.account))
-			require.Equal(t, int64(2), cache.sessionBindings["openai:quota-session"], "checking escape never rewrites the binding")
+			selection, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
+			require.NoError(t, err)
+			require.False(t, escaped)
+			require.NotNil(t, selection)
+			require.EqualValues(t, 2, selection.Account.ID)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			require.Equal(t, int64(2), cache.sessionBindings["openai:quota-session"])
 		})
 	}
 }

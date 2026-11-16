@@ -420,17 +420,22 @@ func TestExcelBPSStickyNativeDoesNotWait(t *testing.T) {
 }
 
 func TestExcelBPSStickyRecoveredOwnerBypassesSoftEscape(t *testing.T) {
-	for _, strategy := range []string{"ttft", "weighted"} {
+	for _, strategy := range []string{"ttft", "weighted", "error_rate"} {
 		t.Run(strategy, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				f := newExcelBPSStickyFixture(t, true)
-				if strategy == "ttft" {
+				if strategy == "ttft" || strategy == "error_rate" {
 					f.svc.cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled = true
 					f.svc.cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs = 1000
 					f.svc.cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate = .5
 					f.svc.openaiAccountStats = newOpenAIAccountRuntimeStats()
 					slow := 20000
 					f.svc.openaiAccountStats.report(1, true, &slow)
+					if strategy == "error_rate" {
+						for range 5 {
+							f.svc.openaiAccountStats.report(1, false, nil)
+						}
+					}
 				} else {
 					f.svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true", "true")
 					f.svc.cfg.Gateway.OpenAIWS.LBTopK = 1
@@ -439,10 +444,15 @@ func TestExcelBPSStickyRecoveredOwnerBypassesSoftEscape(t *testing.T) {
 					f.repo.accounts[0].Priority = 100
 					require.True(t, f.svc.isOpenAIAdvancedSchedulerStickyWeightedEnabled(t.Context()))
 				}
-				// Prove this fixture would really leave the owner without a wait.
+				// Soft latency/weighting retain the cache owner; explicit errors
+				// can still escape until a confirmed cooldown recovery protects it.
 				baseline := <-f.start(WithOpenAIAccountCooldownBudget(t.Context()), "gpt-6-astra")
 				require.NoError(t, baseline.err)
-				require.EqualValues(t, 2, baseline.accountID, "fixture must exercise an active soft escape")
+				wantBaseline := int64(1)
+				if strategy == "error_rate" {
+					wantBaseline = 2
+				}
+				require.Equal(t, wantBaseline, baseline.accountID)
 				require.NoError(t, f.bindings.SetSessionAccountID(t.Context(), f.group, "openai:"+f.session, 1, time.Hour))
 				f.coolFor("10")
 				ctx, cancel := context.WithCancel(WithOpenAIAccountCooldownBudget(t.Context()))

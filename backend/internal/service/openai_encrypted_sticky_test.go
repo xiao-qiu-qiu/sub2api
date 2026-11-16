@@ -131,7 +131,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_EncryptedStickyKeepsErr
 	}
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_EncryptedStickyBusyStillEscapes(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_EncryptedStickyBusyKeepsCacheOwner(t *testing.T) {
 	ctx := WithOpenAIEncryptedReasoningAffinity(context.Background(), []byte(`{"input":[{"type":"reasoning","encrypted_content":"synthetic"}]}`))
 	groupID := int64(10103)
 	accounts := []Account{
@@ -165,22 +165,21 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_EncryptedStickyBusyStil
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(21302), selection.Account.ID)
-	require.Nil(t, selection.WaitPlan)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	require.False(t, decision.StickySessionHit)
+	require.Equal(t, int64(21301), selection.Account.ID)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
 }
-func TestEncryptedPriorityStickyCapacityStillRebalances(t *testing.T) {
+func TestEncryptedPriorityStickyCapacityKeepsOwner(t *testing.T) {
 	for _, test := range []struct {
 		name                        string
 		preserve, disable, previous bool
 		otherGroup                  int64
-		expectEscape                bool
 	}{
-		{name: "movable", expectEscape: true},
+		{name: "movable"},
 		{name: "task_owner", preserve: true},
 		{name: "escape_disabled", disable: true},
 		{name: "response_owner", previous: true},
@@ -207,17 +206,13 @@ func TestEncryptedPriorityStickyCapacityStillRebalances(t *testing.T) {
 			if test.previous {
 				req.PreviousResponseID = "resp-owner"
 			}
-			require.Equal(t, test.expectEscape, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
 			selected, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
 			require.NoError(t, err)
-			require.Equal(t, test.expectEscape, escaped)
-			if test.expectEscape {
-				require.Nil(t, selected)
-			} else {
-				require.NotNil(t, selected)
-				if selected.ReleaseFunc != nil {
-					selected.ReleaseFunc()
-				}
+			require.False(t, escaped)
+			require.NotNil(t, selected)
+			require.EqualValues(t, 1, selected.Account.ID)
+			if selected.ReleaseFunc != nil {
+				selected.ReleaseFunc()
 			}
 			require.Equal(t, int64(1), cache.sessionBindings["openai:existing-session"])
 		})

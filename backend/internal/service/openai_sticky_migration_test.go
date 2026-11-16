@@ -131,7 +131,7 @@ func (c *stickyMigrationTestCache) CompareAndSwapSessionAccountID(ctx context.Co
 
 func newStickyMigrationFixture(t *testing.T) (*OpenAIGatewayService, *defaultOpenAIAccountScheduler, *stickyMigrationTestCache, OpenAIAccountScheduleRequest) {
 	t.Helper()
-	svc, scheduler, _, req := newStickyRotationSoftEscapeFixture(t, "ttft")
+	svc, scheduler, _, req := newStickyRotationSoftEscapeFixture(t, "error_rate")
 	cfg := svc.settingService.prioritySchedulingConfig.config
 	cfg.Enabled = true
 	cfg.StickyMigrationOnSuccess = true
@@ -555,7 +555,7 @@ func TestOpenAIStickyMigrationTerminalProfitVetoSurvivesFailover(t *testing.T) {
 	require.Zero(t, cache.sets)
 }
 
-func TestOpenAIStickyMigrationCapacityEscapeWithEligibleProfitOwner(t *testing.T) {
+func TestOpenAIStickyMigrationCapacityWaitWithEligibleProfitOwner(t *testing.T) {
 	svc, scheduler, cache, req := newStickyMigrationFixture(t)
 	stats := newOpenAIAccountRuntimeStats()
 	svc.openaiAccountStats, scheduler.stats = stats, stats
@@ -570,13 +570,15 @@ func TestOpenAIStickyMigrationCapacityEscapeWithEligibleProfitOwner(t *testing.T
 	selected, _, err := scheduler.Select(ctx, req)
 	require.NoError(t, err)
 	require.NotNil(t, selected)
-	t.Cleanup(selected.ReleaseFunc)
-	require.EqualValues(t, 2, selected.Account.ID)
+	require.EqualValues(t, 1, selected.Account.ID)
+	require.NotNil(t, selected.WaitPlan)
+	require.False(t, selected.Acquired)
 	ctx = ContextWithSelectionPriorityRequest(ContextWithSelectionProfitGate(ctx, selected), selected)
 	_, veto, _ := svc.ProfitControlVetoLatest(ctx, selected.Account)
 	require.False(t, veto)
-	require.True(t, svc.CompleteOpenAIStickyMigration(ctx, selected.Account, &OpenAIForwardResult{}, nil))
-	requireStickyMigrationOwner(t, cache, req, 2)
+	require.False(t, svc.CompleteOpenAIStickyMigration(ctx, selected.Account, &OpenAIForwardResult{}, nil))
+	requireStickyMigrationOwner(t, cache, req, 1)
+	require.Empty(t, cache.calls, "capacity pressure cannot commit a cache-owner migration")
 }
 
 func TestOpenAIStickyMigrationRevisionSnapshotRejectsABA(t *testing.T) {

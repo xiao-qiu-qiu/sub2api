@@ -183,6 +183,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 	groupPlatform := effectiveAPIKeyPlatform(c, apiKey)
+	service.BindGatewayAccountSessionAffinity(c, apiKey, parsedReq, groupPlatform)
 	selectionSessionHash := sessionHash
 	if groupPlatform == service.PlatformGemini && selectionSessionHash != "" {
 		selectionSessionHash = "gemini:" + selectionSessionHash
@@ -244,11 +245,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
-			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitPlan(
 				c,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-				selection.WaitPlan.Timeout,
+				selection.WaitPlan,
 				reqStream,
 				&streamStarted,
 			)

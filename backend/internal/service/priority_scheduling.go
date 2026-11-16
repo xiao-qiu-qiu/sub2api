@@ -288,6 +288,8 @@ type PrioritySchedulingScore struct {
 	Reasons             []string   `json:"reasons"`
 	Rate                *float64   `json:"rate"`
 	LoadPercent         *int       `json:"load_percent"`
+	RoutingLoadPercent  *int       `json:"routing_load_percent,omitempty"`
+	ReservedConcurrency int        `json:"reserved_concurrency"`
 	Waiting             int        `json:"waiting"`
 	PrioritySchedulingSignal
 }
@@ -378,14 +380,18 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 	}
 	if item.loadKnown && item.loadInfo != nil {
 		percent := 0
+		routingPercent := 0
 		if item.account.Concurrency > 0 {
 			percent = int(100 * float64(item.loadInfo.CurrentConcurrency) / float64(item.account.Concurrency))
+			routingPercent = int(100 * float64(item.loadInfo.schedulingConcurrency()) / float64(item.account.Concurrency))
 		}
 		out.LoadPercent = &percent
+		out.RoutingLoadPercent = &routingPercent
+		out.ReservedConcurrency = max(0, item.loadInfo.ReservedConcurrency)
 		// A configured load factor may express a routing preference, but must
 		// not make a nearly full account look idle to this capacity policy.
-		load = (1 - clamp01(float64(item.loadInfo.CurrentConcurrency)/float64(max(1, item.account.Concurrency)))) / (1 + float64(max(0, item.loadInfo.WaitingCount)))
-		if percent >= c.MaxLoadPercent || item.loadInfo.WaitingCount > 0 {
+		load = (1 - clamp01(float64(item.loadInfo.schedulingConcurrency())/float64(max(1, item.account.Concurrency)))) / (1 + float64(max(0, item.loadInfo.WaitingCount)))
+		if routingPercent >= c.MaxLoadPercent || item.loadInfo.WaitingCount > 0 {
 			degraded = true
 			out.Reasons = append(out.Reasons, "busy")
 		}

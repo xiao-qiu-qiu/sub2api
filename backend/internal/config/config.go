@@ -1640,7 +1640,7 @@ func (w GatewayOpenAIWSSchedulerScoreWeights) IsValid() bool {
 type GatewayOpenAISchedulerConfig struct {
 	// StickyEscapeEnabled: 是否允许 session_hash sticky 在账号健康度劣化时临时逃逸
 	StickyEscapeEnabled bool `mapstructure:"sticky_escape_enabled"`
-	// StickyEscapeTTFTMs: TTFT EWMA 超过该阈值时跳过 sticky
+	// StickyEscapeTTFTMs: 保留旧配置兼容；TTFT 不再单独触发会话换号。
 	StickyEscapeTTFTMs int `mapstructure:"sticky_escape_ttft_ms"`
 	// StickyEscapeErrorRate: 错误率 EWMA 超过该阈值时跳过 sticky
 	StickyEscapeErrorRate float64 `mapstructure:"sticky_escape_error_rate"`

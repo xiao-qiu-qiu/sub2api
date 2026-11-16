@@ -1957,6 +1957,7 @@ type openAIResponsesWSUsageLogCase struct {
 	timing                 *pr610TimingScenario
 	authSetup              func(*service.APIKey, *config.Config) *service.APIKeyService
 	afterAccountSlot       func()
+	observeAccountSlot     func(context.Context)
 	closeStatus            coderws.StatusCode
 	simpleModeRejectAtRead int64
 	compositeResolver      *service.CompositeRouteResolver
@@ -3111,6 +3112,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		},
 		acquireAccountSlotFn: func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
 			acquiredAccounts.Add(1)
+			if tc.observeAccountSlot != nil {
+				tc.observeAccountSlot(ctx)
+			}
 			if tc.afterAccountSlot != nil {
 				tc.afterAccountSlot()
 			}
@@ -3122,7 +3126,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		concurrencyCache = tc.timing.cache
 	}
 	var gatewayConcurrency *service.ConcurrencyService
-	if tc.authSetup != nil {
+	if tc.authSetup != nil || tc.observeAccountSlot != nil {
 		gatewayConcurrency = service.NewConcurrencyService(concurrencyCache)
 	}
 	var networkUpstream service.HTTPUpstream = &compositeWSHTTPUpstream{}

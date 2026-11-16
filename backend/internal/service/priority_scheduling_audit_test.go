@@ -212,26 +212,6 @@ func TestPriorityHistoryBoundsAccountUnionAndScopes(t *testing.T) {
 	require.LessOrEqual(t, g.priorityScheduling.active, 2)
 }
 
-func TestPriorityStickyDoesNotEscapeToKnownRisk(t *testing.T) {
-	c := DefaultPrioritySchedulingConfig()
-	c.Enabled = true
-	r := &priorityReaderStub{signal: map[int64]PrioritySchedulingSignal{2: {QualityPassed: 0, QualitySamples: 10}}}
-	g := priorityGateway(c, r)
-	accounts := []Account{{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 30, GroupIDs: []int64{11, 12, 13}}, {ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 30, GroupIDs: []int64{11}}}
-	g.accountRepo = schedulerTestOpenAIAccountRepo{accounts: accounts}
-	g.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, CurrentConcurrency: 20}, 2: {AccountID: 2}}})
-	id := int64(11)
-	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra", GroupID: &id, UseUpstreamTokenCost: true}
-	pool := []openAIAccountCandidateScore{{account: &accounts[0]}, {account: &accounts[1]}}
-	require.Eventually(t, func() bool { _, ready := g.prioritySignals(req, c, pool); return ready }, time.Second, time.Millisecond)
-	scheduler := &defaultOpenAIAccountScheduler{service: g}
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
-	g.priorityScheduling.mu.Lock()
-	g.priorityScheduling.entries[priorityHistoryKey(req, c)].signals[2] = PrioritySchedulingSignal{QualityPassed: 10, QualitySamples: 10}
-	g.priorityScheduling.mu.Unlock()
-	require.True(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]), "the same compatible idle peer may attract traffic once its known risk is gone")
-}
-
 func TestPrioritySelectionWeightRejectsNonFiniteQuota(t *testing.T) {
 	item := priorityCandidate(1, .1, 0)
 	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {

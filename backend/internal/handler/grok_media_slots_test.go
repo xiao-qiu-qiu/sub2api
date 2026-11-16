@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -269,67 +270,69 @@ func TestGrokMediaLookupSlotLifecycle(t *testing.T) {
 	for _, scenario := range []string{"normal", "mismatch acquired", "mismatch wait", "full", "queue full", "cancel while waiting", "wait then acquired", "upstream error", "cancel", "panic"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, slots, bindings, upstream := newGrokMediaSlotHandler(t, false, strings.HasPrefix(scenario, "mismatch"))
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if scenario == "full" || scenario == "mismatch wait" || scenario == "queue full" || scenario == "cancel while waiting" {
-				slots.full = true
-			}
-			if scenario == "queue full" {
-				slots.queueFull = true
-			}
-			if scenario == "cancel while waiting" {
-				slots.onWait = cancel
-			}
-			if scenario == "wait then acquired" {
-				slots.denied = 1
-			}
-			original := upstream.call
-			upstream.call = func(req *http.Request, id int64) (*http.Response, error) {
-				require.Equal(t, int64(1), id)
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if scenario == "full" || scenario == "mismatch wait" || scenario == "queue full" || scenario == "cancel while waiting" {
+					slots.full = true
+				}
+				if scenario == "queue full" {
+					slots.queueFull = true
+				}
+				if scenario == "cancel while waiting" {
+					slots.onWait = cancel
+				}
+				if scenario == "wait then acquired" {
+					slots.denied = 1
+				}
+				original := upstream.call
+				upstream.call = func(req *http.Request, id int64) (*http.Response, error) {
+					require.Equal(t, int64(1), id)
+					switch scenario {
+					case "upstream error":
+						return nil, errors.New("upstream unavailable")
+					case "cancel":
+						cancel()
+						return nil, context.Canceled
+					case "panic":
+						panic("test upstream panic")
+					}
+					return original(req, id)
+				}
+				for range 20 {
+					c, w := grokMediaSlotContext(ctx, false)
+					h.GrokVideoStatus(c)
+					slots.assertReleased(t)
+					if strings.HasPrefix(scenario, "mismatch") {
+						require.Equal(t, 404, w.Code)
+					}
+					if scenario == "normal" || scenario == "wait then acquired" {
+						require.Equal(t, 200, w.Code)
+					}
+					if scenario == "full" || scenario == "queue full" {
+						require.Equal(t, http.StatusTooManyRequests, w.Code)
+					}
+				}
+				require.Zero(t, bindings.writes, "lookups must preserve owner and TTL")
+				if scenario == "mismatch acquired" {
+					require.Equal(t, 20, slots.released)
+				}
+				if slots.full {
+					require.Zero(t, slots.released)
+					require.Zero(t, upstream.calls)
+				}
+				if scenario == "full" || strings.HasPrefix(scenario, "mismatch") {
+					require.Zero(t, upstream.calls)
+				}
 				switch scenario {
-				case "upstream error":
-					return nil, errors.New("upstream unavailable")
+				case "normal", "wait then acquired", "upstream error", "panic":
+					require.Equal(t, 20, upstream.calls)
+					require.Equal(t, 20, slots.released)
 				case "cancel":
-					cancel()
-					return nil, context.Canceled
-				case "panic":
-					panic("test upstream panic")
+					require.Equal(t, 1, upstream.calls)
+					require.Equal(t, 1, slots.released)
 				}
-				return original(req, id)
-			}
-			for range 20 {
-				c, w := grokMediaSlotContext(ctx, false)
-				h.GrokVideoStatus(c)
-				slots.assertReleased(t)
-				if strings.HasPrefix(scenario, "mismatch") {
-					require.Equal(t, 404, w.Code)
-				}
-				if scenario == "normal" || scenario == "wait then acquired" {
-					require.Equal(t, 200, w.Code)
-				}
-				if scenario == "full" || scenario == "queue full" {
-					require.Equal(t, http.StatusTooManyRequests, w.Code)
-				}
-			}
-			require.Zero(t, bindings.writes, "lookups must preserve owner and TTL")
-			if scenario == "mismatch acquired" {
-				require.Equal(t, 20, slots.released)
-			}
-			if slots.full {
-				require.Zero(t, slots.released)
-				require.Zero(t, upstream.calls)
-			}
-			if scenario == "full" || strings.HasPrefix(scenario, "mismatch") {
-				require.Zero(t, upstream.calls)
-			}
-			switch scenario {
-			case "normal", "wait then acquired", "upstream error", "panic":
-				require.Equal(t, 20, upstream.calls)
-				require.Equal(t, 20, slots.released)
-			case "cancel":
-				require.Equal(t, 1, upstream.calls)
-				require.Equal(t, 1, slots.released)
-			}
+			})
 		})
 	}
 }

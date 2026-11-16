@@ -165,10 +165,10 @@ func TestPriorityObservationStickyPenaltyAndExpiry(t *testing.T) {
 		return selection, decision
 	}
 	selected, decision := selectTurn("", nil)
-	require.Equal(t, int64(2), selected.Account.ID, "ordinary sticky cannot bypass measured penalty even with EWMA escape disabled")
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.Equal(t, int64(1), selected.Account.ID, "a soft latency score must not rebuild an established prompt cache")
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
 	require.Equal(t, int64(1), cache.sessionBindings["openai:sticky-penalty"], "one turn does not erase durable affinity")
-	// A separate weighted shortcut must not undo the scored selection policy.
+	// A weighted fallback also retains a healthy owner under a soft penalty.
 	weightedReq := req
 	weightedReq.StickyWeighted = true
 	weightedReq.StickyAccountID = 1
@@ -176,15 +176,9 @@ func TestPriorityObservationStickyPenaltyAndExpiry(t *testing.T) {
 	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: svc.openaiAccountStats}
 	fallback, fallbackErr := scheduler.tryFallbackToWeightedSticky(ctx, weightedReq)
 	require.NoError(t, fallbackErr)
-	require.Nil(t, fallback, "weighted fallback cannot reintroduce the active measured penalty")
-	for _, ownerReq := range []OpenAIAccountScheduleRequest{
-		func() OpenAIAccountScheduleRequest { r := req; r.DisableStickyEscape = true; return r }(),
-		func() OpenAIAccountScheduleRequest { r := req; r.GuardianParentAccountID = 1; return r }(),
-		func() OpenAIAccountScheduleRequest { r := req; r.EncryptedReasoning = true; return r }(),
-		func() OpenAIAccountScheduleRequest { r := req; r.PreserveStickyBinding = true; return r }(),
-	} {
-		require.False(t, scheduler.shouldYieldPriorityLatencySticky(ownerReq, pool[0].account))
-	}
+	require.NotNil(t, fallback)
+	require.EqualValues(t, 1, fallback.Account.ID)
+	t.Cleanup(fallback.ReleaseFunc)
 	// No global ban: the same slow account remains fallback capacity.
 	selected, _ = selectTurn("", map[int64]struct{}{2: {}})
 	require.Equal(t, int64(1), selected.Account.ID)

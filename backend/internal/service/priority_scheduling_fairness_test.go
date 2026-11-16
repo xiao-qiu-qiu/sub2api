@@ -248,14 +248,13 @@ func TestPriorityOAuthGroupCompetitionKeepsAllAccountsActive(t *testing.T) {
 	require.Equal(t, 1, priorityAccountGroupCount(pool[3].account), "unknown bindings must remain neutral")
 }
 
-func TestPriorityStickyRebalancesWithoutChangingBinding(t *testing.T) {
+func TestPriorityStickyCapacityImbalanceRetainsCacheOwner(t *testing.T) {
 	for _, test := range []struct {
 		name                        string
 		preserve, disable, previous bool
 		otherGroup                  int64
-		expectEscape                bool
 	}{
-		{name: "movable", expectEscape: true},
+		{name: "movable"},
 		{name: "task_owner", preserve: true},
 		{name: "escape_disabled", disable: true},
 		{name: "response_owner", previous: true},
@@ -282,37 +281,15 @@ func TestPriorityStickyRebalancesWithoutChangingBinding(t *testing.T) {
 			if test.previous {
 				req.PreviousResponseID = "resp-owner"
 			}
-			require.Equal(t, test.expectEscape, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
 			selected, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
 			require.NoError(t, err)
-			require.Equal(t, test.expectEscape, escaped)
-			if test.expectEscape {
-				require.Nil(t, selected)
-			} else {
-				require.NotNil(t, selected)
-				if selected.ReleaseFunc != nil {
-					selected.ReleaseFunc()
-				}
+			require.False(t, escaped, "spare capacity elsewhere cannot redirect an established conversation")
+			require.NotNil(t, selected)
+			require.EqualValues(t, 1, selected.Account.ID)
+			if selected.ReleaseFunc != nil {
+				selected.ReleaseFunc()
 			}
 			require.Equal(t, int64(1), cache.sessionBindings["openai:existing-session"])
 		})
 	}
-}
-
-func TestPriorityStickyLoadFailureAndHealthyBindingStayPut(t *testing.T) {
-	cfg := DefaultPrioritySchedulingConfig()
-	cfg.Enabled = true
-	groupID := int64(11)
-	accounts := []Account{
-		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 20, GroupIDs: []int64{11}},
-		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 20, GroupIDs: []int64{11}},
-	}
-	gateway := priorityGateway(cfg, &priorityReaderStub{})
-	gateway.accountRepo = schedulerTestOpenAIAccountRepo{accounts: accounts}
-	gateway.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, CurrentConcurrency: 2}, 2: {AccountID: 2}}})
-	scheduler := &defaultOpenAIAccountScheduler{service: gateway, stats: newOpenAIAccountRuntimeStats()}
-	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, GroupID: &groupID, UseUpstreamTokenCost: true}
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
-	gateway.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadBatchErr: fmt.Errorf("offline")})
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
 }

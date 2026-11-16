@@ -339,8 +339,10 @@ type UserWithConcurrency struct {
 type AccountLoadInfo struct {
 	AccountID          int64
 	CurrentConcurrency int
-	WaitingCount       int
-	LoadRate           int // 0-100+ (percent)
+	// Idle established sessions contribute to routing load, not actual slots.
+	ReservedConcurrency int
+	WaitingCount        int
+	LoadRate            int // 0-100+ (percent)
 }
 
 type UserLoadInfo struct {
@@ -353,7 +355,12 @@ type UserLoadInfo struct {
 // AcquireAccountSlot attempts to acquire a concurrency slot for an account.
 // If the account is at max concurrency, it waits until a slot is available or timeout.
 // Returns a release function that MUST be called when the request completes.
-func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {
+func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (result *AcquireResult, err error) {
+	defer func() {
+		if err == nil {
+			s.trackAccountSession(ctx, accountID, maxConcurrency, result)
+		}
+	}()
 	// Recheck the independent live authority even for stale/sticky candidates.
 	if s.performancePauses != nil {
 		paused, err := s.performancePauses.PerformancePaused(ctx, []int64{accountID})
@@ -706,7 +713,11 @@ func (s *ConcurrencyService) fetchAccountsLoadBatch(ctx context.Context, account
 	}
 	redisCtx, cancel := context.WithTimeout(baseCtx, accountLoadBatchFetchTimeout)
 	defer cancel()
-	return s.cache.GetAccountsLoadBatch(redisCtx, accounts)
+	loads, err := s.cache.GetAccountsLoadBatch(redisCtx, accounts)
+	if err != nil {
+		return nil, err
+	}
+	return s.addAccountSessionReservations(redisCtx, accounts, loads), nil
 }
 
 func (s *ConcurrencyService) getCachedAccountLoadBatch(key string, now time.Time) (map[int64]*AccountLoadInfo, bool) {
