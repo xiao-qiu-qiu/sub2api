@@ -150,6 +150,7 @@ func (h *AccountOpsHandler) SaveWebhook(c *gin.Context) {
 		Enabled         bool    `json:"enabled"`
 		URL             string  `json:"url"`
 		Secret          string  `json:"secret"`
+		Token           string  `json:"token"`
 		ClearSecret     bool    `json:"clear_secret"`
 		MessageTemplate *string `json:"message_template"`
 	}
@@ -157,7 +158,7 @@ func (h *AccountOpsHandler) SaveWebhook(c *gin.Context) {
 		response.BadRequest(c, "Invalid robot configuration")
 		return
 	}
-	cfg, err := h.svc.SaveWebhook(c.Request.Context(), c.Param("id"), service.AccountOpsWebhook{Name: v.Name, Provider: v.Provider, Enabled: v.Enabled, URL: v.URL, Secret: v.Secret, ClearSecret: v.ClearSecret, MessageTemplate: v.MessageTemplate})
+	cfg, err := h.svc.SaveWebhook(c.Request.Context(), c.Param("id"), service.AccountOpsWebhook{Name: v.Name, Provider: v.Provider, Enabled: v.Enabled, URL: v.URL, Secret: v.Secret, Token: v.Token, ClearSecret: v.ClearSecret, MessageTemplate: v.MessageTemplate})
 	h.scopedResult(c, cfg, err)
 }
 func (h *AccountOpsHandler) DeleteWebhook(c *gin.Context) {

@@ -4,7 +4,7 @@ import { reactive } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import AccountOpsView from '../AccountOpsView.vue'
 import { useAppStore } from '@/stores/app'
-import { getAccountOpsSettings, getAccountOpsEvents, getAccountOpsThresholdAccounts, getAccountOpsThresholdGroups, saveAccountOpsGroups, saveAccountOpsNotificationSettings, saveAccountOpsRulesBatch, saveAccountOpsRuleGroups, testAccountOpsWebhook } from '@/api/admin/accountOps'
+import { getAccountOpsSettings, getAccountOpsEvents, getAccountOpsThresholdAccounts, getAccountOpsThresholdGroups, saveAccountOpsGroups, saveAccountOpsNotificationSettings, saveAccountOpsRulesBatch, saveAccountOpsRuleGroups, saveAccountOpsWebhook, testAccountOpsWebhook } from '@/api/admin/accountOps'
 const state = vi.hoisted(() => ({ auth: null as any }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))
 vi.mock('@/components/layout/AppLayout.vue', () => ({ default: { template: '<main><slot /></main>' } }))
@@ -108,17 +108,40 @@ describe('account operations tabs and independent saves', () => {
     await wrapper.get('[data-testid="account-ops-add-channel"]').trigger('click'); await flushPromises()
     expect(wrapper.get('[data-testid="add-channel-email"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.get('[data-testid="add-channel-webhook"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="add-channel-pushplus"]').attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="add-channel-email"]').trigger('click'); await flushPromises()
     expect(wrapper.find('#account-ops-email').exists()).toBe(true)
     wrapper.unmount()
   })
-  it('offers only email and Webhook and opens an automatic Webhook editor', async () => {
+  it('offers email, Webhook and PushPlus and opens an automatic Webhook editor', async () => {
     const wrapper = create(); await flushPromises()
     await wrapper.get('[data-testid="account-ops-add-channel"]').trigger('click'); await flushPromises()
-    expect(wrapper.findAll('[data-testid^="add-channel-"]')).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid^="add-channel-"]')).toHaveLength(3)
     await wrapper.get('[data-testid="add-channel-webhook"]').trigger('click'); await flushPromises()
     expect(wrapper.find('[data-testid^="account-ops-webhook-provider-"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid^="account-ops-webhook-url-"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+  it('adds a PushPlus channel and uses its saved token status for a test send', async () => {
+    const hook = { id: 'pushplus', name: '微信提醒', provider: 'pushplus' as const, enabled: true, token_configured: true }
+    vi.mocked(saveAccountOpsWebhook).mockResolvedValue({ ...config, webhooks: [hook] })
+    const wrapper = create(); await flushPromises()
+    await wrapper.get('[data-testid="account-ops-add-channel"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="add-channel-pushplus"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid^="account-ops-webhook-name-"]').setValue('微信提醒')
+    await wrapper.get('[data-testid^="account-ops-webhook-token-"]').setValue('test-only-token')
+    expect(wrapper.find('[data-testid^="account-ops-webhook-url-"]').exists()).toBe(false)
+    await wrapper.get('#account-ops-webhook-form').trigger('submit'); await flushPromises()
+    expect(saveAccountOpsWebhook).toHaveBeenCalledWith(expect.any(String), { name: '微信提醒', provider: 'pushplus', enabled: true, token: 'test-only-token' })
+    expect(wrapper.text()).toContain('微信提醒')
+    expect(wrapper.find('[data-testid^="account-ops-webhook-token-"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="account-ops-webhook-test-pushplus"]').trigger('click'); await flushPromises()
+    expect(testAccountOpsWebhook).toHaveBeenCalledWith('pushplus')
+    await wrapper.get('[data-testid="edit-webhook-pushplus"]').trigger('click'); await flushPromises()
+    const token = wrapper.get('[data-testid="account-ops-webhook-token-pushplus"]')
+    expect((token.element as HTMLInputElement).value).toBe('')
+    await wrapper.get('#account-ops-webhook-form').trigger('submit'); await flushPromises()
+    expect(saveAccountOpsWebhook).toHaveBeenLastCalledWith('pushplus', { name: '微信提醒', provider: 'pushplus', enabled: true })
     wrapper.unmount()
   })
   it('saves the master switch directly and restores its state when saving fails', async () => {
@@ -150,10 +173,23 @@ describe('account operations tabs and independent saves', () => {
     await (wrapper.vm as any).load(); await flushPromises()
     expect((rules.get('[data-testid="global-cooldown"]').element as HTMLInputElement).value).toBe('30')
     await rules.get('#account-ops-global-form').trigger('submit'); await flushPromises()
-    expect(saveAccountOpsNotificationSettings).toHaveBeenLastCalledWith({ balance_low: false, weekly_quota: true, cooldown_minutes: 30 })
+    expect(saveAccountOpsNotificationSettings).toHaveBeenLastCalledWith({ balance_low: false, weekly_quota: true, quality_degraded: false, cooldown_minutes: 30 })
     expect(useAppStore().toasts.at(-1)).toMatchObject({ type: 'success' })
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('defaults quality alerts off and permits enabling only quality alerts', async () => {
+    const wrapper = create(); await flushPromises()
+    expect((wrapper.get('[data-testid="global-quality-degraded"]').element as HTMLInputElement).checked).toBe(false)
+    await wrapper.get('[data-testid="global-balance-low"]').setValue(false)
+    await wrapper.get('[data-testid="global-weekly-quota"]').setValue(false)
+    await wrapper.get('[data-testid="global-quality-degraded"]').setValue(true)
+    await wrapper.get('#account-ops-global-form').trigger('submit'); await flushPromises()
+    expect(saveAccountOpsNotificationSettings).toHaveBeenLastCalledWith({ balance_low: false, weekly_quota: false, quality_degraded: true, cooldown_minutes: 60 })
+    await wrapper.get('[data-testid="notifications-enabled"]').trigger('click'); await flushPromises()
+    expect(saveAccountOpsNotificationSettings).toHaveBeenLastCalledWith({ enabled: true })
+    expect(wrapper.get('[data-testid="notifications-enabled"]').attributes('aria-checked')).toBe('true')
     wrapper.unmount()
   })
   it('opens a rule dialog with amount and two independent notification switches', async () => {
@@ -195,6 +231,29 @@ describe('account operations tabs and independent saves', () => {
     expect(wrapper.findAll('[data-testid="notification-record"]')).toHaveLength(2)
     expect(wrapper.text()).toContain('accountOps.phases.alert')
     expect(wrapper.text()).toContain('accountOps.phases.recovery')
+    wrapper.unmount()
+  })
+  it('filters degradation records and shows their model, rule, method and detection time', async () => {
+    const base = { account_id: 1, account_name: 'quality-account', kind: 'quality_degraded' as const, signal: 'quality_degraded', http_status: 0, first_seen: '2026-10-07T12:00:00Z', last_seen: '2026-10-07T12:00:00Z', occurrences: 1, state: 'sent' as const, last_sent_at: null, next_send_at: '', attempts: 1 }
+    vi.mocked(getAccountOpsEvents).mockResolvedValue({ items: [
+      { ...base, id: 'state', details: { quality_model: 'gpt-test', quality_rule_name: '状态检测规则', quality_source: 'state_probe', observed_at: '2026-10-07T11:59:00Z' } },
+      { ...base, id: 'answer', details: { quality_model: 'gpt-answer', quality_rule_name: '答题规则', quality_source: 'answer' } },
+      { ...base, id: 'balance', kind: 'balance_threshold', details: { balance: 2, threshold: 5, unit: 'USD' } }
+    ], has_more: false })
+    const wrapper = create(); await flushPromises()
+    await wrapper.get('[data-testid="account-ops-tab-records"]').trigger('click')
+    await wrapper.get('select[aria-label="accountOps.alertTypes"]').setValue('quality_degraded')
+    const records = wrapper.findAll('[data-testid="notification-record"]')
+    expect(records).toHaveLength(2)
+    expect(records[0]!.text()).toContain('gpt-test')
+    expect(records[0]!.text()).toContain('状态检测规则')
+    expect(records[0]!.text()).toContain('accountOps.qualitySources.state_probe')
+    expect(records[0]!.text()).toContain(new Date('2026-10-07T11:59:00Z').toLocaleString())
+    expect(records[1]!.text()).toContain('accountOps.qualitySources.answer')
+    expect(records[1]!.text()).toContain(new Date(base.first_seen).toLocaleString())
+    expect(wrapper.text()).toContain('accountOps.qualityDetected')
+    expect(wrapper.text()).not.toContain('HTTP 0')
+    expect(wrapper.text()).not.toContain('accountOps.thresholdValue')
     wrapper.unmount()
   })
   it('requires a new amount if a selected account changes currency while the bulk dialog is open', async () => {

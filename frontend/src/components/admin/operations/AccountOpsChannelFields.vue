@@ -1,7 +1,7 @@
 <template>
   <section class="space-y-4">
     <button v-if="!single" type="button" class="text-xs text-primary-600 disabled:opacity-50" :disabled="modelValue.length >= 5 || !encryptionConfigured" data-testid="account-ops-add-webhook" @click="add">{{ t('accountOps.addRobot') }}</button>
-    <p class="text-xs leading-5 text-gray-500">{{ t('accountOps.robotHint') }}</p>
+    <p v-if="modelValue.some(hook => hook.provider !== 'pushplus')" class="text-xs leading-5 text-gray-500">{{ t('accountOps.robotHint') }}</p>
     <p v-if="!encryptionConfigured" role="alert" class="text-xs text-amber-700">{{ t('accountOps.encryptionMissing') }}</p>
     <div v-for="hook in modelValue" :key="hook.id" class="space-y-4">
       <label class="block space-y-2 text-sm">
@@ -16,11 +16,15 @@
         </label>
         <button v-if="!single" type="button" class="text-xs text-red-600" :aria-label="t('accountOps.removeRobot')" @click="remove(hook.id)">{{ t('common.delete') }}</button>
       </div>
-      <label class="block space-y-2 text-sm">
+      <label v-if="hook.provider === 'pushplus'" class="block space-y-2 text-sm">
+        <span>{{ t('accountOps.pushplusToken') }}</span>
+        <input v-model.trim="inputs[hook.id]!.token" type="password" autocomplete="new-password" spellcheck="false" class="input w-full" :disabled="!encryptionConfigured" :required="!hook.token_configured" :placeholder="hook.token_configured ? t('accountOps.retainCredential') : t('accountOps.pushplusTokenPlaceholder')" :data-testid="`account-ops-webhook-token-${hook.id}`" />
+      </label>
+      <label v-else class="block space-y-2 text-sm">
         <span>{{ t('accountOps.webhookUrl') }}</span>
         <input v-model.trim="inputs[hook.id]!.url" type="password" autocomplete="new-password" spellcheck="false" class="input w-full" :disabled="!encryptionConfigured" :placeholder="hook.url_configured ? t('accountOps.retainCredential') : t('accountOps.webhookPlaceholder')" :data-testid="`account-ops-webhook-url-${hook.id}`" />
       </label>
-      <p v-if="inputs[hook.id]!.url || hook.url_configured" class="text-xs text-gray-500">{{ t('accountOps.detectedWebhook', { provider: t(`accountOps.providers.${detectedProvider(hook)}`) }) }}</p>
+      <p v-if="hook.provider !== 'pushplus' && (inputs[hook.id]!.url || hook.url_configured)" class="text-xs text-gray-500">{{ t('accountOps.detectedWebhook', { provider: t(`accountOps.providers.${detectedProvider(hook)}`) }) }}</p>
       <label v-if="supportsSigning(hook)" class="block space-y-2 text-sm">
         <span>{{ t('accountOps.signingSecret') }}</span>
         <input v-model="inputs[hook.id]!.secret" type="password" autocomplete="new-password" spellcheck="false" class="input w-full" :disabled="!encryptionConfigured || inputs[hook.id]!.clearSecret" :placeholder="hook.secret_configured && !inputs[hook.id]!.url ? t('accountOps.retainCredential') : t('accountOps.optionalSecret')" :data-testid="`account-ops-webhook-secret-${hook.id}`" />
@@ -37,7 +41,7 @@
         </div>
       </details>
       <div class="flex items-center justify-between gap-2 text-xs text-gray-500">
-        <span>{{ t(hook.url_configured ? 'accountOps.credentialSaved' : 'accountOps.saveBeforeTest') }}</span>
+        <span>{{ t(credentialConfigured(hook) ? 'accountOps.credentialSaved' : 'accountOps.saveBeforeTest') }}</span>
         <button type="button" class="text-primary-600 disabled:opacity-40" :disabled="!canTest(hook)" :data-testid="`account-ops-webhook-test-${hook.id}`" @click="emit('test', hook.id)">{{ t(testingId === hook.id ? 'common.loading' : 'accountOps.testRobot') }}</button>
       </div>
     </div>
@@ -52,16 +56,17 @@ const emit = defineEmits<{ (event: 'update:modelValue', value: AccountOpsWebhook
 const { t } = useI18n()
 const defaultTemplate = '{"text":"{{message}}"}'
 const templateVariables = '{{message}} · {{title}} · {{account}} · {{balance}} · {{threshold}} · {{time}}'
-const inputs = reactive<Record<string, { url: string; secret: string; clearSecret: boolean; template: string }>>({})
+const inputs = reactive<Record<string, { url: string; secret: string; token: string; clearSecret: boolean; template: string }>>({})
 watch(() => props.modelValue.map(h => h.id), ids => {
-  for (const hook of props.modelValue) inputs[hook.id] ??= { url: '', secret: '', clearSecret: false, template: hook.message_template ?? '' }
+  for (const hook of props.modelValue) inputs[hook.id] ??= { url: '', secret: '', token: '', clearSecret: false, template: hook.message_template ?? '' }
   for (const id of Object.keys(inputs)) if (!ids.includes(id)) delete inputs[id]
 }, { immediate: true, flush: 'sync' })
 const hasSensitiveChanges = computed(() => props.modelValue.some(h => {
   const i = inputs[h.id]
-  return !!i && (!!i.url || !!i.secret || i.clearSecret || i.template !== (h.message_template ?? ''))
+  return !!i && (!!i.url || !!i.secret || !!i.token || i.clearSecret || i.template !== (h.message_template ?? ''))
 }))
 function detectedProvider(hook: AccountOpsWebhook): AccountOpsWebhookProvider {
+  if (hook.provider === 'pushplus') return 'pushplus'
   const raw = inputs[hook.id]?.url
   if (!raw) return hook.provider
   try {
@@ -73,6 +78,7 @@ function detectedProvider(hook: AccountOpsWebhook): AccountOpsWebhookProvider {
   return 'custom'
 }
 const supportsSigning = (h: AccountOpsWebhook) => ['dingtalk', 'feishu'].includes(detectedProvider(h))
+const credentialConfigured = (h: AccountOpsWebhook) => h.provider === 'pushplus' ? h.token_configured : h.url_configured
 const patch = (id: string, values: Partial<AccountOpsWebhook>) => emit('update:modelValue', props.modelValue.map(h => h.id === id ? { ...h, ...values } : h))
 const add = () => {
   if (props.modelValue.length >= 5 || !props.encryptionConfigured) return
@@ -82,10 +88,17 @@ const add = () => {
 const remove = (id: string) => { delete inputs[id]; emit('update:modelValue', props.modelValue.filter(h => h.id !== id)) }
 const canTest = (h: AccountOpsWebhook) => {
   const i = inputs[h.id]
-  return !!h.url_configured && !props.testingId && !i?.url && !i?.secret && !i?.clearSecret && (i?.template ?? '') === (h.message_template ?? '')
+  return !!credentialConfigured(h) && !props.testingId && !i?.url && !i?.secret && !i?.token && !i?.clearSecret && (i?.template ?? '') === (h.message_template ?? '')
 }
 const prepare = (): AccountOpsWebhookInput[] => props.modelValue.map(h => {
   const i = inputs[h.id]
+  if (h.provider === 'pushplus') {
+    return {
+      id: h.id, provider: 'pushplus', enabled: h.enabled,
+      ...(h.name !== undefined ? { name: h.name.trim() } : {}),
+      ...(i?.token ? { token: i.token } : {})
+    }
+  }
   const custom = detectedProvider(h) === 'custom'
   return {
     id: h.id, provider: 'auto', enabled: h.enabled,
@@ -97,7 +110,7 @@ const prepare = (): AccountOpsWebhookInput[] => props.modelValue.map(h => {
     ...(!custom && h.message_template ? { message_template: '' } : {})
   }
 })
-const clearInputs = () => { for (const h of props.modelValue) inputs[h.id] = { url: '', secret: '', clearSecret: false, template: h.message_template ?? '' } }
+const clearInputs = () => { for (const h of props.modelValue) inputs[h.id] = { url: '', secret: '', token: '', clearSecret: false, template: h.message_template ?? '' } }
 onBeforeUnmount(clearInputs)
 defineExpose({ prepare, clearInputs, hasSensitiveChanges })
 </script>

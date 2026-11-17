@@ -1,5 +1,5 @@
 import { apiClient } from '../client'
-export type AccountOpsWebhookProvider = 'wecom' | 'dingtalk' | 'feishu' | 'custom'
+export type AccountOpsWebhookProvider = 'wecom' | 'dingtalk' | 'feishu' | 'custom' | 'pushplus'
 export interface AccountOpsWebhook {
   id: string
   name?: string
@@ -7,6 +7,7 @@ export interface AccountOpsWebhook {
   enabled: boolean
   url_configured?: boolean
   secret_configured?: boolean
+  token_configured?: boolean
   message_template?: string
 }
 export interface AccountOpsWebhookInput {
@@ -17,6 +18,7 @@ export interface AccountOpsWebhookInput {
   url?: string
   secret?: string
   clear_secret?: boolean
+  token?: string
   message_template?: string
 }
 export interface AccountOpsBalanceThreshold {
@@ -72,6 +74,7 @@ export interface AccountOpsConfig {
   email_name?: string
   balance_low: boolean
   weekly_quota: boolean
+  quality_degraded?: boolean
   cooldown_minutes: number
   webhooks?: AccountOpsWebhook[]
   groups?: Array<{ id: string; name: string; provider?: string; site?: string; account_ids?: number[] }>
@@ -88,7 +91,7 @@ export interface AccountOpsEvent {
   account_name: string
   group_id?: string
   group_name?: string
-  kind: 'balance_low' | 'weekly_quota' | 'balance_threshold' | 'quota_threshold'
+  kind: 'balance_low' | 'weekly_quota' | 'balance_threshold' | 'quota_threshold' | 'quality_degraded'
   signal: string
   http_status: number
   first_seen: string
@@ -98,10 +101,10 @@ export interface AccountOpsEvent {
   last_sent_at: string | null
   next_send_at: string
   attempts: number
-  details?: { balance?: number; threshold?: number; unit?: string; used_percent?: number; threshold_percent?: number; window?: string; observed_at?: string; resets_at?: string }
+  details?: { balance?: number; threshold?: number; unit?: string; used_percent?: number; threshold_percent?: number; window?: string; observed_at?: string; resets_at?: string; quality_model?: string; quality_rule_name?: string; quality_source?: 'state_probe' | 'answer' }
   deliveries?: Record<string, { provider: string; name?: string; status: 'sent' | 'failed'; attempts: number; last_sent_at?: string }>
 }
-export type AccountOpsNotificationSettings = Partial<Pick<AccountOpsConfig, 'enabled' | 'recipient' | 'email_name' | 'balance_low' | 'weekly_quota' | 'cooldown_minutes'>>
+export type AccountOpsNotificationSettings = Partial<Pick<AccountOpsConfig, 'enabled' | 'recipient' | 'email_name' | 'balance_low' | 'weekly_quota' | 'quality_degraded' | 'cooldown_minutes'>>
 export interface AccountOpsRuleInput {
   metric: 'balance' | 'quota'
   enabled: boolean

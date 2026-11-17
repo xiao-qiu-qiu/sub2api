@@ -19,6 +19,7 @@ type AccountOpsConfig struct {
 	EmailName           string                  `json:"email_name,omitempty"`
 	BalanceLow          bool                    `json:"balance_low"`
 	WeeklyQuota         bool                    `json:"weekly_quota"`
+	QualityDegraded     bool                    `json:"quality_degraded"`
 	CooldownMinutes     int                     `json:"cooldown_minutes"`
 	Webhooks            []AccountOpsWebhook     `json:"webhooks"`
 	Groups              []AccountOpsGroup       `json:"groups"`
@@ -49,13 +50,13 @@ func ValidateAccountOpsConfig(c AccountOpsConfig) (err error) {
 	if err := validateAccountOpsExtras(c); err != nil {
 		return err
 	}
-	if c.Enabled && (!c.hasDestination() || (!c.BalanceLow && !c.WeeklyQuota && !c.hasThreshold() && !c.hasQuotaThreshold())) {
+	if c.Enabled && (!c.hasDestination() || (!c.BalanceLow && !c.WeeklyQuota && !c.QualityDegraded && !c.hasThreshold() && !c.hasQuotaThreshold())) {
 		return errors.New("select an alert type and configure a recipient before enabling")
 	}
 	return nil
 }
 func (c AccountOpsConfig) Allows(kind string) bool {
-	return c.Enabled && c.hasDestination() && ((kind == "balance_low" && c.BalanceLow) || (kind == "weekly_quota" && c.WeeklyQuota) || (kind == "balance_threshold" && c.hasThreshold()) || (kind == "quota_threshold" && c.hasQuotaThreshold()))
+	return c.Enabled && c.hasDestination() && ((kind == "balance_low" && c.BalanceLow) || (kind == "weekly_quota" && c.WeeklyQuota) || (kind == "quality_degraded" && c.QualityDegraded) || (kind == "balance_threshold" && c.hasThreshold()) || (kind == "quota_threshold" && c.hasQuotaThreshold()))
 }
 
 type AccountOpsEvent struct {

@@ -28,12 +28,19 @@ func NewAccountOpsRepository(db *sql.DB) service.AccountOpsRepository {
 	return &accountOpsRepository{db: db}
 }
 func (r *accountOpsRepository) Record(ctx context.Context, e service.AccountOpsEvent) error {
+	return recordAccountOpsEvent(ctx, r.db, e)
+}
+
+// Both request observations and quality outcomes use the same coalescing rules.
+// The executor may be an existing quality transaction, so its account action and
+// notification become visible together.
+func recordAccountOpsEvent(ctx context.Context, exec opsConfigExecutor, e service.AccountOpsEvent) error {
 	details, err := json.Marshal(e.Details)
 	if err != nil {
 		return err
 	}
 	groupID := accountOpsEventGroupID(&e)
-	_, err = r.db.ExecContext(ctx, `INSERT INTO account_ops_alerts(account_id,group_id,group_name,kind,account_name,signal,http_status,details,identity)
+	_, err = exec.ExecContext(ctx, `INSERT INTO account_ops_alerts(account_id,group_id,group_name,kind,account_name,signal,http_status,details,identity)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT(group_id,kind) DO UPDATE SET
  account_id=EXCLUDED.account_id,group_name=EXCLUDED.group_name,account_name=EXCLUDED.account_name,signal=EXCLUDED.signal,http_status=EXCLUDED.http_status,details=EXCLUDED.details,identity=CASE WHEN account_ops_alerts.state IN ('sending','pending') OR (account_ops_alerts.state='failed' AND (account_ops_alerts.attempts<3 OR account_ops_alerts.next_send_at>NOW())) THEN account_ops_alerts.identity ELSE EXCLUDED.identity END,last_seen=NOW(),occurrences=account_ops_alerts.occurrences+1,
  state=CASE WHEN account_ops_alerts.state IN ('sent','suppressed','failed','resolved') AND account_ops_alerts.next_send_at<=NOW() AND (account_ops_alerts.state<>'failed' OR account_ops_alerts.attempts>=3) THEN 'pending' ELSE account_ops_alerts.state END,
@@ -71,7 +78,7 @@ func (r *accountOpsRepository) Claim(ctx context.Context) (*service.AccountOpsEv
 		return nil, err
 	}
 	e, err := scanAccountOps(r.db.QueryRowContext(ctx, `UPDATE account_ops_alerts SET state='sending',attempts=attempts+1,lease=$1,lease_until=NOW()+INTERVAL '2 minutes'
- WHERE (group_id,kind)=(SELECT group_id,kind FROM account_ops_alerts WHERE kind IN ('balance_low','weekly_quota') AND
+ WHERE (group_id,kind)=(SELECT group_id,kind FROM account_ops_alerts WHERE kind IN ('balance_low','weekly_quota','quality_degraded') AND
  ((state IN ('pending','failed') AND attempts<3 AND next_send_at<=NOW()) OR (state='sending' AND lease_until<NOW()))
  ORDER BY next_send_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING `+accountOpsColumns, uuid.NewString()))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -141,9 +148,9 @@ func (r *accountOpsRepository) suppressDisabled(ctx context.Context, exec opsCon
 	balance, _ := json.Marshal(c.BalanceThresholds)
 	quota, _ := json.Marshal(c.QuotaThresholds)
 	_, err := exec.ExecContext(ctx, `UPDATE account_ops_alerts SET state='suppressed',lease='',lease_until=NULL,next_send_at=CASE WHEN kind IN ('balance_threshold','quota_threshold') THEN CASE WHEN GREATEST(last_sent_at,(SELECT MAX((x->>'last_sent_at')::timestamptz) FROM jsonb_each(deliveries) j(k,x))) IS NULL OR (state IN ('pending','failed','sending') AND GREATEST(last_sent_at,(SELECT MAX((x->>'last_sent_at')::timestamptz) FROM jsonb_each(deliveries) j(k,x)))+($6*INTERVAL '1 second')<=NOW()) THEN NOW() ELSE GREATEST(next_send_at,GREATEST(last_sent_at,(SELECT MAX((x->>'last_sent_at')::timestamptz) FROM jsonb_each(deliveries) j(k,x)))+($6*INTERVAL '1 second')) END ELSE next_send_at END
- WHERE state IN ('pending','failed','sending') AND (NOT $1 OR (kind='balance_low' AND NOT $2) OR (kind='weekly_quota' AND NOT $3)
+ WHERE state IN ('pending','failed','sending') AND (NOT $1 OR (kind='balance_low' AND NOT $2) OR (kind='weekly_quota' AND NOT $3) OR (kind='quality_degraded' AND NOT $7)
  OR (kind='balance_threshold' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(NULLIF($4::jsonb,'null'::jsonb),'[]'::jsonb)) x WHERE (x->>'account_id')::bigint=account_ops_alerts.account_id AND (x->>'enabled')::boolean))
- OR (kind='quota_threshold' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(NULLIF($5::jsonb,'null'::jsonb),'[]'::jsonb)) x WHERE (x->>'account_id')::bigint=account_ops_alerts.account_id AND (x->>'enabled')::boolean)))`, c.Enabled, c.BalanceLow, c.WeeklyQuota, string(balance), string(quota), int64(c.CooldownMinutes)*60)
+ OR (kind='quota_threshold' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(NULLIF($5::jsonb,'null'::jsonb),'[]'::jsonb)) x WHERE (x->>'account_id')::bigint=account_ops_alerts.account_id AND (x->>'enabled')::boolean)))`, c.Enabled, c.BalanceLow, c.WeeklyQuota, string(balance), string(quota), int64(c.CooldownMinutes)*60, c.QualityDegraded)
 	return err
 }
 

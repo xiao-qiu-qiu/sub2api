@@ -25,17 +25,19 @@ func accountOpsConfigValidation(message string) error {
 }
 
 type AccountOpsWebhook struct {
-	ID                                string  `json:"id"`
-	Name                              *string `json:"name,omitempty"`
-	Provider                          string  `json:"provider"`
-	Enabled                           bool    `json:"enabled"`
-	URLConfigured                     bool    `json:"url_configured"`
-	SecretConfigured                  bool    `json:"secret_configured"`
-	URL                               string  `json:"url,omitempty"`
-	Secret                            string  `json:"secret,omitempty"`
-	ClearSecret                       bool    `json:"clear_secret,omitempty"`
-	MessageTemplate                   *string `json:"message_template,omitempty"`
-	urlCipher, secretCipher, revision string
+	ID                                             string  `json:"id"`
+	Name                                           *string `json:"name,omitempty"`
+	Provider                                       string  `json:"provider"`
+	Enabled                                        bool    `json:"enabled"`
+	URLConfigured                                  bool    `json:"url_configured"`
+	SecretConfigured                               bool    `json:"secret_configured"`
+	TokenConfigured                                bool    `json:"token_configured"`
+	URL                                            string  `json:"url,omitempty"`
+	Secret                                         string  `json:"secret,omitempty"`
+	Token                                          string  `json:"token,omitempty"`
+	ClearSecret                                    bool    `json:"clear_secret,omitempty"`
+	MessageTemplate                                *string `json:"message_template,omitempty"`
+	urlCipher, secretCipher, tokenCipher, revision string
 }
 type AccountOpsBalanceRule struct {
 	NotifyAlert    *bool   `json:"notify_alert"`
@@ -54,6 +56,9 @@ type AccountOpsQuotaRule struct {
 	Window           string  `json:"window"`
 }
 type AccountOpsDetails struct {
+	QualityModel     string     `json:"quality_model,omitempty"`
+	QualityRuleName  string     `json:"quality_rule_name,omitempty"`
+	QualitySource    string     `json:"quality_source,omitempty"`
 	UsedPercent      *float64   `json:"used_percent,omitempty"`
 	ThresholdPercent *float64   `json:"threshold_percent,omitempty"`
 	Window           string     `json:"window,omitempty"`
@@ -78,6 +83,7 @@ type storedOpsWebhook struct {
 	Enabled         bool    `json:"enabled"`
 	URLCipher       string  `json:"url_cipher"`
 	SecretCipher    string  `json:"secret_cipher,omitempty"`
+	TokenCipher     string  `json:"token_cipher,omitempty"`
 	Revision        string  `json:"revision"`
 	MessageTemplate *string `json:"message_template,omitempty"`
 }
@@ -95,7 +101,14 @@ func (c AccountOpsConfig) hasDestination() bool {
 		return true
 	}
 	for _, w := range c.Webhooks {
-		if w.Enabled && (w.URL != "" || w.URLConfigured || w.urlCipher != "") {
+		if !w.Enabled {
+			continue
+		}
+		if w.Provider == "pushplus" {
+			if w.Token != "" || w.TokenConfigured || w.tokenCipher != "" {
+				return true
+			}
+		} else if w.URL != "" || w.URLConfigured || w.urlCipher != "" {
 			return true
 		}
 	}
@@ -131,11 +144,14 @@ func (c AccountOpsConfig) public() AccountOpsConfig {
 		w := &c.Webhooks[i]
 		w.URLConfigured = w.urlCipher != ""
 		w.SecretConfigured = w.secretCipher != ""
+		w.TokenConfigured = w.tokenCipher != ""
 		w.URL = ""
 		w.Secret = ""
+		w.Token = ""
 		w.ClearSecret = false
 		w.urlCipher = ""
 		w.secretCipher = ""
+		w.tokenCipher = ""
 		w.revision = ""
 	}
 	return c
@@ -160,6 +176,8 @@ func validateAccountOpsURL(provider, raw string) error {
 		valid = u.Host == "oapi.dingtalk.com" && u.Path == "/robot/send" && len(q) == 1 && len(q["access_token"]) == 1 && q.Get("access_token") != ""
 	case "feishu":
 		valid = u.Host == "open.feishu.cn" && strings.HasPrefix(u.Path, "/open-apis/bot/v2/hook/") && opsID.MatchString(strings.TrimPrefix(u.Path, "/open-apis/bot/v2/hook/")) && len(q) == 0
+	case "pushplus":
+		valid = raw == accountOpsPushPlusURL
 	}
 	if !valid {
 		return errors.New("invalid official robot HTTPS URL")
@@ -187,18 +205,28 @@ func validateAccountOpsExtras(c AccountOpsConfig) error {
 			return errors.New("robot IDs must be unique and valid")
 		}
 		ids[w.ID] = true
-		if w.Provider != "wecom" && w.Provider != "dingtalk" && w.Provider != "feishu" && w.Provider != "custom" {
+		if w.Provider != "wecom" && w.Provider != "dingtalk" && w.Provider != "feishu" && w.Provider != "custom" && w.Provider != "pushplus" {
 			return errors.New("unsupported robot provider")
 		}
-		if len(w.URL) > 2048 || len(w.Secret) > 512 {
+		if len(w.URL) > 2048 || len(w.Secret) > 512 || len(w.Token) > 512 {
 			return errors.New("robot credential is too long")
+		}
+		if w.Provider == "pushplus" {
+			if w.URL != "" || w.URLConfigured || w.urlCipher != "" {
+				return errors.New("PushPlus uses a fixed endpoint; configure its token")
+			}
+			if !utf8.ValidString(w.Token) || strings.ContainsFunc(w.Token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+				return errors.New("invalid PushPlus token")
+			}
+		} else if w.Token != "" || w.TokenConfigured || w.tokenCipher != "" {
+			return errors.New("this webhook provider does not support tokens")
 		}
 		if w.URL != "" {
 			if err := validateAccountOpsURL(w.Provider, w.URL); err != nil {
 				return err
 			}
 		}
-		if (w.Provider == "wecom" || w.Provider == "custom") && (w.Secret != "" || w.SecretConfigured || w.secretCipher != "") {
+		if (w.Provider == "wecom" || w.Provider == "custom" || w.Provider == "pushplus") && (w.Secret != "" || w.SecretConfigured || w.secretCipher != "") {
 			return errors.New("this webhook provider does not support signing secrets")
 		}
 		if w.Provider == "custom" {
@@ -300,13 +328,13 @@ func (s *AccountOpsService) loadConfig(ctx context.Context) (AccountOpsConfig, e
 	normalizeOpsFlags(&c, AccountOpsConfig{})
 	// Plaintext credential fields are never accepted from persisted settings.
 	for _, w := range c.Webhooks {
-		if w.URL != "" || w.Secret != "" {
+		if w.URL != "" || w.Secret != "" || w.Token != "" {
 			return defaultAccountOpsConfig(), errors.New("invalid stored robot credentials")
 		}
 	}
 	c.Webhooks = nil
 	for _, w := range st.StoredWebhooks {
-		c.Webhooks = append(c.Webhooks, AccountOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLConfigured: w.URLCipher != "", SecretConfigured: w.SecretCipher != "", MessageTemplate: w.MessageTemplate, urlCipher: w.URLCipher, secretCipher: w.SecretCipher, revision: w.Revision})
+		c.Webhooks = append(c.Webhooks, AccountOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLConfigured: w.URLCipher != "", SecretConfigured: w.SecretCipher != "", TokenConfigured: w.TokenCipher != "", MessageTemplate: w.MessageTemplate, urlCipher: w.URLCipher, secretCipher: w.SecretCipher, tokenCipher: w.TokenCipher, revision: w.Revision})
 	}
 	if err = ValidateAccountOpsConfig(c); err != nil {
 		return defaultAccountOpsConfig(), errors.New("invalid stored notification configuration")
@@ -340,6 +368,7 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 	for i := range c.Webhooks {
 		w := &c.Webhooks[i]
 		w.URL = strings.TrimSpace(w.URL)
+		w.Token = strings.TrimSpace(w.Token)
 		prev, ok := byID[w.ID]
 		if w.Name == nil {
 			w.Name = prev.Name
@@ -374,16 +403,19 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 		prev, ok := byID[w.ID]
 		w.urlCipher = ""
 		w.secretCipher = ""
+		w.tokenCipher = ""
 		w.revision = ""
 		w.URLConfigured = false
 		w.SecretConfigured = false
+		w.TokenConfigured = false
 		if ok && prev.Provider == w.Provider {
 			w.urlCipher = prev.urlCipher
 			w.secretCipher = prev.secretCipher
+			w.tokenCipher = prev.tokenCipher
 			w.revision = prev.revision
 		}
 		changed := !ok || prev.Provider != w.Provider || opsTemplateValue(prev.MessageTemplate) != opsTemplateValue(w.MessageTemplate)
-		if w.URL != "" || w.Secret != "" || w.ClearSecret {
+		if w.URL != "" || w.Secret != "" || w.Token != "" || w.ClearSecret {
 			if !s.EncryptionKeyConfigured() {
 				return errors.New("a fixed encryption key is required for robot credentials")
 			}
@@ -418,14 +450,25 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 			}
 			changed = true
 		}
-		if w.urlCipher == "" {
+		if w.Token != "" {
+			w.tokenCipher, err = s.encryptor.Encrypt(w.Token)
+			if err != nil {
+				return errors.New("robot credential encryption failed")
+			}
+			changed = true
+		}
+		if w.Provider == "pushplus" && w.tokenCipher == "" {
+			return accountOpsConfigValidation("PushPlus token is required for a new destination or provider")
+		}
+		if w.Provider != "pushplus" && w.urlCipher == "" {
 			return accountOpsConfigValidation("robot URL is required for a new destination or provider")
 		}
 		if changed || w.revision == "" {
 			w.revision = uuid.NewString()
 		}
-		w.URLConfigured = true
+		w.URLConfigured = w.urlCipher != ""
 		w.SecretConfigured = w.secretCipher != ""
+		w.TokenConfigured = w.tokenCipher != ""
 	}
 	if err = ValidateAccountOpsConfig(c); err != nil {
 		return err
@@ -470,7 +513,7 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 	st := storedOpsConfig{AccountOpsConfig: c}
 	st.Webhooks = []AccountOpsWebhook{}
 	for _, w := range c.Webhooks {
-		st.StoredWebhooks = append(st.StoredWebhooks, storedOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLCipher: w.urlCipher, SecretCipher: w.secretCipher, Revision: w.revision, MessageTemplate: w.MessageTemplate})
+		st.StoredWebhooks = append(st.StoredWebhooks, storedOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLCipher: w.urlCipher, SecretCipher: w.secretCipher, TokenCipher: w.tokenCipher, Revision: w.revision, MessageTemplate: w.MessageTemplate})
 	}
 	raw, err := json.Marshal(st)
 	if err != nil {
@@ -493,6 +536,7 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 	for i := range c.Webhooks {
 		c.Webhooks[i].URL = ""
 		c.Webhooks[i].Secret = ""
+		c.Webhooks[i].Token = ""
 		c.Webhooks[i].ClearSecret = false
 	}
 	if result, ok := ctx.Value(opsConfigResultKey{}).(*opsConfigResult); ok {

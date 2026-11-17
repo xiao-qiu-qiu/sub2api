@@ -19,6 +19,7 @@ const QualityModelIsolationKey = "quality_model_isolation"
 // comparison batches may be finalized later, but never move this boundary.
 func SetQualityProbeFinishedAt(plan *ScheduledTestPlan, results []*ScheduledTestResult) {
 	setQualityProbeModels(plan, results)
+	setQualityDegradationEvidence(plan, results)
 	plan.QualityProbeFinishedAt = nil
 	plan.QualityProbeStartedAt = nil
 	plan.QualityProbeAdmissionChecked = len(results) > 0

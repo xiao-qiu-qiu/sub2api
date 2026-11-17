@@ -9,6 +9,10 @@
         <span class="text-sm font-medium">Webhook</span>
         <span class="mt-1 block text-xs text-gray-500">{{ t('accountOps.robotChannelHint') }}</span>
       </button>
+      <button type="button" :disabled="!encryptionConfigured || webhookCount >= 5" class="rounded-lg border border-gray-200 p-4 text-left hover:border-primary-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600" data-testid="add-channel-pushplus" @click="emit('select', 'pushplus')">
+        <span class="text-sm font-medium">{{ t('accountOps.providers.pushplus') }}</span>
+        <span class="mt-1 block text-xs text-gray-500">{{ t('accountOps.pushplusChannelHint') }}</span>
+      </button>
     </div>
     <p v-if="webhookCount >= 5" class="mt-4 text-xs text-gray-500">{{ t('accountOps.robotLimitReached') }}</p>
     <p v-else-if="!encryptionConfigured" class="mt-4 text-xs text-amber-700">{{ t('accountOps.encryptionMissing') }}</p>
@@ -20,6 +24,6 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 
 defineProps<{ show: boolean; emailConfigured: boolean; webhookCount: number; encryptionConfigured: boolean }>()
-const emit = defineEmits<{ (event: 'close'): void; (event: 'select', provider: 'email' | 'webhook'): void }>()
+const emit = defineEmits<{ (event: 'close'): void; (event: 'select', provider: 'email' | 'webhook' | 'pushplus'): void }>()
 const { t } = useI18n()
 </script>

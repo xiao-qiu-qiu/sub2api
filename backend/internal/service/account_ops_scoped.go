@@ -13,6 +13,7 @@ type AccountOpsNotificationSettings struct {
 	EmailName       *string `json:"email_name"`
 	BalanceLow      *bool   `json:"balance_low"`
 	WeeklyQuota     *bool   `json:"weekly_quota"`
+	QualityDegraded *bool   `json:"quality_degraded"`
 	CooldownMinutes *int    `json:"cooldown_minutes"`
 }
 type AccountOpsRuleUpdate struct {
@@ -143,6 +144,9 @@ func (s *AccountOpsService) SaveNotificationSettings(ctx context.Context, v Acco
 		}
 		if v.WeeklyQuota != nil {
 			c.WeeklyQuota = *v.WeeklyQuota
+		}
+		if v.QualityDegraded != nil {
+			c.QualityDegraded = *v.QualityDegraded
 		}
 		if v.CooldownMinutes != nil {
 			c.CooldownMinutes = *v.CooldownMinutes

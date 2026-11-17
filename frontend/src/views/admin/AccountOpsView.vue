@@ -60,16 +60,20 @@
                   <p class="mt-1 text-xs text-gray-500">#{{ event.account_id }} · {{ t(`accountOps.${event.kind}`) }}</p>
                 </td>
                 <td class="px-4 py-4"><span class="rounded px-2 py-1 text-xs"
-                    :class="event.phase === 'recovery' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400'">{{ t(event.phase ? `accountOps.phases.${event.phase}` : 'accountOps.failureSignal') }}</span>
+                    :class="event.phase === 'recovery' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400'">{{ t(event.phase ? `accountOps.phases.${event.phase}` : event.kind === 'quality_degraded' ? 'accountOps.qualityDetected' : 'accountOps.failureSignal') }}</span>
                 </td>
                 <td class="px-4 py-4 text-xs"><template v-if="event.kind === 'balance_threshold'">{{ event.details?.balance }}
                     {{ event.details?.unit }}<span class="mt-1 block text-gray-500">{{ t('accountOps.thresholdValue') }}
                       {{ event.details?.threshold }} {{ event.details?.unit }}</span></template><template
                     v-else-if="event.kind === 'quota_threshold'">{{ event.details?.used_percent }}% · {{ event.details?.window }}<span
                       class="mt-1 block text-gray-500">{{ t('accountOps.thresholdValue') }}
-                      {{ event.details?.threshold_percent }}%</span></template><template v-else>HTTP {{ event.http_status }}<span
+                      {{ event.details?.threshold_percent }}%</span></template><template v-else-if="event.kind === 'quality_degraded'">
+                      <p class="max-w-sm break-words">{{ t('accountOps.qualityModel') }}：{{ event.details?.quality_model || '—' }}</p>
+                      <p class="mt-1 max-w-sm break-words text-gray-500">{{ t('accountOps.qualityRule') }}：{{ event.details?.quality_rule_name || '—' }}</p>
+                      <p class="mt-1 text-gray-500">{{ t('accountOps.qualitySource') }}：{{ qualitySource(event) }}</p>
+                    </template><template v-else>HTTP {{ event.http_status }}<span
                       class="mt-1 block text-gray-500">{{ t(`accountOps.signals.${event.signal}`) }}</span></template></td>
-                <td class="whitespace-nowrap px-4 py-4 text-xs text-gray-600 dark:text-gray-400">{{ date(event.first_seen) }}</td>
+                <td class="whitespace-nowrap px-4 py-4 text-xs text-gray-600 dark:text-gray-400">{{ date(event.kind === 'quality_degraded' ? event.details?.observed_at || event.first_seen : event.first_seen) }}</td>
                 <td class="px-5 py-4">
                   <p class="whitespace-nowrap text-xs"
                     :class="event.state === 'failed' ? 'text-red-600' : event.state === 'sent' ? 'text-emerald-600' : 'text-gray-500'">
@@ -122,10 +126,10 @@
                   :class="hook.enabled ? 'text-emerald-600' : 'text-gray-500'">{{ t(hook.enabled ? 'accountOps.channelEnabled' : 'accountOps.channelDisabled') }}</span>
               </div>
               <p class="mt-2 text-xs text-gray-500">
-                {{ hook.name ? `${t(`accountOps.providers.${hook.provider}`)} · ` : '' }}{{ t(hook.url_configured ? 'accountOps.credentialSaved' : 'accountOps.channelUnconfigured') }}</p>
+                {{ hook.name ? `${t(`accountOps.providers.${hook.provider}`)} · ` : '' }}{{ t(credentialConfigured(hook) ? 'accountOps.credentialSaved' : 'accountOps.channelUnconfigured') }}</p>
               <div class="mt-3 flex gap-4 text-xs"><button type="button" class="text-primary-600" :data-testid="`edit-webhook-${hook.id}`"
                   @click="editWebhook(hook)">{{ t('common.edit') }}</button><button type="button"
-                  class="text-primary-600 disabled:opacity-40" :disabled="!hook.url_configured || !!testingId"
+                  class="text-primary-600 disabled:opacity-40" :disabled="!credentialConfigured(hook) || !!testingId"
                   :data-testid="`account-ops-webhook-test-${hook.id}`"
                   @click="testWebhook(hook.id)">{{ t(testingId === hook.id ? 'common.loading' : 'accountOps.testRobot') }}</button><button
                   type="button" class="text-gray-500 hover:text-red-600" @click="removeWebhook(hook.id)">{{ t('common.delete') }}</button>
@@ -161,7 +165,7 @@
           :webhook-count="remote.config.webhooks?.length ?? 0" :encryption-configured="remote.encryption_key_configured === true"
           @close="showAddChannel = false" @select="addChannel" />
         <AccountOpsWebhookDialog :show="showWebhook" :hook="editingHook" :encryption-configured="remote.encryption_key_configured === true"
-          :testing-id="testingId" @close="showWebhook = false" @saved="acceptConfig" @error="app.showError" @test="testWebhook" />
+          :testing-id="testingId" :provider="newWebhookProvider" @close="showWebhook = false" @saved="acceptConfig" @error="app.showError" @test="testWebhook" />
         <AccountOpsEmailDialog :show="showEmail" :config="remote.config" :smtp-configured="remote.smtp_configured"
           @close="showEmail = false" @saved="acceptConfig" @error="app.showError" />
         <AccountOpsGroupDialog :show="showGroupDialog" :groups="accountGroups" :accounts="thresholdAccounts"
@@ -208,10 +212,16 @@ watch(thresholdAccounts, accounts => {
   const selected = new Set(batchAccounts.value.map(account => account.account_id))
   batchAccounts.value = accounts.filter(account => selected.has(account.account_id))
 })
-const query = ref(''), kind = ref('all'), phase = ref('all'), alertKinds = ['balance_threshold','quota_threshold','balance_low','weekly_quota']
+const query = ref(''), kind = ref('all'), phase = ref('all'), alertKinds = ['balance_threshold','quota_threshold','balance_low','weekly_quota','quality_degraded']
 const editingHook = ref<AccountOpsWebhook|null>(null), showWebhook = ref(false), showEmail = ref(false), testingId = ref<string|null>(null)
+const newWebhookProvider = ref<'custom' | 'pushplus'>('custom')
 let version = 0, accountsVersion = 0, testSequence = 0, mutationSequence = 0, paginationSequence = 0, alive = true, timer: ReturnType<typeof setInterval>|null = null
-const normalize = (c: AccountOpsConfig): AccountOpsConfig => ({ enabled:c.enabled, recipient:c.recipient,email_name:c.email_name ?? '', balance_low:c.balance_low, weekly_quota:c.weekly_quota, cooldown_minutes:c.cooldown_minutes, webhooks:(c.webhooks??[]).map(h=>({id:h.id,name:h.name,provider:h.provider,enabled:h.enabled,url_configured:h.url_configured===true,secret_configured:h.secret_configured===true,message_template:h.message_template})), groups:(c.groups??[]).map(g=>({id:g.id,name:g.name,provider:g.provider,site:g.site,account_ids:g.account_ids ? [...g.account_ids] : []})), balance_thresholds:(c.balance_thresholds??[]).map(r=>({...r,notify_alert:r.notify_alert??true,notify_recovery:r.notify_recovery??true})), quota_thresholds:(c.quota_thresholds??[]).map(r=>({...r,notify_alert:r.notify_alert??true,notify_recovery:r.notify_recovery??true})) })
+const normalize = (c: AccountOpsConfig): AccountOpsConfig => ({ enabled:c.enabled, recipient:c.recipient,email_name:c.email_name ?? '', balance_low:c.balance_low, weekly_quota:c.weekly_quota, quality_degraded:c.quality_degraded??false, cooldown_minutes:c.cooldown_minutes, webhooks:(c.webhooks??[]).map(h=>({id:h.id,name:h.name,provider:h.provider,enabled:h.enabled,url_configured:h.url_configured===true,secret_configured:h.secret_configured===true,token_configured:h.token_configured===true,message_template:h.message_template})), groups:(c.groups??[]).map(g=>({id:g.id,name:g.name,provider:g.provider,site:g.site,account_ids:g.account_ids ? [...g.account_ids] : []})), balance_thresholds:(c.balance_thresholds??[]).map(r=>({...r,notify_alert:r.notify_alert??true,notify_recovery:r.notify_recovery??true})), quota_thresholds:(c.quota_thresholds??[]).map(r=>({...r,notify_alert:r.notify_alert??true,notify_recovery:r.notify_recovery??true})) })
+const credentialConfigured = (hook: AccountOpsWebhook) => hook.provider === 'pushplus' ? hook.token_configured : hook.url_configured
+const qualitySource = (event: AccountOpsEvent) => {
+  const source = event.details?.quality_source
+  return source === 'state_probe' || source === 'answer' ? t(`accountOps.qualitySources.${source}`) : '—'
+}
 const eventKey = (e: AccountOpsEvent) => e.id ?? `${e.account_id}:${e.kind}:${e.phase??'legacy'}:${e.first_seen}`
 const filteredEvents = computed(()=>events.value.filter(e=>(kind.value==='all'||kind.value===e.kind)&&(phase.value==='all'||phase.value===(e.phase??'alert'))&&`${e.account_name} ${e.account_id}`.toLowerCase().includes(query.value.toLowerCase().trim())))
 const date = (value: string) => { const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString():'-' }
@@ -243,13 +253,14 @@ function acceptGroupConfig(config: AccountOpsConfig){showGroupDialog.value=false
 async function loadGroups(){try{const groups=await getAccountOpsThresholdGroups();if(alive)accountGroups.value=groups}catch(e){if(alive)app.showError(message(e))}}
 function acceptBatchConfig(config: AccountOpsConfig){acceptConfig(config);ruleList.value?.clearSelection()}
 function editWebhook(hook:AccountOpsWebhook|null){editingHook.value=hook;showWebhook.value=true}
-function addChannel(provider: 'email'|'webhook') {
+function addChannel(provider: 'email'|'webhook'|'pushplus') {
   if (!remote.value) return
   if (provider === 'email') {
     if (remote.value.config.recipient) return
     showEmail.value = true
   } else {
     if (remote.value.encryption_key_configured !== true || (remote.value.config.webhooks?.length ?? 0) >= 5) return
+    newWebhookProvider.value = provider === 'pushplus' ? 'pushplus' : 'custom'
     editWebhook(null)
   }
   showAddChannel.value = false

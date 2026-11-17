@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+const accountOpsPushPlusURL = "https://www.pushplus.plus/send"
+
 func accountOpsOfficialProvider(host string) string {
 	switch strings.ToLower(strings.TrimSuffix(host, ".")) {
 	case "qyapi.weixin.qq.com":
@@ -18,6 +20,8 @@ func accountOpsOfficialProvider(host string) string {
 		return "dingtalk"
 	case "open.feishu.cn":
 		return "feishu"
+	case "www.pushplus.plus":
+		return "pushplus"
 	default:
 		return ""
 	}

@@ -36,9 +36,11 @@ type PelicanTestConfig struct {
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
-	QualityProbeModels           map[string]string `json:"-"`
-	QualityProbeStartedAt        *time.Time        `json:"-"`
-	QualityProbeAdmissionChecked bool              `json:"-"`
+	// Completed, confirmed wrong-answer evidence; never accepted from configuration.
+	QualityDegradation           *AccountOpsDetails `json:"-"`
+	QualityProbeModels           map[string]string  `json:"-"`
+	QualityProbeStartedAt        *time.Time         `json:"-"`
+	QualityProbeAdmissionChecked bool               `json:"-"`
 	// Runtime evidence only: the probe's completion boundary, never commit time.
 	QualityProbeFinishedAt    *time.Time `json:"-"`
 	QualityRequestWindowStart *time.Time `json:"-"`

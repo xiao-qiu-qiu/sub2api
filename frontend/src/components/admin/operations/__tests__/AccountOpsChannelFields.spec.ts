@@ -52,4 +52,33 @@ describe('account notification credentials', () => {
     wrapper.unmount()
   })
 
+  it('keeps PushPlus tokens private, retains saved tokens and tests only saved credentials', async () => {
+    const hook = { id: 'pushplus', provider: 'pushplus' as const, enabled: true, token_configured: true }
+    const wrapper = mount(ChannelFields, { props: { modelValue: [hook], encryptionConfigured: true } })
+    const token = wrapper.get('[data-testid="account-ops-webhook-token-pushplus"]')
+    expect(token.attributes('type')).toBe('password')
+    expect((token.element as HTMLInputElement).value).toBe('')
+    expect(wrapper.find('[data-testid="account-ops-webhook-url-pushplus"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="account-ops-webhook-secret-pushplus"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="account-ops-webhook-template-pushplus"]').exists()).toBe(false)
+    expect((wrapper.vm as any).prepare()).toEqual([{ id: 'pushplus', provider: 'pushplus', enabled: true }])
+    await wrapper.get('[data-testid="account-ops-webhook-test-pushplus"]').trigger('click')
+    expect(wrapper.emitted('test')).toEqual([['pushplus']])
+    await token.setValue('test-only-pushplus-token')
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect((wrapper.vm as any).prepare()[0]).toEqual({ id: 'pushplus', provider: 'pushplus', enabled: true, token: 'test-only-pushplus-token' })
+    expect((wrapper.vm as any).hasSensitiveChanges).toBe(true)
+    expect(wrapper.get('[data-testid="account-ops-webhook-test-pushplus"]').attributes('disabled')).toBeDefined()
+    ;(wrapper.vm as any).clearInputs()
+    expect((wrapper.vm as any).prepare()[0]).not.toHaveProperty('token')
+    wrapper.unmount()
+  })
+
+  it('requires a token for a new PushPlus channel and blocks testing before saving', () => {
+    const wrapper = mount(ChannelFields, { props: { modelValue: [{ id: 'new', provider: 'pushplus', enabled: true }], encryptionConfigured: true } })
+    expect(wrapper.get('[data-testid="account-ops-webhook-token-new"]').attributes('required')).toBeDefined()
+    expect(wrapper.get('[data-testid="account-ops-webhook-test-new"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
 })

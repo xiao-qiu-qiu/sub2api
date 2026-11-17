@@ -134,6 +134,9 @@ func applyQualityOutcomeTx(ctx context.Context, tx *sql.Tx, plan *service.Schedu
 		if err == nil {
 			err = persistQualityProbeAdmissionCheck(ctx, tx, plan, outcome, action)
 		}
+		if err == nil && action != "admission_conflict" {
+			err = persistQualityDegradationNotificationTx(ctx, tx, plan, outcome)
+		}
 	}
 	return action, err
 }

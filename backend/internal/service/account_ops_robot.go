@@ -28,8 +28,17 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	if !s.EncryptionKeyConfigured() {
 		return errors.New("robot encryption unavailable")
 	}
-	raw, err := s.encryptor.Decrypt(w.urlCipher)
-	if err != nil {
+	raw, token := accountOpsPushPlusURL, ""
+	var err error
+	if w.Provider == "pushplus" {
+		if w.tokenCipher == "" {
+			return errors.New("robot credentials unavailable")
+		}
+		token, err = s.encryptor.Decrypt(w.tokenCipher)
+	} else {
+		raw, err = s.encryptor.Decrypt(w.urlCipher)
+	}
+	if err != nil || (w.Provider == "pushplus" && token == "") {
 		return errors.New("robot credential decryption failed")
 	}
 	if err = validateAccountOpsURL(w.Provider, raw); err != nil {
@@ -67,6 +76,8 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	}
 	payload := map[string]any{}
 	switch w.Provider {
+	case "pushplus":
+		payload = map[string]any{"token": token, "title": title, "content": message.plain, "template": "txt"}
 	case "custom":
 		payload, err = accountOpsCustomPayload(opsTemplateValue(w.MessageTemplate), message)
 		if err != nil {
@@ -135,7 +146,10 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 		return errors.New("invalid robot response")
 	}
 	key := "errcode"
-	if w.Provider == "feishu" {
+	successCode := 0
+	if w.Provider == "pushplus" {
+		key, successCode = "code", 200
+	} else if w.Provider == "feishu" {
 		key = "code"
 		if _, ok := fields[key]; !ok {
 			key = "StatusCode"
@@ -143,7 +157,7 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	}
 	var code *int
 	v, ok := fields[key]
-	if !ok || json.Unmarshal(v, &code) != nil || code == nil || *code != 0 {
+	if !ok || json.Unmarshal(v, &code) != nil || code == nil || *code != successCode {
 		return errors.New("robot rejected message")
 	}
 	return nil
@@ -202,9 +216,19 @@ func (s *AccountOpsService) robotIdentity(w AccountOpsWebhook) (string, error) {
 	if s.encryptor == nil {
 		return "", errors.New("robot encryption unavailable")
 	}
-	raw, err := s.encryptor.Decrypt(w.urlCipher)
+	cipher := w.urlCipher
+	if w.Provider == "pushplus" {
+		cipher = w.tokenCipher
+	}
+	if cipher == "" {
+		return "", errors.New("robot credentials unavailable")
+	}
+	raw, err := s.encryptor.Decrypt(cipher)
 	if err != nil {
 		return "", errors.New("robot credential decryption failed")
+	}
+	if w.Provider == "pushplus" {
+		raw = "pushplus\n" + raw
 	}
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:]), nil

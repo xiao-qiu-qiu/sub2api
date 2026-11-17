@@ -18,6 +18,9 @@ type accountOpsMessage struct {
 }
 
 func (s *AccountOpsService) notificationMessage(e *AccountOpsEvent) accountOpsMessage {
+	if e.Kind == "quality_degraded" {
+		return s.qualityDegradationMessage(e)
+	}
 	reason := "上游余额不足"
 	action := "请检查账号的上游余额并充值。"
 	if e.Kind == "weekly_quota" {

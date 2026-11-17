@@ -6,6 +6,7 @@
         <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3">
           <label class="flex items-center gap-2 text-sm"><input v-model="draft.balance_low" type="checkbox" data-testid="global-balance-low" @change="dirty = true" />{{ t('accountOps.balance_low') }}</label>
           <label class="flex items-center gap-2 text-sm"><input v-model="draft.weekly_quota" type="checkbox" data-testid="global-weekly-quota" @change="dirty = true" />{{ t('accountOps.weekly_quota') }}</label>
+          <label class="flex items-center gap-2 text-sm"><input v-model="draft.quality_degraded" type="checkbox" data-testid="global-quality-degraded" @change="dirty = true" />{{ t('accountOps.quality_degraded') }}</label>
           <label class="flex flex-wrap items-center gap-2 text-sm">
             <span>{{ t('accountOps.cooldown') }}</span>
             <input v-model.number="draft.cooldown_minutes" type="number" min="5" max="1440" step="1" required class="input w-24 py-1.5 text-sm" data-testid="global-cooldown" @input="dirty = true" />
@@ -28,14 +29,14 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 const props = defineProps<{ config: AccountOpsConfig; disabled?: boolean }>()
 const emit = defineEmits<{ (event: 'saved', config: AccountOpsConfig): void; (event: 'error', message: string): void; (event: 'saving', value: boolean): void }>()
 const { t } = useI18n()
-const draft = reactive({ balance_low: true, weekly_quota: true, cooldown_minutes: 60 })
+const draft = reactive({ balance_low: true, weekly_quota: true, quality_degraded: false, cooldown_minutes: 60 })
 const dirty = ref(false), busy = ref(false)
 let alive = true
-watch(() => [props.config.balance_low, props.config.weekly_quota, props.config.cooldown_minutes], () => {
+watch(() => [props.config.balance_low, props.config.weekly_quota, props.config.quality_degraded, props.config.cooldown_minutes], () => {
   if (!dirty.value && !busy.value) reset(props.config)
 }, { immediate: true })
 function reset(config: AccountOpsConfig) {
-  Object.assign(draft, { balance_low: config.balance_low, weekly_quota: config.weekly_quota, cooldown_minutes: config.cooldown_minutes })
+  Object.assign(draft, { balance_low: config.balance_low, weekly_quota: config.weekly_quota, quality_degraded: config.quality_degraded ?? false, cooldown_minutes: config.cooldown_minutes })
   dirty.value = false
 }
 onBeforeUnmount(() => { alive = false; emit('saving', false) })
