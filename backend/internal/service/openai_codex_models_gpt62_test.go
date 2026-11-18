@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGPT62CodexFallbackKeepsIndependentIdentityAndGenericLimits(t *testing.T) {
+func TestGPT62CodexFallbackUsesSameModelStaticMetadata(t *testing.T) {
 	for _, modelID := range []string{
 		openai.GPT62SolModel, openai.GPT62AstraModel,
 		"OpenAI/GPT-6.2-SOL", "vendor/gpt-6.2-astra-max",
@@ -17,16 +17,22 @@ func TestGPT62CodexFallbackKeepsIndependentIdentityAndGenericLimits(t *testing.T
 		t.Run(modelID, func(t *testing.T) {
 			descriptor := newConfiguredCodexModelDescriptor(modelID)
 			require.Equal(t, modelID, descriptor.Slug)
-			require.Empty(t, descriptor.officialMetadata)
+			require.NotEmpty(t, descriptor.officialMetadata)
 			require.Equal(t, openai.CodexBaseInstructionsForModel("gpt-6-astra"), descriptor.ModelMessages.InstructionsTemplate,
-				"GPT-6 prompt is a compatibility template, not GPT-6.2 official metadata")
-			require.EqualValues(t, configuredCodexFallbackContext, descriptor.ContextWindow)
-			require.EqualValues(t, configuredCodexFallbackContext, descriptor.MaxContextWindow)
-			require.Nil(t, descriptor.MultiAgentReasoningEffort)
-			require.Empty(t, descriptor.MultiAgentVersion)
+				"static metadata must not change the existing instruction template")
+			contextWindow := int64(272_000)
+			modalities := []string{"text", "image"}
+			if openai.IsGPT62SolModelSpelling(modelID) {
+				contextWindow = 500_000
+				modalities = append(modalities, "audio")
+			}
+			require.Equal(t, contextWindow, descriptor.ContextWindow)
+			require.EqualValues(t, 872_000, descriptor.MaxContextWindow)
+			require.Equal(t, "xhigh", *descriptor.MultiAgentReasoningEffort)
+			require.Equal(t, "v2", descriptor.MultiAgentVersion)
 			require.Empty(t, descriptor.ServiceTiers)
-			require.Equal(t, []string{"text", "image"}, descriptor.InputModalities)
-			require.Equal(t, "medium", *descriptor.DefaultReasoningLevel)
+			require.Equal(t, modalities, descriptor.InputModalities)
+			require.Equal(t, "low", *descriptor.DefaultReasoningLevel)
 			require.True(t, isOpenAICodexReasoningGPTModel(modelID))
 			require.True(t, isOpenAICodexImageInputModel(modelID))
 			encoded, err := json.Marshal(descriptor)
@@ -35,16 +41,22 @@ func TestGPT62CodexFallbackKeepsIndependentIdentityAndGenericLimits(t *testing.T
 			require.NoError(t, json.Unmarshal(encoded, &fields))
 			require.Equal(t, []string{"low", "medium", "high", "xhigh", "max"}, effortsFromManifestModel(t, fields))
 			require.NotContains(t, fields, "max_output_tokens")
+			require.NotContains(t, fields, "base_instructions")
+			require.NotContains(t, fields, "available_in_plans")
+			require.Equal(t, "0.166.0", fields["minimal_client_version"])
+			require.Equal(t, true, fields["prefer_websockets"])
+			require.Equal(t, "text_and_image", fields["web_search_tool_type"])
 		})
 	}
 	for _, modelID := range []string{
-		"gpt-6.2-sol-preview", "gpt-6.2-astra-ultra", "gpt-6.2-astra-2026-02-30", "gpt-6.3-sol",
+		"gpt-6.2-sol-preview", "gpt-6.2-astra-ultra", "gpt-6.2-astra-pro", "gpt-6.2-astra-2026-02-30", "gpt-6.3-sol",
 	} {
 		t.Run(modelID, func(t *testing.T) {
 			require.False(t, isOpenAICodexReasoningGPTModel(modelID))
 			require.False(t, isOpenAICodexImageInputModel(modelID))
 			descriptor := newConfiguredCodexModelDescriptor(modelID)
 			require.Equal(t, modelID, descriptor.Slug)
+			require.Empty(t, descriptor.officialMetadata)
 			require.Equal(t, "none", *descriptor.DefaultReasoningLevel)
 		})
 	}
@@ -53,9 +65,9 @@ func TestGPT62CodexFallbackKeepsIndependentIdentityAndGenericLimits(t *testing.T
 	models := decodeCodexManifestModels(t, body)
 	require.Len(t, models, 2)
 	require.Equal(t, openai.GPT62SolModel, models[0]["slug"])
-	require.Equal(t, "GPT-6.2 Sol", models[0]["display_name"])
+	require.Equal(t, "GPT-6.2-Sol", models[0]["display_name"])
 	require.Equal(t, openai.GPT62AstraModel, models[1]["slug"])
-	require.Equal(t, "GPT-6.2 Astra", models[1]["display_name"])
+	require.Equal(t, "GPT-6.2-Astra", models[1]["display_name"])
 }
 
 func TestGPT62CodexAPIKeyPreservesNativeMetadata(t *testing.T) {
@@ -168,12 +180,42 @@ func TestGPT62CodexGroupDoesNotBorrowPreviousGenerationMetadata(t *testing.T) {
 		[]string{openai.GPT62SolModel, openai.GPT62AstraModel}, []Account{account}, nil, nil, true)
 	require.NoError(t, err)
 	for _, model := range decodeCodexManifestModels(t, body) {
-		require.EqualValues(t, configuredCodexFallbackContext, model["context_window"])
-		require.EqualValues(t, configuredCodexFallbackContext, model["max_context_window"])
+		contextWindow := 272_000
+		if model["slug"] == openai.GPT62SolModel {
+			contextWindow = 500_000
+		}
+		require.EqualValues(t, contextWindow, model["context_window"])
+		require.EqualValues(t, 872_000, model["max_context_window"])
 		require.Contains(t, effortsFromManifestModel(t, model), "max")
 		require.Equal(t, []any{"text", "image"}, model["input_modalities"])
-		require.Nil(t, model["multi_agent_reasoning_effort"])
-		require.Empty(t, model["multi_agent_version"])
+		require.Equal(t, "xhigh", model["multi_agent_reasoning_effort"])
+		require.Equal(t, "v2", model["multi_agent_version"])
+	}
+}
+
+func TestGPT62CodexStaticMetadataPreservesBPSModelScope(t *testing.T) {
+	account := Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra: map[string]any{
+			"openai_excel_bps":        true,
+			"openai_excel_bps_models": []string{openai.GPT62SolModel},
+		},
+	}
+	body, err := buildCodexModelsManifestForAccounts(PlatformOpenAI,
+		[]string{openai.GPT62SolModel, openai.GPT62AstraModel}, []Account{account}, nil, nil, true)
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 2)
+	require.Equal(t, openai.GPT62SolModel, models[0]["slug"])
+	require.Nil(t, models[0]["multi_agent_version"])
+	require.Nil(t, models[0]["multi_agent_reasoning_effort"])
+	require.Equal(t, openai.GPT62AstraModel, models[1]["slug"])
+	require.Equal(t, "v2", models[1]["multi_agent_version"])
+	require.Equal(t, "xhigh", models[1]["multi_agent_reasoning_effort"])
+	for _, model := range models {
+		require.Empty(t, model["service_tiers"])
+		require.Contains(t, effortsFromManifestModel(t, model), "max")
 	}
 }
 

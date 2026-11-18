@@ -31,6 +31,16 @@ import (
 // （GLM effort 归一化、fast policy、Grok 分支、ClientDisconnect 语义等）仍留在
 // 调用方，属于有意保留的行为差异，不在此强行统一。
 
+type flushBeforeUpstreamRead struct {
+	reader io.Reader
+	flush  func()
+}
+
+func (reader *flushBeforeUpstreamRead) Read(data []byte) (int, error) {
+	reader.flush()
+	return reader.reader.Read(data)
+}
+
 // newUpstreamSSEScanner 构造读取上游 SSE 流的行扫描器，按配置放大单行上限。
 func (s *OpenAIGatewayService) newUpstreamSSEScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)

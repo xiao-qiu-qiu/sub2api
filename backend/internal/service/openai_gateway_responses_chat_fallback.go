@@ -649,24 +649,31 @@ func ensureDeepSeekChatReasoningPlaceholders(account *Account, body []byte) []by
 	if !messages.IsArray() {
 		return body
 	}
-	updated := body
-	changed := false
-	for i, msg := range messages.Array() {
+	var edits []jsonObjectStringFieldEdit
+	var indexes []int
+	for messageIndex, msg := range messages.Array() {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
 		if msg.Get("reasoning_content").String() != "" {
 			continue
 		}
-		next, err := sjson.SetBytes(updated, "messages."+strconv.Itoa(i)+".reasoning_content", deepSeekChatReasoningPlaceholderText)
+		edits = append(edits, jsonObjectStringFieldEdit{object: msg, value: deepSeekChatReasoningPlaceholderText})
+		indexes = append(indexes, messageIndex)
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	if updated, ok := setStringFieldInJSONObjects(body, "reasoning_content", edits); ok {
+		return updated
+	}
+	updated := body
+	for _, messageIndex := range indexes {
+		next, err := sjson.SetBytes(updated, "messages."+strconv.Itoa(messageIndex)+".reasoning_content", deepSeekChatReasoningPlaceholderText)
 		if err != nil {
 			return body
 		}
 		updated = next
-		changed = true
-	}
-	if !changed {
-		return body
 	}
 	return updated
 }

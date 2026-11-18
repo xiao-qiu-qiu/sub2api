@@ -4,12 +4,88 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/cespare/xxhash/v2"
+	"github.com/tidwall/gjson"
 )
+
+func GenerateGeminiContentSessionHash(apiKeyID int64, model string, body []byte) string {
+	root := parseRawJSONView(body)
+	if !root.IsObject() {
+		return ""
+	}
+	firstUserParts := firstGeminiUserParts(root.Get("contents"))
+	if !firstUserParts.Exists() {
+		return ""
+	}
+
+	digest := xxhash.New()
+	_, _ = digest.WriteString("gemini_cs_key=")
+	_, _ = digest.WriteString(strconv.FormatInt(apiKeyID, 10))
+	if model = strings.TrimSpace(model); model != "" {
+		_, _ = digest.WriteString("|model=")
+		_, _ = digest.WriteString(model)
+	}
+	if tools := root.Get("tools"); tools.IsArray() {
+		if normalized, ok := normalizeNonEmptyCompatSeedJSON(tools); ok {
+			_, _ = digest.WriteString("|tools=")
+			_, _ = digest.WriteString(normalized)
+		}
+	}
+	system := root.Get("systemInstruction")
+	if !system.Exists() {
+		system = root.Get("system_instruction")
+	}
+	if normalized, ok := normalizeNonEmptyCompatSeedJSON(system); ok {
+		_, _ = digest.WriteString("|system=")
+		_, _ = digest.WriteString(normalized)
+	}
+	_, _ = digest.WriteString("|first_user=")
+	_, _ = digest.WriteString(normalizeCompatSeedJSON(json.RawMessage(firstUserParts.Raw)))
+	return fmt.Sprintf("%016x", digest.Sum64())
+}
+
+func firstGeminiUserParts(contents gjson.Result) gjson.Result {
+	var parts gjson.Result
+	if !contents.IsArray() {
+		return parts
+	}
+	contents.ForEach(func(_, content gjson.Result) bool {
+		if content.IsObject() {
+			if role := content.Get("role").String(); role != "" && role != "user" {
+				return true
+			}
+			if candidate := content.Get("parts"); hasMeaningfulGeminiParts(candidate) {
+				parts = candidate
+			}
+		}
+		return false
+	})
+	return parts
+}
+
+func hasMeaningfulGeminiParts(parts gjson.Result) bool {
+	if !parts.IsArray() {
+		return false
+	}
+	meaningful := false
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if text := part.Get("text"); text.Exists() {
+			meaningful = strings.TrimSpace(text.String()) != ""
+		} else if part.IsObject() {
+			part.ForEach(func(_, _ gjson.Result) bool {
+				meaningful = true
+				return false
+			})
+		}
+		return !meaningful
+	})
+	return meaningful
+}
 
 // shortHash 使用 XXHash64 + Base36 生成短 hash（16 字符）
 // XXHash64 比 SHA256 快约 10 倍，Base36 比 Hex 短约 20%

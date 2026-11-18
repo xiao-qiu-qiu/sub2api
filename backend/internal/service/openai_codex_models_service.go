@@ -568,10 +568,12 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		// the bundled official snapshot. Explicit upstream metadata still wins.
 		descriptor.ContextWindow = 500_000
 	}
-	if openai.IsGPT62ModelSpelling(modelID) {
-		// Pre-release compatibility uses the generic client window, not a
-		// claimed model limit or an older model's official metadata snapshot.
-		descriptor.InputModalities = []string{"text", "image"}
+	if metadata := gpt62CodexModelMetadata(modelID); len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &descriptor); err != nil {
+			panic(err)
+		}
+		descriptor.Slug = modelID
+		descriptor.officialMetadata = metadata
 	}
 	return descriptor
 }

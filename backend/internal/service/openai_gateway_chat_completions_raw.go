@@ -337,12 +337,19 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
-	scanner := s.newUpstreamSSEScanner(resp.Body)
 
 	var usage OpenAIUsage
 	var firstTokenMs *int
 	clientDisconnected := false
 	clientOutputStarted := false
+	flushPending := false
+	flushToClient := func() {
+		if flushPending && !clientDisconnected && clientOutputStarted {
+			c.Writer.Flush()
+		}
+		flushPending = false
+	}
+	scanner := s.newUpstreamSSEScanner(&flushBeforeUpstreamRead{reader: resp.Body, flush: flushToClient})
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
@@ -418,16 +425,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 		line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
 		writeLine(line)
-		if line == "" {
-			if !clientDisconnected && clientOutputStarted {
-				c.Writer.Flush()
-			}
-			continue
-		}
-		if !clientDisconnected && clientOutputStarted {
-			c.Writer.Flush()
-		}
+		flushPending = true
 	}
+	flushToClient()
 
 	resultWithUsage := func() *OpenAIForwardResult {
 		terminalEvent := ""

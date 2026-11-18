@@ -15,6 +15,17 @@ var codexToolCapabilityFields = []string{
 	"multi_agent_reasoning_effort", "multi_agent_version",
 }
 
+func gpt62CodexModelMetadata(modelID string) json.RawMessage {
+	switch {
+	case openai.IsGPT62SolModelSpelling(modelID):
+		return openai.CodexGPT62SolMetadata
+	case openai.IsGPT62AstraModelSpelling(modelID):
+		return openai.CodexGPT62AstraMetadata
+	default:
+		return nil
+	}
+}
+
 func applyCodexToolCapabilities(dst, src map[string]json.RawMessage, overwrite bool) bool {
 	changed := false
 	for _, field := range codexToolCapabilityFields {

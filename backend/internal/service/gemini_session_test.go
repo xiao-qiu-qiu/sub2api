@@ -32,6 +32,83 @@ func TestShortHash(t *testing.T) {
 	}
 }
 
+func TestGenerateGeminiContentSessionHashStablePrefix(t *testing.T) {
+	const prefix = `"tools":[{"googleSearch":{}}],"systemInstruction":{"parts":[{"text":"sys"}]} `
+	const first = `{"role":"user","parts":[{"text":"hi"}]}`
+	body := `{` + prefix + `,"contents":[` + first + `]}`
+	want := DeriveSessionHashFromSeed(`gemini_cs_key=3|model=gemini-3.8-flash|tools=[{"googleSearch":{}}]|system={"parts":[{"text":"sys"}]}|first_user=[{"text":"hi"}]`)
+	if got := GenerateGeminiContentSessionHash(3, " gemini-3.8-flash ", []byte(body)); got != want {
+		t.Fatalf("hash %q, want %q", got, want)
+	}
+	for name, tail := range map[string]string{
+		"appended": `,{"role":"model","parts":[{"text":"reply"}]},{"role":"user","parts":[{"text":"next"}]}`,
+		"tools":    `,{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{}}}]} `,
+		"edited":   `,{"role":"user","parts":[{"text":"edited tail"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			modified := `{` + prefix + `,"contents":[` + first + tail + `],"generationConfig":{"temperature":0.2}}`
+			if got := GenerateGeminiContentSessionHash(3, "gemini-3.8-flash", []byte(modified)); got != want {
+				t.Fatalf("hash %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestGenerateGeminiContentSessionHashIsolationAndNormalization(t *testing.T) {
+	const body = `{"tools":[{"googleSearch":{}}],"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	baseline := GenerateGeminiContentSessionHash(1, "m", []byte(body))
+	for name, changed := range map[string]string{
+		"key":    GenerateGeminiContentSessionHash(2, "m", []byte(body)),
+		"model":  GenerateGeminiContentSessionHash(1, "other", []byte(body)),
+		"tools":  GenerateGeminiContentSessionHash(1, "m", []byte(`{"contents":[{"parts":[{"text":"hi"}]}],"systemInstruction":{"parts":[{"text":"sys"}]}}`)),
+		"system": GenerateGeminiContentSessionHash(1, "m", []byte(`{"tools":[{"googleSearch":{}}],"contents":[{"parts":[{"text":"hi"}]}]}`)),
+		"first":  GenerateGeminiContentSessionHash(1, "m", []byte(`{"tools":[{"googleSearch":{}}],"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"parts":[{"text":"changed"}]}]}`)),
+	} {
+		if changed == "" || changed == baseline {
+			t.Errorf("%s must produce an independent nonempty hash", name)
+		}
+	}
+	for name, equivalent := range map[string]string{
+		"formatting":    `{ "contents": [ {"parts": [{"text":"hi"}], "role":"user"} ], "systemInstruction": {"parts":[{"text":"sys"}]}, "tools": [{"googleSearch":{}}] }`,
+		"role_omitted":  `{"tools":[{"googleSearch":{}}],"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"parts":[{"text":"hi"}]}]}`,
+		"leading_model": `{"tools":[{"googleSearch":{}}],"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"model","parts":[{"text":"greeting"}]},{"role":"user","parts":[{"text":"hi"}]}]}`,
+		"snake_system":  `{"tools":[{"googleSearch":{}}],"system_instruction":{"parts":[{"text":"sys"}]},"contents":[{"parts":[{"text":"hi"}]}]}`,
+		"both_systems":  `{"tools":[{"googleSearch":{}}],"system_instruction":{"parts":[{"text":"other"}]},"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"parts":[{"text":"hi"}]}]}`,
+	} {
+		if got := GenerateGeminiContentSessionHash(1, "m", []byte(equivalent)); got != baseline {
+			t.Errorf("%s: hash %q, want %q", name, got, baseline)
+		}
+	}
+	withoutTools := `{"contents":[{"parts":[{"text":"hi"}]}]}`
+	emptyTools := `{"tools":[],"contents":[{"parts":[{"text":"hi"}]}]}`
+	if GenerateGeminiContentSessionHash(1, "m", []byte(withoutTools)) != GenerateGeminiContentSessionHash(1, "m", []byte(emptyTools)) {
+		t.Error("empty tools must match missing tools")
+	}
+}
+
+func TestGenerateGeminiContentSessionHashRequiresMeaningfulFirstUser(t *testing.T) {
+	for _, body := range []string{
+		``, `[1,2]`, `{}`, `{"contents":[]}`, `{"contents":{"parts":[{"text":"hi"}]}}`,
+		`{"contents":[{"role":"model","parts":[{"text":"hi"}]}]}`,
+		`{"contents":[{"role":"user","parts":[]}]}`, `{"contents":[{"role":"user"}]}`,
+		`{"contents":[{"parts":[{"text":"   "}]}]}`, `{"contents":[{"parts":[{}]}]}`,
+		`{"contents":[{"parts":[null]}]}`, `{"contents":["invalid",{"parts":[{"text":"hi"}]}]}`,
+		`{"contents":[{"parts":[{"text":" "}]},{"parts":[{"text":"later"}]}]}`,
+	} {
+		if got := GenerateGeminiContentSessionHash(1, "m", []byte(body)); got != "" {
+			t.Errorf("expected empty hash for %s, got %q", body, got)
+		}
+	}
+	for _, body := range []string{
+		`{"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"aW1n"}}]}]}`,
+		`{"contents":[{"parts":[{"text":" "},{"fileData":{"fileUri":"gs://bucket/file"}}]}]}`,
+	} {
+		if GenerateGeminiContentSessionHash(1, "m", []byte(body)) == "" {
+			t.Errorf("expected a nonempty hash for %s", body)
+		}
+	}
+}
+
 func TestBuildGeminiDigestChain(t *testing.T) {
 	tests := []struct {
 		name     string
