@@ -1,6 +1,7 @@
 package service
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -85,8 +86,15 @@ func TestGPT62CompatCacheAndAccountBoundaries(t *testing.T) {
 }
 
 func TestGPT62PricingDoesNotBorrowLegacyOrSiblingRates(t *testing.T) {
-	for _, model := range []string{openai.GPT62SolModel, openai.GPT62AstraModel} {
-		t.Run(model, func(t *testing.T) {
+	for _, test := range []struct {
+		model string
+		input float64
+	}{
+		{openai.GPT62SolModel, 2e-6},
+		{openai.GPT62AstraModel, 8e-6},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			model := test.model
 			sibling := openai.GPT62SolModel
 			if model == sibling {
 				sibling = openai.GPT62AstraModel
@@ -98,10 +106,11 @@ func TestGPT62PricingDoesNotBorrowLegacyOrSiblingRates(t *testing.T) {
 			}}
 			billing := NewBillingService(&config.Config{}, catalog)
 			for _, spelling := range []string{model, "openai/" + model, model + "-max", model + "-2026-11-08"} {
-				require.Nil(t, catalog.GetModelPricing(spelling))
 				require.Nil(t, catalog.GetIdentifiedModelPricing(spelling))
-				_, err := billing.GetModelPricing(spelling)
-				require.ErrorIs(t, err, ErrModelPricingUnavailable)
+				require.True(t, billing.HasIdentifiedTokenPricing(spelling))
+				got, err := billing.GetModelPricing(spelling)
+				require.NoError(t, err)
+				require.Equal(t, test.input, got.InputPricePerToken)
 			}
 
 			// Synthetic catalog values deliberately differ from every old model.
@@ -123,6 +132,59 @@ func TestGPT62PricingDoesNotBorrowLegacyOrSiblingRates(t *testing.T) {
 				require.True(t, got.CacheCreationPriceExplicit)
 				require.Equal(t, rate.LongContextInputTokenThreshold, got.LongContextInputThreshold)
 				require.Equal(t, rate.LongContextInputCostMultiplier, got.LongContextInputMultiplier)
+			}
+		})
+	}
+}
+
+func TestGPT62PublishedRatesAcrossPricingSources(t *testing.T) {
+	body, err := os.ReadFile("../../resources/model-pricing/model_prices_and_context_window.json")
+	require.NoError(t, err)
+	catalog := newStubPricingServiceFromJSON(t, string(body))
+	for _, source := range []struct {
+		name    string
+		pricing *PricingService
+	}{
+		{"catalog", catalog},
+		{"missing_catalog_entry", &PricingService{}},
+		{"no_pricing_service", nil},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			billing := NewBillingService(&config.Config{}, source.pricing)
+			for _, test := range []struct {
+				model                                string
+				input, output, cacheWrite, cacheRead float64
+			}{
+				{openai.GPT62SolModel, 2e-6, 10e-6, 2.5e-6, 0.1e-6},
+				{openai.GPT62AstraModel, 8e-6, 40e-6, 10e-6, 0.4e-6},
+			} {
+				t.Run(test.model, func(t *testing.T) {
+					for _, tier := range []struct {
+						name       string
+						multiplier float64
+					}{
+						{"default", 1}, {"priority", 2}, {"flex", 0.5}, {"ultrafast", 6},
+					} {
+						t.Run(tier.name, func(t *testing.T) {
+							tokens := UsageTokens{InputTokens: 271_998, OutputTokens: 10, CacheCreationTokens: 1, CacheReadTokens: 1}
+							cost, err := billing.CalculateCostWithServiceTier(test.model, tokens, 1, tier.name)
+							require.NoError(t, err)
+							require.False(t, cost.LongContextBillingApplied)
+							require.InDelta(t, 271_998*test.input*tier.multiplier, cost.InputCost, 1e-12)
+							require.InDelta(t, 10*test.output*tier.multiplier, cost.OutputCost, 1e-12)
+							require.InDelta(t, test.cacheWrite*tier.multiplier, cost.CacheCreationCost, 1e-12)
+							require.InDelta(t, test.cacheRead*tier.multiplier, cost.CacheReadCost, 1e-12)
+							tokens.InputTokens++
+							cost, err = billing.CalculateCostWithServiceTier(test.model, tokens, 1, tier.name)
+							require.NoError(t, err)
+							require.True(t, cost.LongContextBillingApplied)
+							require.InDelta(t, 271_999*test.input*tier.multiplier*2, cost.InputCost, 1e-12)
+							require.InDelta(t, 10*test.output*tier.multiplier*1.5, cost.OutputCost, 1e-12)
+							require.InDelta(t, test.cacheWrite*tier.multiplier*2, cost.CacheCreationCost, 1e-12)
+							require.InDelta(t, test.cacheRead*tier.multiplier*2, cost.CacheReadCost, 1e-12)
+						})
+					}
+				})
 			}
 		})
 	}

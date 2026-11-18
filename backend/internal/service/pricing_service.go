@@ -121,7 +121,9 @@ var (
 		Mode:                                "chat",
 		SupportsPromptCaching:               true,
 	}
-	openAIGPT6SolFallbackPricing = &LiteLLMModelPricing{
+	openAIGPT62SolFallbackPricing   = newOpenAIGPT62FallbackPricing(2e-6, 10e-6, 2.5e-6, 0.1e-6)
+	openAIGPT62AstraFallbackPricing = newOpenAIGPT62FallbackPricing(8e-6, 40e-6, 10e-6, 0.4e-6)
+	openAIGPT6SolFallbackPricing    = &LiteLLMModelPricing{
 		InputCostPerToken:                   2e-6,
 		InputCostPerTokenPriority:           4e-6,
 		OutputCostPerToken:                  10e-6,
@@ -269,6 +271,27 @@ type LiteLLMModelPricing struct {
 	// 此类条目只可用于图片计费，token 计费必须回退到 fallback 或 fail-closed，
 	// 否则 token 流量会被按 $0 计费。零值（false）表示条目具备 token 价格。
 	TokenPricingAbsent bool `json:"-"`
+}
+
+func newOpenAIGPT62FallbackPricing(input, output, cacheWrite, cacheRead float64) *LiteLLMModelPricing {
+	return &LiteLLMModelPricing{
+		InputCostPerToken:                   input,
+		InputCostPerTokenPriority:           input * 2,
+		OutputCostPerToken:                  output,
+		OutputCostPerTokenPriority:          output * 2,
+		CacheCreationInputTokenCost:         cacheWrite,
+		CacheCreationInputTokenCostPriority: cacheWrite * 2,
+		CacheCreationInputTokenCostExplicit: true,
+		CacheReadInputTokenCost:             cacheRead,
+		CacheReadInputTokenCostPriority:     cacheRead * 2,
+		LongContextInputTokenThreshold:      272_000,
+		LongContextInputCostMultiplier:      2,
+		LongContextOutputCostMultiplier:     1.5,
+		SupportsServiceTier:                 true,
+		LiteLLMProvider:                     "openai",
+		Mode:                                "chat",
+		SupportsPromptCaching:               true,
+	}
 }
 
 // PricingRemoteClient 远程价格数据获取接口
@@ -1254,10 +1277,11 @@ func (s *PricingService) GetModelPricing(modelName string) *LiteLLMModelPricing 
 	if pricing := s.lookupIdentifiedModelPricingLocked(lookupCandidates); pricing != nil {
 		return pricing
 	}
-	// Until published prices exist, the reserved GPT-6.2 IDs may only use
-	// their own configured catalog entries. Never borrow another model's rate.
-	if openai.IsGPT62ModelSpelling(modelLower) {
-		return nil
+	switch {
+	case openai.IsGPT62SolModelSpelling(modelLower):
+		return openAIGPT62SolFallbackPricing
+	case openai.IsGPT62AstraModelSpelling(modelLower):
+		return openAIGPT62AstraFallbackPricing
 	}
 
 	// 4. 基于模型系列匹配（Claude）

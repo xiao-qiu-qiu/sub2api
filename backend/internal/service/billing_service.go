@@ -602,6 +602,8 @@ func (s *BillingService) initFallbackPricing() {
 		LongContextInputMultiplier:         2,
 		LongContextOutputMultiplier:        1.5,
 	}
+	s.fallbackPrices[openai.GPT62SolModel] = modelPricingFromLiteLLM(openai.GPT62SolModel, openAIGPT62SolFallbackPricing)
+	s.fallbackPrices[openai.GPT62AstraModel] = modelPricingFromLiteLLM(openai.GPT62AstraModel, openAIGPT62AstraFallbackPricing)
 	s.fallbackPrices["gpt-6-sol"] = &ModelPricing{
 		InputPricePerToken:                 2e-6,
 		InputPricePerTokenPriority:         4e-6,
@@ -1253,7 +1255,7 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	// OpenAI（GPT-5 / Codex 族）：仅匹配已知型号，避免未知 OpenAI 型号误计价。
 	if normalized := normalizeKnownOpenAICodexModel(modelLower); normalized != "" {
 		switch normalized {
-		case "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna":
+		case "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", openai.GPT62SolModel, openai.GPT62AstraModel:
 			return s.fallbackPrices[normalized]
 		case "gpt-6-astra":
 			return s.fallbackPrices["gpt-6-astra"]
@@ -1377,6 +1379,9 @@ func (s *BillingService) HasIdentifiedTokenPricing(model string) bool {
 			return true
 		}
 	}
+	if openai.IsGPT62ModelSpelling(model) {
+		model = normalizeKnownOpenAICodexModel(model)
+	}
 	pricing, ok := s.fallbackPrices[model]
 	return ok && pricing != nil
 }
@@ -1416,34 +1421,7 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 			litellmPricing = nil
 		}
 		if litellmPricing != nil {
-			// 启用 5m/1h 分类计费的条件：
-			// 1. 存在 1h 价格
-			// 2. 1h 价格 > 5m 价格（防止 LiteLLM 数据错误导致少收费）
-			price5m := litellmPricing.CacheCreationInputTokenCost
-			price1h := litellmPricing.CacheCreationInputTokenCostAbove1hr
-			enableBreakdown := price1h > 0 && price1h > price5m
-			return s.applyModelSpecificPricingPolicyEx(model, &ModelPricing{
-				InputPricePerToken:                 litellmPricing.InputCostPerToken,
-				InputPricePerTokenPriority:         litellmPricing.InputCostPerTokenPriority,
-				OutputPricePerToken:                litellmPricing.OutputCostPerToken,
-				OutputPricePerTokenPriority:        litellmPricing.OutputCostPerTokenPriority,
-				CacheCreationPriceExplicit:         (openai.IsGPT6SolOrLunaModelSpelling(model) || openai.IsGPT61SolModelSpelling(model) || openai.IsGPT61TerraModelSpelling(model) || openai.IsGPT62ModelSpelling(model)) && litellmPricing.CacheCreationInputTokenCostExplicit,
-				CacheCreationPricePerToken:         litellmPricing.CacheCreationInputTokenCost,
-				CacheCreationPricePerTokenPriority: litellmPricing.CacheCreationInputTokenCostPriority,
-				CacheReadPricePerToken:             litellmPricing.CacheReadInputTokenCost,
-				CacheReadPricePerTokenPriority:     litellmPricing.CacheReadInputTokenCostPriority,
-				CacheCreation5mPrice:               price5m,
-				CacheCreation1hPrice:               price1h,
-				SupportsCacheBreakdown:             enableBreakdown,
-				LongContextInputThreshold:          litellmPricing.LongContextInputTokenThreshold,
-				// xAI 的长上下文阈值语义为"达到即进高档"（LiteLLM 同口径），其余提供商为严格大于。
-				LongContextThresholdInclusive: strings.EqualFold(litellmPricing.LiteLLMProvider, "xai"),
-				LongContextInputMultiplier:    litellmPricing.LongContextInputCostMultiplier,
-				LongContextOutputMultiplier:   litellmPricing.LongContextOutputCostMultiplier,
-				ImageInputPricePerToken:       litellmPricing.InputCostPerImageToken,
-				ImageCacheReadPricePerToken:   litellmPricing.CacheReadInputImageTokenCost,
-				ImageOutputPricePerToken:      litellmPricing.OutputCostPerImageToken,
-			}, true, pricingAt), nil
+			return s.applyModelSpecificPricingPolicyEx(model, modelPricingFromLiteLLM(model, litellmPricing), true, pricingAt), nil
 		}
 	}
 
@@ -1459,6 +1437,34 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 	}
 
 	return nil, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
+}
+
+func modelPricingFromLiteLLM(model string, pricing *LiteLLMModelPricing) *ModelPricing {
+	// 启用 5m/1h 分类计费的条件：存在 1h 价格且大于 5m 价格。
+	price5m := pricing.CacheCreationInputTokenCost
+	price1h := pricing.CacheCreationInputTokenCostAbove1hr
+	return &ModelPricing{
+		InputPricePerToken:                 pricing.InputCostPerToken,
+		InputPricePerTokenPriority:         pricing.InputCostPerTokenPriority,
+		OutputPricePerToken:                pricing.OutputCostPerToken,
+		OutputPricePerTokenPriority:        pricing.OutputCostPerTokenPriority,
+		CacheCreationPriceExplicit:         (openai.IsGPT6SolOrLunaModelSpelling(model) || openai.IsGPT61SolModelSpelling(model) || openai.IsGPT61TerraModelSpelling(model) || openai.IsGPT62ModelSpelling(model)) && pricing.CacheCreationInputTokenCostExplicit,
+		CacheCreationPricePerToken:         price5m,
+		CacheCreationPricePerTokenPriority: pricing.CacheCreationInputTokenCostPriority,
+		CacheReadPricePerToken:             pricing.CacheReadInputTokenCost,
+		CacheReadPricePerTokenPriority:     pricing.CacheReadInputTokenCostPriority,
+		CacheCreation5mPrice:               price5m,
+		CacheCreation1hPrice:               price1h,
+		SupportsCacheBreakdown:             price1h > 0 && price1h > price5m,
+		LongContextInputThreshold:          pricing.LongContextInputTokenThreshold,
+		// xAI 的长上下文阈值语义为"达到即进高档"（LiteLLM 同口径），其余提供商为严格大于。
+		LongContextThresholdInclusive: strings.EqualFold(pricing.LiteLLMProvider, "xai"),
+		LongContextInputMultiplier:    pricing.LongContextInputCostMultiplier,
+		LongContextOutputMultiplier:   pricing.LongContextOutputCostMultiplier,
+		ImageInputPricePerToken:       pricing.InputCostPerImageToken,
+		ImageCacheReadPricePerToken:   pricing.CacheReadInputImageTokenCost,
+		ImageOutputPricePerToken:      pricing.OutputCostPerImageToken,
+	}
 }
 
 // GetModelPricingWithChannel 获取模型定价，渠道配置的价格覆盖默认值。
