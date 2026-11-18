@@ -148,4 +148,117 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		"returned UsageInfo.FiveHour must be non-nil (rebuild from merged Extra must happen)")
 	require.NotNil(t, usage.SevenDay,
 		"returned UsageInfo.SevenDay must be non-nil (rebuild from merged Extra must happen)")
+	require.Equal(t, "active", usage.Source)
+	require.Empty(t, usage.Error)
+	require.NotNil(t, usage.UpdatedAt)
+	observedAt, err := time.Parse(time.RFC3339Nano, shadow.Extra["codex_usage_updated_at"].(string))
+	require.NoError(t, err)
+	require.True(t, usage.UpdatedAt.Equal(observedAt))
+}
+
+func TestGetOpenAIUsage_QuotaEndpoint_FailedOrEmptyQueryDoesNotRefreshSnapshot(t *testing.T) {
+	t.Parallel()
+	for _, accountType := range []string{"shadow", "bps"} {
+		for _, scenario := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"expired token", http.StatusUnauthorized, `{"error":{"code":"token_expired"}}`},
+			{"empty quota", http.StatusOK, `{}`},
+			{"empty windows", http.StatusOK, `{"additional_rate_limits":[{"metered_feature":"codex_bengalfox","rate_limit":{}}]}`},
+		} {
+			t.Run(accountType+"/"+scenario.name, func(t *testing.T) {
+				t.Parallel()
+				observedAt := time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second)
+				parentID := int64(100)
+				parent := &Account{ID: parentID, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive}
+				account := &Account{
+					ID: 200, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+					Extra: map[string]any{
+						"codex_7d_used_percent":  100.0,
+						"codex_usage_updated_at": observedAt.Format(time.RFC3339),
+					},
+				}
+				tokenAccount := account
+				if accountType == "shadow" {
+					account.ParentAccountID = &parentID
+					account.QuotaDimension = QuotaDimensionSpark
+					tokenAccount = parent
+				} else {
+					account.Extra["openai_excel_bps"] = true
+				}
+				repo := &sparkShadowUsageTestRepo{
+					accounts:      map[int64]*Account{100: parent, 200: account},
+					updateExtraCh: make(chan map[string]any, 1),
+				}
+				tokens := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(tokenAccount): "fake-access-token"}}
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Content-Type", "application/json")
+					writer.WriteHeader(scenario.status)
+					_, _ = writer.Write([]byte(scenario.body))
+				}))
+				defer server.Close()
+				svc := &AccountUsageService{
+					accountRepo:        repo,
+					openAIQuotaService: NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokens, nil), newQuotaRedirectingFactory(server), nil),
+				}
+				usage, err := svc.getOpenAIUsage(context.Background(), account, true)
+				require.NoError(t, err)
+				require.Equal(t, errorCodeQuotaRefreshFailed, usage.ErrorCode)
+				require.NotEmpty(t, usage.Error)
+				require.Equal(t, "passive", usage.Source)
+				require.NotNil(t, usage.UpdatedAt)
+				require.True(t, usage.UpdatedAt.Equal(observedAt))
+				require.NotNil(t, usage.SevenDay)
+				require.Equal(t, 100.0, usage.SevenDay.Utilization)
+				require.Equal(t, observedAt.Format(time.RFC3339), account.Extra["codex_usage_updated_at"])
+				select {
+				case <-repo.updateExtraCh:
+					t.Fatal("failed or empty queries must not persist a fresh snapshot")
+				case <-time.After(100 * time.Millisecond):
+				}
+			})
+		}
+	}
+}
+
+func TestGetOpenAIUsage_BPS_UsesQuotaOAuthAndReturnsObservationTime(t *testing.T) {
+	t.Parallel()
+	account := &Account{
+		ID: 201, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Credentials: map[string]any{"chatgpt_account_id": "bps-quota-account"},
+		Extra:       map[string]any{"openai_excel_bps": true},
+	}
+	repo := &sparkShadowUsageTestRepo{
+		accounts:      map[int64]*Account{201: account},
+		updateExtraCh: make(chan map[string]any, 1),
+	}
+	tokens := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "quota-oauth-token"}}
+	var authorization, upstreamAccount string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		authorization = request.Header.Get("Authorization")
+		upstreamAccount = request.Header.Get("chatgpt-account-id")
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":12,"reset_after_seconds":3600,"limit_window_seconds":18000},"secondary_window":{"used_percent":34,"reset_after_seconds":86400,"limit_window_seconds":604800}}}`))
+	}))
+	defer server.Close()
+	svc := &AccountUsageService{
+		accountRepo:        repo,
+		openAIQuotaService: NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokens, nil), newQuotaRedirectingFactory(server), nil),
+	}
+	usage, err := svc.getOpenAIUsage(context.Background(), account, true)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer quota-oauth-token", authorization)
+	require.Equal(t, "bps-quota-account", upstreamAccount)
+	require.Equal(t, "active", usage.Source)
+	require.Empty(t, usage.ErrorCode)
+	require.NotNil(t, usage.FiveHour)
+	require.NotNil(t, usage.SevenDay)
+	require.Equal(t, 12.0, usage.FiveHour.Utilization)
+	require.Equal(t, 34.0, usage.SevenDay.Utilization)
+	observedAt, err := time.Parse(time.RFC3339Nano, account.Extra["codex_usage_updated_at"].(string))
+	require.NoError(t, err)
+	require.NotNil(t, usage.UpdatedAt)
+	require.True(t, usage.UpdatedAt.Equal(observedAt))
 }

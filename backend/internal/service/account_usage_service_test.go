@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
+	"github.com/stretchr/testify/require"
 )
 
 type accountUsageCodexProbeRepo struct {
@@ -203,6 +206,125 @@ func TestAccountUsageService_GetOpenAIUsage_DoesNotPromoteCodexExtraToRateLimit(
 	case got := <-repo.rateLimitCh:
 		t.Fatalf("不应将已耗尽的 codex extra 持久化为运行时限流状态: %v", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsage_PreservesSnapshotObservationTime(t *testing.T) {
+	t.Parallel()
+	observedAt := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
+	for _, stamp := range []string{observedAt.Format(time.RFC3339), "", "invalid", time.Time{}.Format(time.RFC3339)} {
+		t.Run(stamp, func(t *testing.T) {
+			account := &Account{
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeOAuth,
+				Extra: map[string]any{
+					"codex_5h_used_percent":  10.0,
+					"codex_7d_used_percent":  100.0,
+					"codex_usage_updated_at": stamp,
+				},
+			}
+			usage, err := (&AccountUsageService{}).getOpenAIUsage(context.Background(), account, false)
+			require.NoError(t, err)
+			if stamp == observedAt.Format(time.RFC3339) {
+				require.NotNil(t, usage.UpdatedAt)
+				require.True(t, usage.UpdatedAt.Equal(observedAt))
+			} else {
+				require.Nil(t, usage.UpdatedAt)
+			}
+			require.Equal(t, "passive", usage.Source)
+			require.Empty(t, usage.Error)
+			require.Empty(t, usage.ErrorCode)
+		})
+	}
+}
+
+func TestAccountUsageService_GetOpenAIUsage_RefreshFailureKeepsCachedDataAndReportsError(t *testing.T) {
+	t.Parallel()
+	observedAt := time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second)
+	for _, accountType := range []string{"native", "shadow", "bps"} {
+		t.Run(accountType, func(t *testing.T) {
+			resetAt := time.Now().Add(time.Hour)
+			account := &Account{
+				Platform:         PlatformOpenAI,
+				Type:             AccountTypeOAuth,
+				RateLimitResetAt: &resetAt,
+				Extra: map[string]any{
+					"codex_7d_used_percent":  100.0,
+					"codex_usage_updated_at": observedAt.Format(time.RFC3339),
+				},
+			}
+			if accountType == "shadow" {
+				parentID := int64(10)
+				account.ParentAccountID = &parentID
+				account.QuotaDimension = QuotaDimensionSpark
+			} else if accountType == "bps" {
+				account.Extra["openai_excel_bps"] = true
+			}
+			usage, err := (&AccountUsageService{}).getOpenAIUsage(context.Background(), account, true)
+			require.NoError(t, err)
+			require.Equal(t, errorCodeQuotaRefreshFailed, usage.ErrorCode)
+			require.NotEmpty(t, usage.Error)
+			require.NotNil(t, usage.SevenDay)
+			require.Equal(t, 100.0, usage.SevenDay.Utilization)
+			require.NotNil(t, usage.UpdatedAt)
+			require.True(t, usage.UpdatedAt.Equal(observedAt))
+			require.Equal(t, "passive", usage.Source)
+			require.Equal(t, &resetAt, account.RateLimitResetAt)
+			require.Equal(t, observedAt.Format(time.RFC3339), account.Extra["codex_usage_updated_at"])
+		})
+	}
+}
+
+type quotaFreshnessStatsRepo struct {
+	usageBatchLogRepoStub
+	accountIDs []int64
+	starts     []time.Time
+}
+
+func (repo *quotaFreshnessStatsRepo) GetAccountWindowStats(_ context.Context, accountID int64, start time.Time) (*usagestats.AccountStats, error) {
+	repo.accountIDs = append(repo.accountIDs, accountID)
+	repo.starts = append(repo.starts, start)
+	return &usagestats.AccountStats{Requests: 2, Tokens: 100, Cost: 3, StandardCost: 4, UserCost: 5}, nil
+}
+
+func TestAccountUsageService_GetOpenAIUsage_RefreshFailureWithoutSnapshot(t *testing.T) {
+	t.Parallel()
+	repo := &quotaFreshnessStatsRepo{}
+	svc := &AccountUsageService{usageLogRepo: repo}
+	before := time.Now()
+	usage, err := svc.getOpenAIUsage(context.Background(), &Account{
+		ID:       123,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+	}, true)
+	after := time.Now()
+	require.NoError(t, err)
+	require.Equal(t, errorCodeQuotaRefreshFailed, usage.ErrorCode)
+	require.Nil(t, usage.UpdatedAt)
+	require.Equal(t, []int64{123, 123}, repo.accountIDs)
+	for index, window := range []*UsageProgress{usage.FiveHour, usage.SevenDay} {
+		require.NotNil(t, window)
+		require.True(t, window.UtilizationUnknown)
+		require.Equal(t, &WindowStats{Requests: 2, Tokens: 100, Cost: 3, StandardCost: 4, UserCost: 5}, window.WindowStats)
+		duration := []time.Duration{5 * time.Hour, 7 * 24 * time.Hour}[index]
+		require.False(t, repo.starts[index].Before(before.Add(-duration)))
+		require.False(t, repo.starts[index].After(after.Add(-duration)))
+	}
+}
+
+func TestAccountUsageService_PersistOpenAICodexProbeResponse_IgnoresMetadataOnly(t *testing.T) {
+	t.Parallel()
+	repo := &accountUsageCodexProbeRepo{updateExtraCh: make(chan map[string]any, 1)}
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	response.Header.Set("x-codex-primary-window-minutes", "300")
+	response.Header.Set("x-codex-primary-reset-after-seconds", "100")
+	updates, err := (&AccountUsageService{accountRepo: repo}).persistOpenAICodexProbeResponse(123, response, nil)
+	require.NoError(t, err)
+	require.Nil(t, updates)
+	select {
+	case <-repo.updateExtraCh:
+		t.Fatal("metadata without utilization must not persist a fresh observation")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

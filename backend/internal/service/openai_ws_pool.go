@@ -93,18 +93,19 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
-	oauthCredential     [32]byte
-	timezoneMode        string
-	timezoneHeaders     [3]string
-	anchorScope         string
-	betaFeatures        string
-	codexInstallationID string
-	sessionIDHyphen     string
-	sessionIDUnderscore string
-	threadID            string
-	clientRequestID     string
-	codexWindowID       string
-	proxyURL            string
+	apiKeySessionHeaders [6]string
+	oauthCredential      [32]byte
+	timezoneMode         string
+	timezoneHeaders      [3]string
+	anchorScope          string
+	betaFeatures         string
+	codexInstallationID  string
+	sessionIDHyphen      string
+	sessionIDUnderscore  string
+	threadID             string
+	clientRequestID      string
+	codexWindowID        string
+	proxyURL             string
 }
 
 type openAIWSConnLease struct {
@@ -2441,6 +2442,11 @@ func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Head
 	}
 	if oauth401CanRecover(account, nil) {
 		key.oauthCredential = sha256.Sum256([]byte(headers.Get("Authorization")))
+	}
+	if account != nil && account.Type == AccountTypeAPIKey {
+		for index, name := range [...]string{"session-id", "session_id", "thread-id", "thread_id", "conversation_id", "conversation-id"} {
+			key.apiKeySessionHeaders[index] = normalizeOpenAIWSStableIdentityHeader(headers, name)
+		}
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

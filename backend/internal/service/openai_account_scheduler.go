@@ -3153,6 +3153,9 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	if !success && len(observedErr) > 0 && isGrokRequestScopedFailure(observedErr[0]) {
 		return false
 	}
+	if len(observedErr) > 0 && errors.Is(observedErr[0], ErrOpenAIWSModelUnavailable) {
+		return false
+	}
 	// A failed managed proxy acquisition says nothing about account health.
 	// Keep the existing error response and diagnostics, but do not turn a local
 	// pool outage into an account penalty (or a successful recovery sample).
@@ -3186,7 +3189,7 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) || errors.Is(observedErr, accountrequest.ErrQualityDegraded) {
+	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) || errors.Is(observedErr, accountrequest.ErrQualityDegraded) || errors.Is(observedErr, ErrOpenAIWSModelUnavailable) {
 		return false
 	}
 	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)

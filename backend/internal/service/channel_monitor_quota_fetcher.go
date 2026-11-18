@@ -309,7 +309,7 @@ func usageQuotaTiers(usage *UsageInfo) []domain.MonitorQuotaTier {
 }
 
 func appendProgressTier(tiers *[]domain.MonitorQuotaTier, window, label string, p *UsageProgress) {
-	if p == nil {
+	if p == nil || p.UtilizationUnknown {
 		return
 	}
 	tier := domain.MonitorQuotaTier{
@@ -488,7 +488,7 @@ func usageFailureInfo(usage *UsageInfo) (failed, credentialInvalid bool, msg str
 	if usage == nil {
 		return false, false, ""
 	}
-	if usage.ErrorCode == "quota_unknown" {
+	if usage.ErrorCode == "quota_unknown" || usage.ErrorCode == errorCodeQuotaRefreshFailed {
 		return false, false, ""
 	}
 	failed = usage.Error != "" || usage.NeedsReauth || usage.IsBanned ||

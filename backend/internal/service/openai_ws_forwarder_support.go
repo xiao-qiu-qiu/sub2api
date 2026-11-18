@@ -146,6 +146,12 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 			)
 		}
 
+		if status := openAIWSModelFailureStatus(account, message); status != 0 {
+			model, _ := prewarmPayload["model"].(string)
+			s.handleOpenAIWSModelFailure(ctx, account, model, message)
+			lease.MarkBroken()
+			return &openAIWSModelRejectionError{status: status, payload: append([]byte(nil), message...)}
+		}
 		if eventType == "error" {
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
 			prewarmModel, _ := reqBody["model"].(string)
@@ -340,6 +346,10 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 	if eventType != "error" {
 		return
 	}
+	if openAIWSModelFailureStatus(account, payload) != 0 {
+		s.handleOpenAIWSModelFailure(ctx, account, canonicalModel, payload)
+		return
+	}
 	s.rateLimitService.observeQualityStatus(ctx, account, openAIStreamFailureStatus(payload, extractOpenAISSEErrorMessage(payload)))
 	status := openAIWSPayloadTransientStatus(payload)
 	if status != 0 {
@@ -354,6 +364,9 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 // failures and transient failures. Its return value lets stream callers avoid
 // applying the same transition twice for an error/response.failed pair.
 func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
+	if openAIWSModelFailureStatus(account, payload) != 0 {
+		return s.handleOpenAIWSModelFailure(ctx, account, canonicalModel, payload)
+	}
 	message := extractOpenAISSEErrorMessage(payload)
 	status := openAIWSOAuthFailureStatus(account, payload, message)
 	s.rateLimitService.observeQualityStatus(ctx, account, status)

@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -348,6 +349,7 @@ func TestUsageFailureInfo_ClassificationMatrix(t *testing.T) {
 		{name: "error code rate limited", usage: &UsageInfo{ErrorCode: errorCodeRateLimited}, failed: true, msg: errorCodeRateLimited},
 		{name: "error code network error", usage: &UsageInfo{ErrorCode: errorCodeNetworkError}, failed: true, msg: errorCodeNetworkError},
 		{name: "grok quota unknown exempted", usage: &UsageInfo{ErrorCode: "quota_unknown", Error: "Grok quota is unknown until billing is probed"}},
+		{name: "openai quota refresh failed exempted", usage: &UsageInfo{ErrorCode: errorCodeQuotaRefreshFailed, Error: "Unable to refresh OpenAI quota"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -694,6 +696,9 @@ func TestUsageQuotaTiers_MapsAllWindowKinds(t *testing.T) {
 func TestUsageQuotaTiers_NilAndEmptyInputs(t *testing.T) {
 	require.Nil(t, usageQuotaTiers(nil))
 	require.Nil(t, usageQuotaTiers(&UsageInfo{}))
+	require.Nil(t, usageQuotaTiers(&UsageInfo{
+		FiveHour: &UsageProgress{UtilizationUnknown: true, WindowStats: &WindowStats{Requests: 2}},
+	}))
 
 	// Grok 窗口 limit<=0 时跳过，避免除零。
 	var zero int64
@@ -744,4 +749,37 @@ func TestDeriveQuotaCheckResult_StatusMatrix(t *testing.T) {
 
 	res = deriveQuotaCheckResult(nil, "quota", now)
 	require.Equal(t, MonitorStatusError, res.Status)
+}
+
+func TestQuotaFetcher_OpenAIQuotaRefreshFailureDoesNotFlap(t *testing.T) {
+	for _, utilization := range []float64{40, 95, 100} {
+		t.Run(fmt.Sprint(utilization), func(t *testing.T) {
+			observedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+			account := &Account{
+				ID: 77, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+				Extra: map[string]any{
+					"codex_7d_used_percent":  utilization,
+					"codex_usage_updated_at": observedAt.Format(time.RFC3339),
+				},
+			}
+			fetcher := &ChannelMonitorQuotaFetcher{
+				usage:            &AccountUsageService{cache: NewUsageCache(), usageLogRepo: &usageBatchLogRepoStub{}},
+				accounts:         &stubMonitorAccountSource{accounts: map[int64]*Account{77: account}},
+				balanceThreshold: monitorBalanceThreshold(nil),
+				cache:            make(map[int64]monitorQuotaCacheEntry),
+			}
+			expectedStatus := MonitorStatusOperational
+			if utilization >= monitorQuotaDegradedUsedPercent {
+				expectedStatus = MonitorStatusDegraded
+			}
+			for round := 0; round < 3; round++ {
+				snapshot := fetcher.fetchUncached(context.Background(), 77, time.Now())
+				result := deriveQuotaCheckResult(snapshot, "quota", time.Now())
+				require.True(t, snapshot.Success, "round %d: %s", round, snapshot.Error)
+				require.Len(t, snapshot.Tiers, 1)
+				require.Equal(t, utilization, snapshot.Tiers[0].UsedPercent)
+				require.Equal(t, expectedStatus, result.Status, "round %d", round)
+			}
+		})
+	}
 }

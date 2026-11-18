@@ -491,6 +491,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 	if !isControlledExperiment(ctx) {
 		if err := s.performOpenAIWSGeneratePrewarm(ctx, lease, decision, payload, previousResponseID, reqBody, account, stateStore, groupID, c); err != nil {
+			var modelFailure *openAIWSModelRejectionError
+			if errors.As(err, &modelFailure) {
+				writeOpenAIWSModelFailure(c, modelFailure.status, modelFailure.payload, reqStream)
+				return nil, err
+			}
 			cleanExit = errors.Is(err, errOpenAIWSSSEPayloadTooLarge)
 			return nil, err
 		}
@@ -877,6 +882,25 @@ readLoop:
 			parseOpenAIWSResponseUsageFromCompletedEvent(message, usage)
 		}
 		imageCounter.AddSSEData(message)
+		if status := openAIWSModelFailureStatus(account, message); status != 0 {
+			s.handleOpenAIWSModelFailure(ctx, account, mappedModel, message)
+			lease.MarkBroken()
+			upstreamTerminalEvent = eventType
+			if reqStream && !clientDisconnected {
+				flushBufferedStreamEvents("model_failure")
+				emitStreamMessage(message, true)
+				markOpenAIWSClientVisibleFailure(c, eventType, message)
+			} else if !reqStream && !clientDisconnected {
+				writeOpenAIWSModelFailure(c, status, message, false)
+			}
+			result := resultWithUsage()
+			_, result.ObservedUsageOnError = extractOpenAIUsageFromJSONBytes(message)
+			result.ObservedUsageOnError = result.ObservedUsageOnError || openAIUsageHasTokens(usage)
+			result.stickyMigrationInvalidTerminal = true
+			result.ImageCount = imageCounter.Count()
+			result.ImageOutputSizes = imageCounter.Sizes()
+			return result, ErrOpenAIWSModelUnavailable
+		}
 
 		if eventType == "error" || eventType == "response.failed" {
 			markOpenAICyberPolicyEvent(c, message, http.StatusOK, usage)

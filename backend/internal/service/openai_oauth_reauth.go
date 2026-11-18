@@ -1113,6 +1113,9 @@ func firstNonEmptyReauth(values ...string) string {
 
 func (s *OpenAIOAuthReauthService) applyReauthTokenInfo(ctx context.Context, record *OpenAIOAuthReauthTaskRecord, account *Account, tokenInfo *OpenAITokenInfo, workerExtra map[string]any) (*OpenAIOAuthReauthTask, error) {
 	taskID := record.ID
+	if err := resolveReauthTokenIdentity(tokenInfo); err != nil {
+		return s.failCallback(ctx, taskID, "OAuth token identity claims are invalid or inconsistent", err)
+	}
 	if err := validateReauthToken(account, tokenInfo); err != nil {
 		return s.failCallback(ctx, taskID, "new OAuth identity does not match the account", err)
 	}

@@ -1444,6 +1444,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		firstTurnStartedAt = hooks.InitialTurnStartedAt
 	}
 	failureAccountSideEffectsApplied := false
+	var modelUnavailable atomic.Bool
 	var pendingStickyMigration atomic.Pointer[OpenAIForwardResult]
 	relayResult, relayExit := openaiwsv2.RunEntry(openaiwsv2.EntryInput{
 		Ctx:                ctx,
@@ -1571,7 +1572,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					pendingStickyMigration.Store(&snapshot)
 				}
 				if hooks != nil && hooks.AfterTurn != nil {
-					hooks.AfterTurn(turnNo, turnResult, nil)
+					var turnErr error
+					if modelUnavailable.Load() {
+						turnErr = ErrOpenAIWSModelUnavailable
+						turnResult.ObservedUsageOnError = turn.UsageObserved
+					}
+					hooks.AfterTurn(turnNo, turnResult, turnErr)
 				}
 			},
 			BeforeClientWrite: func(msgType coderws.MessageType, payload []byte) {
@@ -1595,6 +1601,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						s.CompleteOpenAIStickyMigration(ctx, account, &completed, nil)
 					}
 				}
+				if modelUnavailable.Load() {
+					_ = clientConn.Close(coderws.StatusTryAgainLater, "model unavailable on this account; reconnect with complete context")
+					_ = clientConn.CloseNow()
+				}
 			},
 			BeforeRelayCancel: func(exit openaiwsv2.RelayExit) {
 				if context.Cause(ctx) != nil {
@@ -1616,6 +1626,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					return nil
 				}
 				eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
+				if openAIWSModelFailureStatus(account, payload) != 0 {
+					modelUnavailable.Store(true)
+					s.handleOpenAIWSModelFailure(turnRecoveryContext(), account, *activePolicyModel.Load(), payload)
+					return nil
+				}
 				oauthReplay.observe(payload)
 				if (eventType == "error" || eventType == "response.failed") && openAIWSOAuthFailureStatus(account, payload, extractOpenAISSEErrorMessage(payload)) == http.StatusUnauthorized {
 					if failure := s.openAIWSOAuth401(turnRecoveryContext(), account, token, handshakeHeaders, payload, *activePolicyModel.Load()); failure != nil {
@@ -1675,6 +1690,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			},
 		},
 	})
+	if modelUnavailable.Load() {
+		if turn := activeTurn.Swap(0); turn != 0 && hooks != nil && hooks.AfterTurn != nil {
+			hooks.AfterTurn(int(turn), nil, ErrOpenAIWSModelUnavailable)
+		}
+		return NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "model unavailable on this account; reconnect with complete context", ErrOpenAIWSModelUnavailable)
+	}
 	// Relay has joined both directions. Only this unfinished turn may settle
 	// here: completed terminal callbacks already consumed activeTurn. Never use
 	// relayResult.Usage, which aggregates earlier completed turns.

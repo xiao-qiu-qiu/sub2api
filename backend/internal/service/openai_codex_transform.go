@@ -1425,9 +1425,11 @@ func extractPromptLikeInstructionsFromInput(reqBody map[string]any) string {
 
 // defaultCodexSynthInstructions 返回合成路径在 instructions 为空时应填入的默认提示词。
 //
-// 按 model 选择真实 Codex CLI 的 base instructions，使合成请求在提示词层面贴近真实 Codex 行为；
-// 若内嵌 prompt 意外为空，回退到最小占位符以保证字段非空。
+// GPT-6.1 Sol 保持空指令；其他模型沿用对应的 Codex base instructions 和非空兜底。
 func defaultCodexSynthInstructions(model string) string {
+	if openai.IsGPT61SolModelSpelling(model) {
+		return ""
+	}
 	if instructions := strings.TrimSpace(openai.CodexBaseInstructionsForModel(model)); instructions != "" {
 		return instructions
 	}
@@ -1509,7 +1511,11 @@ func applyInstructions(reqBody map[string]any, isCodexCLI bool) bool {
 		return false
 	}
 	model, _ := reqBody["model"].(string)
-	reqBody["instructions"] = defaultCodexSynthInstructions(model)
+	instructions := defaultCodexSynthInstructions(model)
+	if existing, ok := reqBody["instructions"].(string); ok && existing == instructions {
+		return false
+	}
+	reqBody["instructions"] = instructions
 	return true
 }
 
