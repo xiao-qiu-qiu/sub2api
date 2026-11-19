@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -95,6 +96,8 @@ type codexOAuthTransformOptions struct {
 	IsCodexCLI                          bool
 	IsCompact                           bool
 	SkipDefaultInstructions             bool
+	UseDeveloperPrefix                  bool
+	DeveloperPrefixImageBridge          bool
 	PreserveToolCallIDs                 bool
 	OmitPromotedSystemMessagesFromInput bool
 	// ResponsesLite selects where an injected hosted tool is declared.
@@ -302,12 +305,12 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 	// callers must also keep the guidance in input as developer (notably
 	// Responses JSON object mode), while Chat Completions compatibility can
 	// omit text-only messages after promoting them losslessly.
-	if extractSystemMessagesFromInput(reqBody, opts.OmitPromotedSystemMessagesFromInput) {
+	if !opts.UseDeveloperPrefix && extractSystemMessagesFromInput(reqBody, opts.OmitPromotedSystemMessagesFromInput) {
 		result.Modified = true
 	}
 
 	// instructions 处理逻辑：根据是否是 Codex CLI 分别调用不同方法
-	if !opts.SkipDefaultInstructions && applyInstructions(reqBody, opts.IsCodexCLI) {
+	if !opts.UseDeveloperPrefix && !opts.SkipDefaultInstructions && applyInstructions(reqBody, opts.IsCodexCLI) {
 		result.Modified = true
 	}
 	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
@@ -350,6 +353,10 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		} else {
 			reqBody["input"] = []any{}
 		}
+		result.Modified = true
+	}
+
+	if opts.UseDeveloperPrefix && applyCodexDeveloperPrefix(reqBody, normalizedModel, opts.DeveloperPrefixImageBridge) {
 		result.Modified = true
 	}
 
@@ -1114,19 +1121,18 @@ func ensureOpenAIResponsesImageGenerationToolChoiceAuto(reqBody map[string]any) 
 	return true
 }
 
+func needsCodexImageGenerationBridgeInstructions(reqBody map[string]any) bool {
+	existing, _ := reqBody["instructions"].(string)
+	return !hasCodexImageGenerationFunctionTool(reqBody) && !isCodexSparkModel(firstNonEmptyString(reqBody["model"])) &&
+		!strings.Contains(existing, codexImageGenerationBridgeMarker) && hasOpenAIImageGenerationTool(reqBody)
+}
+
 func applyCodexImageGenerationBridgeInstructions(reqBody map[string]any) bool {
-	if len(reqBody) == 0 || hasCodexImageGenerationFunctionTool(reqBody) || !hasOpenAIImageGenerationTool(reqBody) {
-		return false
-	}
-	if isCodexSparkModel(firstNonEmptyString(reqBody["model"])) {
+	if !needsCodexImageGenerationBridgeInstructions(reqBody) {
 		return false
 	}
 
 	existing, _ := reqBody["instructions"].(string)
-	if strings.Contains(existing, codexImageGenerationBridgeMarker) {
-		return false
-	}
-
 	existing = strings.TrimRight(existing, " \t\r\n")
 	if strings.TrimSpace(existing) == "" {
 		reqBody["instructions"] = codexImageGenerationBridgeText
@@ -1399,6 +1405,51 @@ func extractLosslessTextFromContent(content any) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func applyCodexDeveloperPrefix(reqBody map[string]any, model string, imageBridge bool) bool {
+	emptyInstructions := isInstructionsEmpty(reqBody)
+	modified := false
+	if emptyInstructions && reqBody["instructions"] != "" {
+		reqBody["instructions"] = ""
+		modified = true
+	}
+	input, ok := reqBody["input"].([]any)
+	if !ok || len(input) == 0 {
+		return modified
+	}
+	prefixLen := 0
+	addImageBridge := imageBridge && needsCodexImageGenerationBridgeInstructions(reqBody)
+	for index, item := range input {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if message["role"] == "system" {
+			message["role"] = "developer"
+			modified = true
+		}
+		if index == prefixLen && message["role"] == "developer" {
+			prefixLen++
+			if addImageBridge && strings.Contains(extractTextFromContent(message["content"]), codexImageGenerationBridgeMarker) {
+				addImageBridge = false
+			}
+		}
+	}
+	developerMessage := func(text string) any {
+		return map[string]any{"type": "message", "role": "developer", "content": text}
+	}
+	if emptyInstructions && prefixLen == 0 {
+		input = slices.Insert(input, 0, developerMessage(defaultCodexSynthInstructions(model)))
+		prefixLen++
+		modified = true
+	}
+	if addImageBridge {
+		input = slices.Insert(input, prefixLen, developerMessage(codexImageGenerationBridgeText))
+		modified = true
+	}
+	reqBody["input"] = input
+	return modified
 }
 
 func extractPromptLikeInstructionsFromInput(reqBody map[string]any) string {

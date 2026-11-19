@@ -588,7 +588,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	synthesizeCodexInstructions := account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses
+	useDeveloperPrefix := synthesizeCodexInstructions && !isCompactRequest && openai.IsGPT62ModelSpelling(upstreamModel)
+	if instructionsEmpty && synthesizeCodexInstructions && !useDeveloperPrefix {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
@@ -663,7 +665,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			imageIntent = true
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] /responses image_generation request inbound_model=%s mapped_model=%s account_type=%s", requestView.Model, upstreamModel, account.Type)
 		}
-		if codexImageGenerationBridgeEnabled && applyCodexImageGenerationBridgeInstructions(decoded) {
+		if codexImageGenerationBridgeEnabled && !useDeveloperPrefix && applyCodexImageGenerationBridgeInstructions(decoded) {
 			markDecodedModified()
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Added Codex image_generation bridge instructions")
 		}
@@ -724,6 +726,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
+				UseDeveloperPrefix:                  useDeveloperPrefix,
+				DeveloperPrefixImageBridge:          useDeveloperPrefix && codexImageGenerationBridgeEnabled,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 				ResponsesLite:                       responsesLite,
 			})

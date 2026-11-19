@@ -1048,6 +1048,24 @@ func TestCodexImageGenerationBridge_PreservesClientImageFunctionTools(t *testing
 	}
 }
 
+func TestCodexDeveloperPrefixKeepsImageBridgeOutOfTurnInstructions(t *testing.T) {
+	const turnInstructions = "  This turn only.\n"
+	body := map[string]any{
+		"model": "gpt-6.2-sol", "instructions": turnInstructions, "input": "Draw a cat.",
+		"tools": []any{map[string]any{"type": "image_generation"}},
+	}
+	opts := codexOAuthTransformOptions{UseDeveloperPrefix: true, DeveloperPrefixImageBridge: true}
+	for range 2 {
+		require.NoError(t, applyCodexOAuthTransformWithOptions(body, opts).Error)
+		require.Equal(t, turnInstructions, body["instructions"])
+		input := body["input"].([]any)
+		require.Len(t, input, 2)
+		require.Equal(t, "developer", input[0].(map[string]any)["role"])
+		require.Equal(t, codexImageGenerationBridgeText, input[0].(map[string]any)["content"])
+		require.Equal(t, "Draw a cat.", input[1].(map[string]any)["content"])
+	}
+}
+
 func TestApplyCodexImageGenerationBridgeInstructions_AppendsBridgeOnce(t *testing.T) {
 	reqBody := map[string]any{
 		"model":        "gpt-5.4",

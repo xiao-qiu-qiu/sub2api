@@ -171,6 +171,97 @@ func TestOpenAIGatewayService_OAuthResponsesPromotesSystemMessageWithoutDuplicat
 	require.Equal(t, 1, strings.Count(string(upstream.lastBody), systemPrompt))
 }
 
+func TestOpenAIGatewayService_OAuthResponsesGPT62Instructions(t *testing.T) {
+	message := func(role, text string) string {
+		return fmt.Sprintf(`{"type":"message","role":%q,"content":[{"type":"input_text","text":%q}]}`, role, text)
+	}
+	developer := message("developer", "Follow these repository rules.")
+	user := message("user", "Reply with OK.")
+	followUp := message("user", "Continue.")
+	const firstSystem = "Use repository conventions."
+	const laterSystem = "Use the shorter format from now on."
+	const turnInstructions = "  Keep the answer short.\n"
+	systemInput := []string{message("system", firstSystem), user, message("system", laterSystem), followUp}
+	convertedSystemInput := []string{message("developer", firstSystem), user, message("developer", laterSystem), followUp}
+
+	for _, model := range []string{"gpt-6.2-sol", "gpt-6.2-astra"} {
+		for _, test := range []struct {
+			name         string
+			alias        string
+			instructions string
+			input        []string
+			wantInput    []string
+			wantDefault  bool
+		}{
+			{name: "existing developer", input: []string{developer, user}, wantInput: []string{developer, user}},
+			{name: "mapped upstream", alias: "public-model", input: []string{developer, user}, wantInput: []string{developer, user}},
+			{name: "no instructions", input: []string{user}, wantInput: []string{user}, wantDefault: true},
+			{name: "blank instructions", instructions: " \t", input: []string{user}, wantInput: []string{user}, wantDefault: true},
+			{name: "explicit turn instructions", instructions: turnInstructions, input: []string{user}, wantInput: []string{user}},
+			{name: "system messages keep their positions", input: systemInput, wantInput: convertedSystemInput},
+			{name: "system messages with turn instructions", instructions: turnInstructions, input: systemInput, wantInput: convertedSystemInput},
+		} {
+			t.Run(model+"/"+test.name, func(t *testing.T) {
+				instructionsField := ""
+				if test.instructions != "" {
+					instructionsField = fmt.Sprintf(`,"instructions":%q`, test.instructions)
+				}
+				requestedModel := model
+				account := newOpenAIOAuthNamespaceTestAccount()
+				if test.alias != "" {
+					requestedModel = test.alias
+					account.Credentials["model_mapping"] = map[string]any{test.alias: model}
+				}
+				body := []byte(fmt.Sprintf(`{"model":%q,"input":[%s]%s}`, requestedModel, strings.Join(test.input, ","), instructionsField))
+				upstream := &httpUpstreamRecorder{resp: newOpenAIRejectedFieldTestResponse(http.StatusOK,
+					`{"id":"resp_instructions","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`,
+				)}
+				requestContext := newOpenAIRejectedFieldTestContext(body)
+				result, err := newOpenAIRejectedFieldTestService(upstream).Forward(
+					requestContext.Request.Context(), requestContext, account, body,
+				)
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.Len(t, upstream.requests, 1)
+				require.Equal(t, http.MethodPost, upstream.lastReq.Method)
+				require.Equal(t, openAICodexResponsesTestURL, upstream.lastReq.URL.String())
+				require.Equal(t, model, gjson.GetBytes(upstream.lastBody, "model").String())
+
+				instructions := gjson.GetBytes(upstream.lastBody, "instructions")
+				if strings.TrimSpace(test.instructions) != "" {
+					require.Equal(t, gjson.String, instructions.Type)
+					require.Equal(t, test.instructions, instructions.String())
+				} else {
+					require.Equal(t, gjson.String, instructions.Type)
+					require.Empty(t, instructions.String())
+				}
+
+				input := gjson.GetBytes(upstream.lastBody, "input").Array()
+				if test.wantDefault {
+					require.Len(t, input, len(test.wantInput)+1)
+					wantDefault := strings.TrimSpace(openai.CodexBaseInstructionsForModel(model))
+					require.NotEmpty(t, wantDefault)
+					require.Equal(t, "message", input[0].Get("type").String())
+					require.Equal(t, "developer", input[0].Get("role").String())
+					content := input[0].Get("content")
+					if content.IsArray() {
+						parts := content.Array()
+						require.Len(t, parts, 1)
+						require.Equal(t, "input_text", parts[0].Get("type").String())
+						content = parts[0].Get("text")
+					}
+					require.Equal(t, wantDefault, content.String())
+					input = input[1:]
+				}
+				require.Len(t, input, len(test.wantInput))
+				for index, want := range test.wantInput {
+					require.JSONEq(t, want, input[index].Raw, "input item %d", index)
+				}
+			})
+		}
+	}
+}
+
 func TestOpenAIGatewayService_NativeResponsesBodyModificationPreservesHTMLChars(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
