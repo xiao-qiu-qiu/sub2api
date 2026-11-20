@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -130,9 +131,15 @@ func TestGPT62PricingDoesNotBorrowLegacyOrSiblingRates(t *testing.T) {
 				require.Equal(t, rate.OutputCostPerTokenPriority, got.OutputPricePerTokenPriority)
 				require.Zero(t, got.CacheCreationPricePerToken)
 				require.True(t, got.CacheCreationPriceExplicit)
-				require.Equal(t, rate.LongContextInputTokenThreshold, got.LongContextInputThreshold)
-				require.Equal(t, rate.LongContextInputCostMultiplier, got.LongContextInputMultiplier)
+				cost, err := billing.CalculateCostWithServiceTier(spelling, UsageTokens{InputTokens: 300_000, OutputTokens: 100}, 1, "priority")
+				require.NoError(t, err)
+				require.False(t, cost.LongContextBillingApplied)
+				require.InDelta(t, 300_000*rate.InputCostPerTokenPriority+100*rate.OutputCostPerTokenPriority, cost.TotalCost, 1e-12)
 			}
+			schedule, err := billing.ResolveContextPricingSchedule(t.Context(), NewModelPricingResolver(nil, billing), ContextPricingScheduleInput{Model: model})
+			require.NoError(t, err)
+			require.Len(t, schedule.Tiers, 1)
+			require.Nil(t, schedule.Tiers[0].MaxTokens)
 		})
 	}
 }
@@ -166,24 +173,77 @@ func TestGPT62PublishedRatesAcrossPricingSources(t *testing.T) {
 						{"default", 1}, {"priority", 2}, {"flex", 0.5}, {"ultrafast", 6},
 					} {
 						t.Run(tier.name, func(t *testing.T) {
-							tokens := UsageTokens{InputTokens: 271_998, OutputTokens: 10, CacheCreationTokens: 1, CacheReadTokens: 1}
-							cost, err := billing.CalculateCostWithServiceTier(test.model, tokens, 1, tier.name)
-							require.NoError(t, err)
-							require.False(t, cost.LongContextBillingApplied)
-							require.InDelta(t, 271_998*test.input*tier.multiplier, cost.InputCost, 1e-12)
-							require.InDelta(t, 10*test.output*tier.multiplier, cost.OutputCost, 1e-12)
-							require.InDelta(t, test.cacheWrite*tier.multiplier, cost.CacheCreationCost, 1e-12)
-							require.InDelta(t, test.cacheRead*tier.multiplier, cost.CacheReadCost, 1e-12)
-							tokens.InputTokens++
-							cost, err = billing.CalculateCostWithServiceTier(test.model, tokens, 1, tier.name)
-							require.NoError(t, err)
-							require.True(t, cost.LongContextBillingApplied)
-							require.InDelta(t, 271_999*test.input*tier.multiplier*2, cost.InputCost, 1e-12)
-							require.InDelta(t, 10*test.output*tier.multiplier*1.5, cost.OutputCost, 1e-12)
-							require.InDelta(t, test.cacheWrite*tier.multiplier*2, cost.CacheCreationCost, 1e-12)
-							require.InDelta(t, test.cacheRead*tier.multiplier*2, cost.CacheReadCost, 1e-12)
+							for _, inputTokens := range []int{271_998, 271_999, 500_000} {
+								tokens := UsageTokens{InputTokens: inputTokens, OutputTokens: 10, CacheCreationTokens: 1, CacheReadTokens: 1}
+								cost, err := billing.CalculateCostWithServiceTier(test.model, tokens, 1, tier.name)
+								require.NoError(t, err)
+								require.False(t, cost.LongContextBillingApplied)
+								require.InDelta(t, float64(inputTokens)*test.input*tier.multiplier, cost.InputCost, 1e-12)
+								require.InDelta(t, 10*test.output*tier.multiplier, cost.OutputCost, 1e-12)
+								require.InDelta(t, test.cacheWrite*tier.multiplier, cost.CacheCreationCost, 1e-12)
+								require.InDelta(t, test.cacheRead*tier.multiplier, cost.CacheReadCost, 1e-12)
+							}
 						})
 					}
+				})
+			}
+		})
+	}
+}
+
+func TestGPT62GatewayUsageIgnoresCatalogLongContextSurcharge(t *testing.T) {
+	for _, model := range []string{openai.GPT62SolModel, openai.GPT62AstraModel} {
+		t.Run(model, func(t *testing.T) {
+			intervalMultiplier := 3.0
+			for _, scenario := range []struct {
+				name      string
+				intervals []PricingInterval
+				wantInput float64
+			}{
+				{name: "catalog", wantInput: 1},
+				{name: "custom_interval", intervals: []PricingInterval{{MinTokens: 272_000, InputMultiplier: &intervalMultiplier}}, wantInput: 3},
+			} {
+				t.Run(scenario.name, func(t *testing.T) {
+					usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+					userRepo := &openAIRecordUsageUserRepoStub{}
+					gateway := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, &openAIRecordUsageSubRepoStub{}, nil)
+					gateway.billingService = NewBillingService(gateway.cfg, &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+						model: {
+							InputCostPerToken: 2e-6, OutputCostPerToken: 10e-6,
+							CacheCreationInputTokenCost: 2.5e-6, CacheCreationInputTokenCostExplicit: true,
+							CacheReadInputTokenCost: 0.1e-6, LongContextInputTokenThreshold: 272_000,
+							LongContextInputCostMultiplier: 2, LongContextOutputCostMultiplier: 1.5,
+						},
+					}})
+					apiKey := openAIRecordUsageAPIKeyWithGroup(gateway, 1, true)
+					apiKey.GroupID = &apiKey.Group.ID
+					apiKey.Group.Platform = PlatformOpenAI
+					apiKey.Group.RateMultiplier = 1.1
+					channel := Channel{ID: 1, Status: StatusActive, GroupIDs: []int64{apiKey.Group.ID}}
+					if len(scenario.intervals) > 0 {
+						channel.ModelPricing = []ChannelModelPricing{{Platform: PlatformOpenAI, Models: []string{model}, Intervals: scenario.intervals}}
+					}
+					gateway.channelService = &ChannelService{}
+					gateway.channelService.cache.Store(populateChannelCache([]Channel{channel}, map[int64]string{apiKey.Group.ID: PlatformOpenAI}))
+					gateway.resolver = NewModelPricingResolver(gateway.channelService, gateway.billingService)
+					err := gateway.RecordUsage(t.Context(), &OpenAIRecordUsageInput{
+						Result: &OpenAIForwardResult{
+							RequestID: "context", Model: model, Duration: time.Second,
+							Usage: OpenAIUsage{InputTokens: 520_000, OutputTokens: 2_000, CacheCreationInputTokens: 10_000, CacheReadInputTokens: 10_000},
+						},
+						APIKey: apiKey, User: &User{ID: 2}, Account: &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+							Extra: map[string]any{openAILongContextBillingEnabledKey: true}},
+					})
+					require.NoError(t, err)
+					log := usageRepo.lastLog
+					require.NotNil(t, log)
+					require.False(t, log.LongContextBillingApplied)
+					require.InDelta(t, scenario.wantInput, log.InputCost, 1e-12)
+					require.InDelta(t, scenario.wantInput+0.046, log.TotalCost, 1e-12)
+					require.InDelta(t, (scenario.wantInput+0.046)*1.1, log.ActualCost, 1e-12)
+					require.InDelta(t, log.ActualCost, userRepo.lastAmount, 1e-12)
+					require.NotNil(t, log.AccountStatsCost)
+					require.InDelta(t, 1.046, *log.AccountStatsCost, 1e-12)
 				})
 			}
 		})

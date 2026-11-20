@@ -285,8 +285,6 @@ func newOpenAIGPT62FallbackPricing(input, output, cacheWrite, cacheRead float64)
 		CacheReadInputTokenCost:             cacheRead,
 		CacheReadInputTokenCostPriority:     cacheRead * 2,
 		LongContextInputTokenThreshold:      272_000,
-		LongContextInputCostMultiplier:      2,
-		LongContextOutputCostMultiplier:     1.5,
 		SupportsServiceTier:                 true,
 		LiteLLMProvider:                     "openai",
 		Mode:                                "chat",

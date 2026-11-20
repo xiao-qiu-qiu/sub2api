@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +48,18 @@ func TestAPIKeyLongContextPolicyIsolationAndThresholds(t *testing.T) {
 	require.Equal(t, 100, apiKeyLongContextLimit(billing, []string{"public-alias", "context-policy-test"}))
 	require.Equal(t, 272_000, apiKeyLongContextLimit(newTestBillingServiceWithOpenAILadderCatalog(t), []string{"gpt-5.4"}))
 	require.Equal(t, 199_999, apiKeyLongContextLimit(newTestBillingService(), []string{"grok-4.3"}))
+}
+
+func TestAPIKeyLongContextPolicyGPT62AdmissionKeeps272kLimit(t *testing.T) {
+	for _, model := range []string{openai.GPT62SolModel, openai.GPT62AstraModel} {
+		t.Run(model, func(t *testing.T) {
+			for _, service := range []*BillingService{newTestBillingService(), newTestBillingServiceWithOpenAILadderCatalog(t)} {
+				for _, spelling := range []string{model, "openai/" + model + "-max"} {
+					require.Equal(t, 272_000, apiKeyLongContextLimit(service, []string{spelling}))
+				}
+			}
+		})
+	}
 }
 
 func TestAPIKeyLongContextPolicyCountsAllVisibleHistoryAndTools(t *testing.T) {

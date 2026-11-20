@@ -100,7 +100,7 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 | GPT-6.2 Sol | 2 | 10 | 2.50 | 0.10 |
 | GPT-6.2 Astra | 8 | 40 | 10 | 0.40 |
 
-Fast/priority 按 2 倍、Flex 按 0.5 倍、UltraFast 按 6 倍。启用长上下文计费时，计费输入超过 272,000 token 后，输入及缓存单价按 2 倍、输出按 1.5 倍。
+Fast/priority 按 2 倍、Flex 按 0.5 倍、UltraFast 按 6 倍。两款模型不叠加默认长上下文附加费；显式配置的渠道区间价格、API Key 的长上下文准入规则均不受影响。
 
 ### OpenAI API Key 的 UltraFast 档位计费
 

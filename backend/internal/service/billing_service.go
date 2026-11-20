@@ -1948,15 +1948,20 @@ func (s *BillingService) applyModelSpecificPricingPolicyEx(model string, pricing
 		return &cloned
 	}
 	normalized := normalizeKnownOpenAICodexModel(model)
+	disableLongContextSurcharge := (normalized == openai.GPT62SolModel || normalized == openai.GPT62AstraModel) && pricing.hasLongContextSurcharge()
 	usesCacheWritePremium := isOpenAIGPT56Model(normalized) || (openai.IsGPT6SolOrLunaModelSpelling(normalized) || openai.IsGPT61SolModelSpelling(normalized) || openai.IsGPT61TerraModelSpelling(normalized))
 	needsCacheCreationPolicy := usesCacheWritePremium && !pricing.CacheCreationPriceExplicit && (pricing.CacheCreationPricePerToken <= 0 ||
 		(pricing.InputPricePerTokenPriority > 0 && pricing.CacheCreationPricePerTokenPriority <= 0))
 	fastRatio := openAIModelFastPricingRatio(normalized)
 	needsOpus55FastMultiplier := claude.IsOpus55(model) && pricing.FastMultiplier == nil
-	if !needsCacheCreationPolicy && fastRatio <= 0 && !needsOpus55FastMultiplier {
+	if !disableLongContextSurcharge && !needsCacheCreationPolicy && fastRatio <= 0 && !needsOpus55FastMultiplier {
 		return pricing
 	}
 	cloned := *pricing
+	if disableLongContextSurcharge {
+		cloned.LongContextInputMultiplier = 0
+		cloned.LongContextOutputMultiplier = 0
+	}
 	if needsOpus55FastMultiplier {
 		multiplier := 2.0
 		cloned.FastMultiplier = &multiplier
@@ -2028,11 +2033,13 @@ func longContextBillableInputTokens(tokens UsageTokens) int {
 	return tokens.InputTokens + tokens.CacheCreationTokens + tokens.CacheReadTokens
 }
 
+func (pricing *ModelPricing) hasLongContextSurcharge() bool {
+	return pricing != nil && pricing.LongContextInputThreshold > 0 &&
+		(pricing.LongContextInputMultiplier > 1 || pricing.LongContextOutputMultiplier > 1)
+}
+
 func (s *BillingService) shouldApplySessionLongContextPricing(tokens UsageTokens, pricing *ModelPricing) bool {
-	if pricing == nil || pricing.LongContextInputThreshold <= 0 {
-		return false
-	}
-	if pricing.LongContextInputMultiplier <= 1 && pricing.LongContextOutputMultiplier <= 1 {
+	if !pricing.hasLongContextSurcharge() {
 		return false
 	}
 	totalInputTokens := longContextBillableInputTokens(tokens)

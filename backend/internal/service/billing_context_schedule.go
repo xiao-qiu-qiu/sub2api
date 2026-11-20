@@ -196,7 +196,7 @@ type contextBreakpointPlan struct {
 	threshold          int
 }
 
-// contextPricingBreakpoints 从计费自身的规则输入收集价格断点（不读取任何倍率）。
+// contextPricingBreakpoints 从计费自身的生效规则中收集价格断点。
 func (s *BillingService) contextPricingBreakpoints(resolver *ModelPricingResolver, resolved *ResolvedPricing, model string) contextBreakpointPlan {
 	plan := contextBreakpointPlan{}
 	if !resolved.longContextPricingEnabled {
@@ -228,7 +228,7 @@ func (s *BillingService) contextPricingBreakpoints(resolver *ModelPricingResolve
 	// 当前时刻；此处 pricing 仅取 LongContextInputThreshold 等时间无关字段，
 	// DeepSeek pro→Flash 切换不影响断点结果。
 	pricing = s.applyModelSpecificPricingPolicyEx(model, pricing, true, timezone.Now())
-	if pricing.LongContextInputThreshold <= 0 {
+	if !pricing.hasLongContextSurcharge() {
 		return plan
 	}
 	bound := pricing.LongContextInputThreshold
