@@ -612,7 +612,7 @@ func (b *Bridge) translateDirectCatalogCall(native object) (object, error) {
 		}
 	}
 	if !ok {
-		return nil, fmt.Errorf("basispoints returned an unsupported native tool; no tool was executed")
+		return nil, newUnsupportedNativeToolError(name)
 	}
 	kind := text(native["type"])
 	var envelope object
@@ -632,7 +632,7 @@ func (b *Bridge) translateDirectCatalogCall(native object) (object, error) {
 		}
 		envelope = object{"name": info.Name, "input": input}
 	default:
-		return nil, fmt.Errorf("basispoints returned an unsupported native tool; no tool was executed")
+		return nil, newUnsupportedNativeToolError(name)
 	}
 	result, err := b.finishClientToolCall(native, info, envelope, false, true)
 	if err != nil {

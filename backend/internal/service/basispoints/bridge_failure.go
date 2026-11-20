@@ -1,5 +1,26 @@
 package basispoints
 
+import (
+	"fmt"
+	"strings"
+)
+
+type unsupportedNativeToolError struct{ name string }
+
+func newUnsupportedNativeToolError(name string) unsupportedNativeToolError {
+	if len(name) > 128 || strings.ContainsAny(name, "/~$") {
+		return unsupportedNativeToolError{name: "[redacted]"}
+	}
+	return unsupportedNativeToolError{name: safeSchemaName(name)}
+}
+
+func (e unsupportedNativeToolError) Error() string {
+	if e.name == "" {
+		return "basispoints returned an unsupported native tool; no tool was executed"
+	}
+	return fmt.Sprintf("basispoints returned an unsupported native tool %q; no tool was executed", e.name)
+}
+
 // BridgeFailure describes local conversion failure, never an upstream HTTP
 // rejection. Only bounded structural metadata may be added to Details.
 type BridgeFailure struct {

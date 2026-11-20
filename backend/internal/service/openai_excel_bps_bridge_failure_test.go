@@ -113,3 +113,33 @@ func TestExcelBPSLocalProtocolFailureKeepsHTTPAndDiagnostic(t *testing.T) {
 		})
 	}
 }
+
+func TestExcelBPSUnsupportedNativeToolReturnedToClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, stream := range []bool{true, false} {
+		for _, name := range []string{"functions.unlisted", "test-token"} {
+			t.Run(fmt.Sprintf("%t/%s", stream, name), func(t *testing.T) {
+				wire := fmt.Sprintf(`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","name":%q,"call_id":"call_1","arguments":"private-argument"}]}}`, name) + "\n\n"
+				upstream := &httpUpstreamRecorder{responses: []*http.Response{bpsCompletionResponse(http.StatusOK, wire)}}
+				svc := openAIClientToolsTestService(upstream)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				_, err := svc.Forward(context.Background(), ctx, excelAccount(), []byte(fmt.Sprintf(`{"model":"gpt-6.1-sol","stream":%t,"input":"test","tools":[{"type":"function","name":"shell"}]}`, stream)))
+				require.Error(t, err)
+				want := name
+				if name == "test-token" {
+					want = "[redacted]"
+				}
+				observed, ok := GetOpsStreamError(ctx)
+				require.True(t, ok)
+				require.NotNil(t, observed.BridgeFailure)
+				require.Equal(t, want, observed.BridgeFailure.RejectedTool)
+				require.Contains(t, observed.Message, want)
+				require.Contains(t, rec.Body.String(), fmt.Sprintf(`"rejected_tool":%q`, want))
+				require.NotContains(t, rec.Body.String(), "private-argument")
+				require.NotContains(t, rec.Body.String(), "test-token")
+			})
+		}
+	}
+}

@@ -1,9 +1,13 @@
 package basispoints
 
 import (
+	"context"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // The model sometimes calls a declared client tool by its own name instead of
@@ -65,6 +69,57 @@ func TestDirectCallRejectsUnknownAndMismatchedTools(t *testing.T) {
 		if _, err := bridge.translateCall(native); err == nil {
 			t.Fatalf("case %d must be rejected: %+v", i, native)
 		}
+	}
+}
+
+func TestUnsupportedNativeToolStreamFailureIncludesSafeName(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		toolName string
+		wantName string
+	}{
+		{name: "qualified name", toolName: "functions.abc", wantName: "functions.abc"},
+		{name: "unsafe name", toolName: "functions.abc?secret=private-name", wantName: "[redacted]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := testSource()
+			source["stream"] = true
+			source["tools"] = []any{object{"type": "function", "name": "shell"}}
+			cache := new(ReplayCache)
+			_, bridge := mustPrepare(t, source, "scope", cache)
+			native := object{
+				"type": "function_call", "id": "fc_other", "call_id": "call_other",
+				"name": test.toolName, "arguments": `{"note":"private-tool-argument"}`,
+			}
+			wire := sse(object{"type": "response.created", "response": object{"id": "resp_original"}}) +
+				sse(object{"type": "response.output_item.added", "item": native}) +
+				sse(object{"type": "response.output_item.done", "item": native}) +
+				sse(object{"type": "response.completed", "response": repairResponse("resp_original", 10, 2, native)})
+			corrections, regenerations := 0, 0
+			body := bridge.StreamWithRepairs(context.Background(), io.NopCloser(strings.NewReader(wire)), func(context.Context, object, error) (object, error) {
+				corrections++
+				return nil, nil
+			}, func(context.Context) (io.ReadCloser, error) {
+				regenerations++
+				return io.NopCloser(strings.NewReader("")), nil
+			})
+			events := repairEvents(t, body)
+			require.Len(t, events, 2)
+			require.Equal(t, "response.created", events[0]["type"])
+			require.Equal(t, "response.failed", events[1]["type"])
+			response := repairValue[object](t, events[1]["response"])
+			require.Empty(t, response["output"])
+			detail := repairValue[object](t, response["error"])
+			require.Equal(t, "basispoints_protocol_error", detail["code"])
+			require.Equal(t, "bridge_tool_validation", detail["failure_stage"])
+			require.Equal(t, test.wantName, detail["rejected_tool"])
+			require.Contains(t, text(detail["message"]), test.wantName)
+			require.NotContains(t, quoted(events), "private-tool-argument")
+			require.NotContains(t, quoted(events), "private-name")
+			require.Zero(t, corrections)
+			require.Zero(t, regenerations)
+			require.Nil(t, cache.get("scope", "call_other"))
+		})
 	}
 }
 

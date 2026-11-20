@@ -133,7 +133,10 @@ different commands. A successful recovery is not guaranteed.
 
 Local conversion failures retain `basispoints_protocol_error` and add bounded
 `failure_stage`, `rejected_tool` and `repair_skipped_reason` diagnostics where
-applicable. `upstream_terminal_event=response.completed` is included only when
+applicable. For unsupported direct native calls, the error message and
+`rejected_tool` report the name as received, including any `functions.` prefix;
+unsafe names are redacted and a missing name is not invented.
+`upstream_terminal_event=response.completed` is included only when
 that terminal was actually observed. Tool arguments and business text are not
 added to diagnostics. Ops assigns these failures to `gateway` / `platform`,
 records a logical 502 while preserving the actual upstream HTTP status, and

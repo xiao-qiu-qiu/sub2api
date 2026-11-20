@@ -989,7 +989,7 @@ func (s *OpenAIGatewayService) forwardExcelBPSWithChat(ctx context.Context, c *g
 			}
 			switch kind {
 			case "response.completed", "response.failed", "response.cancelled", "response.incomplete", "error":
-				for _, path := range []string{"message", "error.message", "response.error.message"} {
+				for _, path := range []string{"message", "error.message", "response.error.message", "response.error.rejected_tool"} {
 					value := gjson.GetBytes(payload, path)
 					if value.Type != gjson.String {
 						continue
