@@ -568,20 +568,22 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
   afterEach(() => vi.useRealTimers())
 
-  it('offers 2FA initial login with optional name and imports through Session deduplication', async () => {
+  it('uses the selected proxy for 2FA login and Session import', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'OpenAI')
     await wrapper.get('[data-testid="openai-two-fa"]').trigger('click')
     expect(wrapper.get('[data-tour="account-form-name"]').attributes('required')).toBeUndefined()
+    wrapper.getComponent({ name: 'ProxySelector' }).vm.$emit('update:modelValue', 37)
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     const importer = wrapper.getComponent(OpenAITwoFAImport)
+    expect(importer.props('proxyId')).toBe(37)
     expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
     const credential = { access_token: 'test-access', refresh_token: 'test-refresh', account_id: 'test-workspace' }
     const login = { email: 'user@example.com', password: 'test-password', mfa_secret: 'test-secret' }
     await expect(importer.props('importCredential')(credential, login.email, login)).resolves.toBe('created')
     expect(importCodexSessionMock).toHaveBeenCalledWith(expect.objectContaining({
       content: JSON.stringify(credential), name: 'user@example.com', update_existing: false, skip_existing: true,
-      concurrency: 10, group_ids: [], proxy_id: null,
+      concurrency: 10, group_ids: [], proxy_id: 37,
     }))
     expect(wrapper.emitted('created')).toHaveLength(1)
     expect(wrapper.emitted('close')).toBeUndefined()

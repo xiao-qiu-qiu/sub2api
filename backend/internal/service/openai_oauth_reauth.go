@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,6 +193,7 @@ type OpenAIOAuthReauthService struct {
 	worker                  *reauthruntime.Manager
 	workerToken             string
 	workerLastSeen          atomic.Int64
+	twoFALoginQueue         twoFALoginWorkerQueue
 	totpWorkerLastSeen      atomic.Int64
 	repo                    OpenAIOAuthReauthRepository
 	accounts                OpenAIOAuthReauthAccountReader
@@ -710,8 +712,8 @@ func (s *OpenAIOAuthReauthService) ClaimTask(ctx context.Context, workerID strin
 }
 
 func (s *OpenAIOAuthReauthService) ClaimTaskWithEngines(ctx context.Context, workerID string, engines []string) (*OpenAIOAuthReauthClaim, error) {
-	if err := s.ensureReady(); err != nil {
-		return nil, err
+	if s == nil {
+		return nil, s.ensureReady()
 	}
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" || len(workerID) > 128 {
@@ -728,11 +730,19 @@ func (s *OpenAIOAuthReauthService) ClaimTaskWithEngines(ctx context.Context, wor
 			return nil, infraerrors.BadRequest("OPENAI_REAUTH_ENGINE_INVALID", "invalid worker engines")
 		}
 	}
+	s.MarkWorkerSeen()
+	if slices.Contains(engines, OpenAIOAuthReauthEngineLocal) {
+		if claim := s.twoFALoginQueue.claim(workerID); claim != nil {
+			return claim, nil
+		}
+	}
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
 	runtimeSettings, settingsErr := s.GetRuntimeSettings(ctx)
 	if settingsErr != nil {
 		return nil, settingsErr
 	}
-	s.workerLastSeen.Store(time.Now().UnixNano())
 	var record *OpenAIOAuthReauthTaskRecord
 	var err error
 	if runtimeSettings.Engine != "" {
@@ -921,6 +931,13 @@ func (s *OpenAIOAuthReauthService) ClaimTaskWithEngines(ctx context.Context, wor
 }
 
 func (s *OpenAIOAuthReauthService) UpdateStage(ctx context.Context, taskID int64, workerID, stage string) error {
+	if s != nil && isTwoFALoginWorkerTaskID(taskID) {
+		if stage != OpenAIOAuthReauthStageApplyingCredentials && !validWorkerReauthStage(stage) {
+			return infraerrors.BadRequest("OPENAI_REAUTH_STAGE_INVALID", "invalid re-login task stage")
+		}
+		_, err := s.twoFALoginQueue.activeEmail(taskID, workerID)
+		return err
+	}
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
@@ -955,6 +972,9 @@ func parseReauthCallback(callback string) (code, state string, err error) {
 }
 
 func (s *OpenAIOAuthReauthService) SubmitCallback(ctx context.Context, taskID int64, workerID, callback string) (*OpenAIOAuthReauthTask, error) {
+	if isTwoFALoginWorkerTaskID(taskID) {
+		return nil, twoFALoginWorkerTaskNotActive()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
@@ -1001,6 +1021,9 @@ func (s *OpenAIOAuthReauthService) SubmitCallback(ctx context.Context, taskID in
 }
 
 func (s *OpenAIOAuthReauthService) SubmitCredentials(ctx context.Context, taskID int64, workerID string, credentials, workerExtra map[string]any) (*OpenAIOAuthReauthTask, error) {
+	if s != nil && isTwoFALoginWorkerTaskID(taskID) {
+		return s.submitTwoFALoginCredentials(taskID, workerID, credentials, workerExtra)
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
@@ -1184,6 +1207,9 @@ func (s *OpenAIOAuthReauthService) failCallback(ctx context.Context, taskID int6
 }
 
 func (s *OpenAIOAuthReauthService) FailTask(ctx context.Context, taskID int64, workerID, reason string) error {
+	if s != nil && isTwoFALoginWorkerTaskID(taskID) {
+		return s.failTwoFALoginTask(taskID, workerID, reason)
+	}
 	if err := s.ensureReady(); err != nil {
 		return err
 	}

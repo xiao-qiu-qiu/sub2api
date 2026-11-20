@@ -35,6 +35,15 @@ describe('initial 2FA login input', () => {
       ...entry, credential_target: 'operations',
     })
   })
+
+  it('sends the selected proxy for initial login', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ data: { id: 'job', status: 'running' } })
+    const entry = { email: 'user@example.com', password: 'test-password', mfa_secret: 'test-secret' }
+    await startTwoFALogin(entry, 37)
+    expect(apiClient.post).toHaveBeenLastCalledWith('/admin/account-ops/token-guard/two-fa-login', {
+      ...entry, credential_target: 'operations', proxy_id: 37,
+    })
+  })
   it('supports both separators and passwords containing commas', () => {
     expect(parseTwoFALoginText('USER@example.com----p,a!ss----SECRET\nsecond@example.com,password,SECRET')).toEqual([
       { email: 'user@example.com', password: 'p,a!ss', mfa_secret: 'SECRET' },

@@ -55,6 +55,72 @@ func newTwoFATestService(t *testing.T, server *httptest.Server) *AccountTokenGua
 	return svc
 }
 
+// The HTTP fixture exercises the existing asynchronous job lifecycle. Production
+// first-login requests supply OpenAIOAuthReauthService instead of this test worker.
+type twoFATestWorker struct {
+	check func(context.Context, *int64) error
+	login func(context.Context, AccountTokenGuardReloginAccount, *int64) (map[string]any, error)
+}
+
+func (w twoFATestWorker) CheckTwoFALoginWorker(ctx context.Context, proxyID *int64) error {
+	if w.check != nil {
+		return w.check(ctx, proxyID)
+	}
+	return nil
+}
+
+func (w twoFATestWorker) LoginTwoFA(ctx context.Context, entry AccountTokenGuardReloginAccount, proxyID *int64) (map[string]any, error) {
+	return w.login(ctx, entry, proxyID)
+}
+
+func startTwoFATestLogin(svc *AccountTokenGuardService, ctx context.Context, entry AccountTokenGuardReloginAccount, legacy ...bool) (*OpenAITwoFALoginJob, error) {
+	worker := twoFATestWorker{login: func(ctx context.Context, entry AccountTokenGuardReloginAccount, _ *int64) (map[string]any, error) {
+		cfg, err := svc.GetConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return svc.relogin(ctx, cfg, entry)
+	}}
+	save := len(legacy) == 0 || legacy[0]
+	return svc.StartTwoFALogin(ctx, entry, worker, nil, save)
+}
+
+func TestTwoFALoginUsesLocalWorkerWithoutGuardConfig(t *testing.T) {
+	// No settings repository: a current import must never load the old external
+	// endpoint or write the password into legacy settings.
+	svc := NewAccountTokenGuardService(nil, nil, nil, nil, nil)
+	t.Cleanup(svc.clearTwoFALogins)
+	proxyID := int64(23)
+	requested := make(chan AccountTokenGuardReloginAccount, 1)
+	worker := twoFATestWorker{
+		check: func(_ context.Context, id *int64) error {
+			require.Equal(t, &proxyID, id)
+			return nil
+		},
+		login: func(_ context.Context, entry AccountTokenGuardReloginAccount, id *int64) (map[string]any, error) {
+			if id == nil || *id != proxyID {
+				return nil, errors.New("wrong proxy")
+			}
+			requested <- entry
+			return map[string]any{"access_token": "access", "password": "discard-me"}, nil
+		},
+	}
+	job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: " USER@example.com ", Password: "password", MFASecret: " secret "}, worker, &proxyID, false)
+	require.NoError(t, err)
+	result := waitTwoFALogin(t, svc, job.ID)
+	require.Equal(t, "succeeded", result.Status)
+	require.Equal(t, AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "password", MFASecret: "secret"}, <-requested)
+	require.Equal(t, map[string]any{"email": "user@example.com", "access_token": "access"}, result.Credential)
+}
+
+func TestTwoFALoginWorkerPreflightDoesNotCreateJob(t *testing.T) {
+	svc := NewAccountTokenGuardService(nil, nil, nil, nil, nil)
+	worker := twoFATestWorker{check: func(context.Context, *int64) error { return errors.New("worker offline") }}
+	_, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "password", MFASecret: "secret"}, worker, nil, false)
+	require.ErrorContains(t, err, "worker offline")
+	require.Empty(t, svc.logins)
+}
+
 func waitTwoFALogin(t *testing.T, svc *AccountTokenGuardService, id string) *OpenAITwoFALoginJob {
 	t.Helper()
 	var job *OpenAITwoFALoginJob
@@ -76,7 +142,7 @@ func TestTwoFALoginForOperationsDoesNotSaveLegacyCredentials(t *testing.T) {
 	require.True(t, ok)
 	before := settings.raw
 	entry := AccountTokenGuardReloginAccount{Email: "operations@example.com", Password: "test-password", MFASecret: "test-secret"}
-	job, err := svc.StartTwoFALoginForOperations(context.Background(), entry)
+	job, err := startTwoFATestLogin(svc, context.Background(), entry, false)
 	require.NoError(t, err)
 	result := waitTwoFALogin(t, svc, job.ID)
 	require.Equal(t, "succeeded", result.Status)
@@ -105,7 +171,7 @@ func TestTwoFALoginInitialLoginWithoutExistingAccount(t *testing.T) {
 	defer server.Close()
 	svc := newTwoFATestService(t, server)
 	ctx, cancel := context.WithCancel(context.Background())
-	job, err := svc.StartTwoFALogin(ctx, AccountTokenGuardReloginAccount{Email: " USER@example.com ", Password: "p,a!ss", MFASecret: "TEST-SECRET"})
+	job, err := startTwoFATestLogin(svc, ctx, AccountTokenGuardReloginAccount{Email: " USER@example.com ", Password: "p,a!ss", MFASecret: "TEST-SECRET"})
 	require.NoError(t, err)
 	cancel() // The HTTP request may finish immediately after acceptance.
 	result := waitTwoFALogin(t, svc, job.ID)
@@ -145,7 +211,7 @@ func TestTwoFALoginFailureDoesNotExposeProviderData(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
 			defer server.Close()
 			svc := newTwoFATestService(t, server)
-			job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "a@example.com", Password: "secret", MFASecret: "secret"})
+			job, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: "a@example.com", Password: "secret", MFASecret: "secret"})
 			require.NoError(t, err)
 			result := waitTwoFALogin(t, svc, job.ID)
 			require.Equal(t, "failed", result.Status)
@@ -173,7 +239,7 @@ func TestTwoFALoginCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 	svc := newTwoFATestService(t, server)
-	job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "a@example.com", Password: "secret", MFASecret: "secret"})
+	job, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: "a@example.com", Password: "secret", MFASecret: "secret"})
 	require.NoError(t, err)
 	select {
 	case <-started:
@@ -201,7 +267,7 @@ func TestTwoFALoginRejectsInvalidInputBeforeNetwork(t *testing.T) {
 		{Email: "a@example.com", Password: "p"},
 		{Email: "a@example.com", Password: strings.Repeat("p", 4097), MFASecret: "s"},
 	} {
-		_, err := svc.StartTwoFALogin(context.Background(), entry)
+		_, err := startTwoFATestLogin(svc, context.Background(), entry)
 		require.Error(t, err)
 	}
 }
@@ -219,7 +285,7 @@ func TestTwoFALoginMergesLatestGuardConfig(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
-	job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "USER@example.com", Password: "new-password", MFASecret: "new-mfa"})
+	job, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: "USER@example.com", Password: "new-password", MFASecret: "new-mfa"})
 	require.NoError(t, err)
 	select {
 	case <-started:
@@ -257,7 +323,7 @@ func TestTwoFALoginConcurrentGuardEnrollment(t *testing.T) {
 	svc := newTwoFATestService(t, server)
 	var jobs []*OpenAITwoFALoginJob
 	for i := 0; i < 10; i++ {
-		job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: fmt.Sprintf("user%d@example.com", i), Password: "test-password", MFASecret: "test-mfa"})
+		job, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: fmt.Sprintf("user%d@example.com", i), Password: "test-password", MFASecret: "test-mfa"})
 		require.NoError(t, err)
 		jobs = append(jobs, job)
 	}
@@ -278,7 +344,7 @@ func TestTwoFALoginGuardSaveFailureDoesNotReportSuccess(t *testing.T) {
 	settings, ok := svc.settings.(*twoFALoginSettings)
 	require.True(t, ok)
 	settings.setErr = errors.New("storage-password-canary")
-	job, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "test-password", MFASecret: "test-mfa"})
+	job, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "test-password", MFASecret: "test-mfa"})
 	require.NoError(t, err)
 	result := waitTwoFALogin(t, svc, job.ID)
 	require.Equal(t, "failed", result.Status)
@@ -294,7 +360,7 @@ func TestTwoFALoginGuardSaveFailureDoesNotReportSuccess(t *testing.T) {
 	settings.mu.Lock()
 	settings.setErr = nil
 	settings.mu.Unlock()
-	retry, err := svc.StartTwoFALogin(context.Background(), AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "test-password", MFASecret: "test-mfa"})
+	retry, err := startTwoFATestLogin(svc, context.Background(), AccountTokenGuardReloginAccount{Email: "user@example.com", Password: "test-password", MFASecret: "test-mfa"})
 	require.NoError(t, err)
 	require.Equal(t, "succeeded", waitTwoFALogin(t, svc, retry.ID).Status)
 	cfg, err = svc.GetConfig(context.Background())

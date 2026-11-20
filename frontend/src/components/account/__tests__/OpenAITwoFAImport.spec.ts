@@ -33,10 +33,12 @@ async function start(wrapper: ReturnType<typeof mount>, input: string) {
 describe('OpenAI initial 2FA import', () => {
   it('imports each account, skips completed rows, and retries creation without logging in again', async () => {
     const importCredential = vi.fn().mockResolvedValueOnce('created').mockRejectedValueOnce(new Error('do not display credential'))
-    const wrapper = mount(OpenAITwoFAImport, { props: { importCredential } })
+    const wrapper = mount(OpenAITwoFAImport, { props: { importCredential, proxyId: 37 } })
     await start(wrapper, 'a@example.com----p1----s1\nb@example.com----p2----s2')
     expect(importCredential).toHaveBeenCalledTimes(2)
     expect(startTwoFALogin).toHaveBeenCalledTimes(2)
+    expect(startTwoFALogin).toHaveBeenNthCalledWith(1, expect.objectContaining({ email: 'a@example.com' }), 37)
+    expect(startTwoFALogin).toHaveBeenNthCalledWith(2, expect.objectContaining({ email: 'b@example.com' }), 37)
     expect(wrapper.text()).toContain('tokenGuard.twoFA.states.created')
     expect(wrapper.text()).toContain('tokenGuard.twoFA.states.importFailed')
     expect(wrapper.text()).not.toContain('do not display credential')

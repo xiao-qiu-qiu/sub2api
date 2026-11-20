@@ -20,6 +20,7 @@ on:
       - 'tools/test_openai_oauth_reauth_worker.py'
       - 'tools/test_openai_oauth_reauth_engines.py'
       - 'tools/test_openai_oauth_reauth_runtime_controls.py'
+      - 'tools/test_openai_two_fa_worker_compat.py'
       - 'tools/reauth-runtime/**'
       - 'backend/internal/reauthruntime/**'
       - '.github/workflows/reauth-runtime.yml'

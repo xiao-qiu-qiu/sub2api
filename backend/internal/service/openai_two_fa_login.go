@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Login jobs keep token results in bounded, short-lived memory. Successful logins
-// save the supplied password/2FA to the guard without enabling it or creating accounts.
+// Login jobs keep token results in bounded, short-lived memory. Account creation
+// and encrypted credential enrollment happen only after a successful login.
 type OpenAITwoFALoginJob struct {
 	ID         string         `json:"id"`
 	Status     string         `json:"status"`
@@ -30,28 +30,22 @@ func ValidateOpenAITwoFALogin(entry AccountTokenGuardReloginAccount) error {
 	return nil
 }
 
-func (s *AccountTokenGuardService) StartTwoFALogin(ctx context.Context, entry AccountTokenGuardReloginAccount) (*OpenAITwoFALoginJob, error) {
-	return s.startTwoFALogin(ctx, entry, true)
+type openAITwoFALoginWorker interface {
+	CheckTwoFALoginWorker(context.Context, *int64) error
+	LoginTwoFA(context.Context, AccountTokenGuardReloginAccount, *int64) (map[string]any, error)
 }
 
-// Operations imports save their login method through the encrypted per-account
-// API after identity deduplication returns the account ID. Do not also enroll
-// them in the legacy guard's plaintext settings.
-func (s *AccountTokenGuardService) StartTwoFALoginForOperations(ctx context.Context, entry AccountTokenGuardReloginAccount) (*OpenAITwoFALoginJob, error) {
-	return s.startTwoFALogin(ctx, entry, false)
-}
-
-func (s *AccountTokenGuardService) startTwoFALogin(ctx context.Context, entry AccountTokenGuardReloginAccount, saveToLegacyGuard bool) (*OpenAITwoFALoginJob, error) {
+// Both current imports and older clients use the local worker. The legacy
+// target only controls where verified login credentials are saved afterward.
+func (s *AccountTokenGuardService) StartTwoFALogin(ctx context.Context, entry AccountTokenGuardReloginAccount, worker openAITwoFALoginWorker, proxyID *int64, saveToLegacyGuard bool) (*OpenAITwoFALoginJob, error) {
 	if err := ValidateOpenAITwoFALogin(entry); err != nil {
 		return nil, err
 	}
-	cfg, err := s.GetConfig(ctx)
-	if err != nil {
-		return nil, errors.New("无法读取凭证守护配置")
+	if worker == nil {
+		return nil, errors.New("本地重登 Worker 不可用，请检查凭证运营")
 	}
-	// Explicit login works while scheduled inspection/automatic relogin is off.
-	if err := validateGuardHTTPURL(cfg.ReloginEndpoint, "relogin_endpoint"); err != nil {
-		return nil, errors.New("请在凭证守护中配置有效的重登接口")
+	if err := worker.CheckTwoFALoginWorker(ctx, proxyID); err != nil {
+		return nil, err
 	}
 	entry.Email = strings.ToLower(strings.TrimSpace(entry.Email))
 	entry.MFASecret = strings.TrimSpace(entry.MFASecret)
@@ -69,7 +63,7 @@ func (s *AccountTokenGuardService) startTwoFALogin(ctx context.Context, entry Ac
 	job.expiry = time.AfterFunc(30*time.Minute, func() { s.DeleteTwoFALogin(job.ID) })
 	go func() {
 		defer cancel()
-		credential, loginErr := s.relogin(loginCtx, cfg, entry)
+		credential, loginErr := worker.LoginTwoFA(loginCtx, entry, proxyID)
 		s.loginMu.Lock()
 		defer s.loginMu.Unlock()
 		if s.logins[job.ID] != job {

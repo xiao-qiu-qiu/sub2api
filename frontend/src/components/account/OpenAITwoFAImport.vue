@@ -2,7 +2,7 @@
   <div class="space-y-4">
     <CredentialEncryptionSetup @ready="encryptionReady = $event" />
     <p class="input-hint">{{ t('tokenGuard.twoFA.hint') }}</p>
-    <a href="/admin/token-guard" target="_blank" rel="noopener noreferrer" class="text-primary-600">
+    <a href="/admin/token-guard-v2" target="_blank" rel="noopener noreferrer" class="text-primary-600">
       {{ t('tokenGuard.twoFA.settings') }}
     </a>
     <template v-if="!rows.length">
@@ -41,6 +41,7 @@ import type { TokenGuardReloginAccount } from '@/api/admin/accountTokenGuard'
 
 const props = defineProps<{
   importCredential: (credential: Record<string, unknown>, email: string, login: TokenGuardReloginAccount) => Promise<'created' | 'skipped'>
+  proxyId?: number | null
 }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()
 const { t } = useI18n()
@@ -90,7 +91,7 @@ async function run() {
         if (!row.credential) {
           row.status = 'login'
           // Keep the job ID on polling failures; retry resumes the same login.
-          if (!row.jobId) row.jobId = (await startTwoFALogin(row.entry)).id
+          if (!row.jobId) row.jobId = (await startTwoFALogin(row.entry, props.proxyId)).id
           let job = await getTwoFALogin(row.jobId)
           while (job.status === 'running' && !stopRequested.value && !disposed) {
             await new Promise(resolve => setTimeout(resolve, 1500))

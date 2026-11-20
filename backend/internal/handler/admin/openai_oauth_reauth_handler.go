@@ -323,6 +323,7 @@ func (h *OpenAIOAuthReauthHandler) Credentials(c *gin.Context) {
 		response.BadRequest(c, "Invalid task ID")
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 	var req reauthWorkerCredentialsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid worker request")

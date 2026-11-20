@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -131,6 +133,7 @@ func (h *AccountTokenGuardHandler) StartTwoFALogin(c *gin.Context) {
 	var input struct {
 		service.AccountTokenGuardReloginAccount
 		CredentialTarget string `json:"credential_target"`
+		ProxyID          *int64 `json:"proxy_id"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, "登录凭据格式不正确")
@@ -141,8 +144,7 @@ func (h *AccountTokenGuardHandler) StartTwoFALogin(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	var job *service.OpenAITwoFALoginJob
-	var err error
+	saveToLegacyGuard := false
 	switch input.CredentialTarget {
 	case "operations":
 		status, statusErr := h.reauth.CredentialEncryptionStatus()
@@ -154,14 +156,19 @@ func (h *AccountTokenGuardHandler) StartTwoFALogin(c *gin.Context) {
 			response.BadRequest(c, "请先在凭证运营中启用凭据加密，再进行 2FA 导入")
 			return
 		}
-		job, err = h.svc.StartTwoFALoginForOperations(c.Request.Context(), entry)
 	case "", "guard": // Preserve the contract for older clients.
-		job, err = h.svc.StartTwoFALogin(c.Request.Context(), entry)
+		saveToLegacyGuard = true
 	default:
 		response.BadRequest(c, "登录凭据目标不合法")
 		return
 	}
+	job, err := h.svc.StartTwoFALogin(c.Request.Context(), entry, h.reauth, input.ProxyID, saveToLegacyGuard)
 	if err != nil {
+		var appErr *infraerrors.ApplicationError
+		if errors.As(err, &appErr) {
+			response.ErrorFrom(c, err)
+			return
+		}
 		response.Error(c, http.StatusServiceUnavailable, err.Error())
 		return
 	}
