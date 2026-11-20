@@ -6,6 +6,7 @@ it is not a transport for the external runner's stdout/stderr or exceptions.
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -35,21 +36,17 @@ def codex_source(source):
         raise ValueError('unsupported_codex_runtime_layout')
     source = replace_exact(source, 'import crypto from "node:crypto";', '''import crypto from "node:crypto";
 import {createProtocolDiagnostics, validateCodexCallback, observeProtocolResponse} from "./openai_codex_diagnostics.mjs";
+import {loginCodexPassword, prepareCodexTransport, requireCodexRedirect} from "./openai_codex_password_flow.mjs";
 const protocolDiagnostic = createProtocolDiagnostics(process.env.SUB2API_PROTOCOL_DIAGNOSTIC_PATH,
   Number(process.env.SUB2API_PROTOCOL_TASK_ID));
 console.log = console.warn = console.error = () => {};''')
     for old, new in (
         ('    assertOk(result, `${method} ${url}`);', '    observeProtocolResponse(result);\n    assertOk(result, `${method} ${url}`);'),
-        ('async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret }) {',
-         'async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret }) {\n  protocolDiagnostic.mark("web_login");'),
+        ('      if (isLocalCallback(current)) return { finalUrl: current, last };',
+         '      requireCodexRedirect(current, DEFAULT_CODEX_REDIRECT_URI);\n      if (isLocalCallback(current)) return { finalUrl: current, last };'),
         ('      console.log("[ok] Password accepted");', '      protocolDiagnostic.mark("password_accepted");'),
         ('  console.log("[mfa] TOTP 2FA challenge reached.");', '  protocolDiagnostic.mark("mfa_challenge");'),
         ('      console.log("[ok] 2FA verification accepted");', '      protocolDiagnostic.mark("mfa_accepted");'),
-        ('  const callback = await continueFlow(client, authenticated);', '  protocolDiagnostic.mark("web_redirect");\n  const callback = await continueFlow(client, authenticated);'),
-        ('async function runCodexOauth(client, options) {', 'async function runCodexOauth(client, options) {\n  protocolDiagnostic.mark("oauth_authorize");'),
-        ('  const { data: selected } = await authJsonStep(client, options.authBase, "POST", "/api/accounts/session/select", {',
-         '  protocolDiagnostic.mark("session_select");\n  const { data: selected } = await authJsonStep(client, options.authBase, "POST", "/api/accounts/session/select", {'),
-        ('  const workspaceId = pickWorkspaceId(current);', '  protocolDiagnostic.mark("workspace_select");\n  const workspaceId = pickWorkspaceId(current);'),
         ('    if (codex?.callbackUrl) {', '''    protocolDiagnostic.mark("callback_validation");
     validateCodexCallback(codex, args.codexRedirectUri || DEFAULT_CODEX_REDIRECT_URI);
     if (codex?.callbackUrl) {'''),
@@ -99,6 +96,25 @@ console.log = console.warn = console.error = () => {};''')
           throw error;
         }''')
     source = replace_exact(source, '    let freshLoginRestartCount = 0;\n', '')
+    source = replace_exact(source, 'await transport.prepareProxy(proxyTemplate, `${chatgptBase}/`);',
+                           'await prepareCodexTransport(transport, proxyTemplate, authBase, browserIdentityForTlsProfile);')
+    for start, end, replacement in (
+        ('loginChatgptWeb', 'selectChatgptLoginWorkspaceIfNeeded', '''async function loginChatgptWeb(client, { authBase, email, rl, password, totpSecret }) {
+  return loginCodexPassword(client, {
+    authBase, email, rl, password, totpSecret, clientId: DEFAULT_CODEX_CLIENT_ID, redirectUri: DEFAULT_CODEX_REDIRECT_URI,
+  }, {isPasswordLoginPage, isAuthLoginPage, createSentinelHeaders, authJsonStep, getContinueUrl,
+    verifyPassword, isMfaChallengePayload, completeTotpMfaIfNeeded, pickWorkspaceId, continueFlow}, protocolDiagnostic);
+}'''),
+        ('runCodexOauth', 'resumeCodexOauth', '''async function runCodexOauth(client, options) {
+  if (!client.codexPasswordOAuth) throw new Error("session_unavailable");
+  await options.saveCheckpoint?.("callback_ready", {oauth: client.codexPasswordOAuth});
+  return client.codexPasswordOAuth;
+}'''),
+    ):
+        section = re.search(rf'^async function {start}\(.*?(?=^async function {end}\()', source, re.MULTILINE | re.DOTALL)
+        if section is None:
+            raise ValueError('unsupported_codex_runtime_layout')
+        source = replace_exact(source, section.group(), replacement + '\n\n')
     source = replace_exact(source, '  const organization = workspaces.find((item) => item?.kind === "organization" && item?.id);', '''  const expected = process.env.OPENAI_CODEX_EXPECTED_WORKSPACE;
   if (expected) {
     const matched = workspaces.find(item => item?.id === expected);
@@ -122,7 +138,7 @@ console.log = console.warn = console.error = () => {};''')
 
 def prepare_codex_runtime(root: Path, temporary: Path) -> Path:
     try:
-        patched = codex_source((root / 'src/protocol-login.mjs').read_text())
+        patched = codex_source((root / 'src/protocol-login.mjs').read_text(encoding='utf-8'))
     except (OSError, UnicodeError):
         raise ValueError('unsupported_codex_runtime_layout') from None
     staged = temporary / 'codex-runtime'
@@ -132,8 +148,9 @@ def prepare_codex_runtime(root: Path, temporary: Path) -> Path:
     if (root / 'LICENSE').is_file():
         shutil.copy2(root / 'LICENSE', staged / 'LICENSE')
     script = staged / 'src/protocol-login.mjs'
-    script.write_text(patched)
-    shutil.copy2(Path(__file__).with_name('openai_codex_diagnostics.mjs'), script.parent)
+    script.write_text(patched, encoding='utf-8')
+    for name in ('openai_codex_diagnostics.mjs', 'openai_codex_password_flow.mjs'):
+        shutil.copy2(Path(__file__).with_name(name), script.parent)
     return script
 
 

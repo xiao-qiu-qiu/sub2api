@@ -229,6 +229,48 @@ func TestTwoFALoginFailureDoesNotExposeProviderData(t *testing.T) {
 	}
 }
 
+func TestTwoFALoginReportsOnlySafeWorkerDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name, code, stage, reason string
+		err                       error
+	}{
+		{"startup protocol error", "unknown", "starting", "protocol_error", errors.New("local_protocol_failed stage=starting reason=protocol_error elapsed_ms=1472 exit=1")},
+		{"password rejected", "password_rejected", "web_login", "password_rejected", errors.New("local_protocol_failed stage=web_login reason=password_rejected elapsed_ms=1472 exit=1")},
+		{"malformed diagnostic", "unknown", "unknown", "", errors.New("local_protocol_failed stage=starting reason=protocol_error elapsed_ms=1472 exit=1 private-provider-text")},
+		{"timeout", "timeout", "unknown", "", context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			svc := NewAccountTokenGuardService(nil, nil, nil, nil, nil)
+			t.Cleanup(svc.clearTwoFALogins)
+			worker := twoFATestWorker{login: func(context.Context, AccountTokenGuardReloginAccount, *int64) (map[string]any, error) {
+				return nil, test.err
+			}}
+			input := AccountTokenGuardReloginAccount{Email: "fixture@example.com", Password: "fixture-password", MFASecret: "fixture-totp"}
+			job, err := svc.StartTwoFALogin(t.Context(), input, worker, nil, false)
+			require.NoError(t, err)
+			require.Nil(t, job.Failure)
+			require.Nil(t, job.Diagnostic)
+			result := waitTwoFALogin(t, svc, job.ID)
+			require.Equal(t, "failed", result.Status)
+			require.Nil(t, result.Credential)
+			require.NotNil(t, result.Failure)
+			require.Equal(t, test.code, result.Failure.Code)
+			require.Equal(t, test.stage, result.Failure.Stage)
+			if test.reason == "" {
+				require.Nil(t, result.Diagnostic)
+			} else {
+				require.NotNil(t, result.Diagnostic)
+				require.Equal(t, test.reason, result.Diagnostic.Reason)
+				require.Equal(t, test.stage, result.Diagnostic.Stage)
+			}
+			raw, err := json.Marshal(result)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "private-provider-text")
+			require.NotContains(t, string(raw), "fixture-")
+		})
+	}
+}
+
 func TestTwoFALoginCancellation(t *testing.T) {
 	started, canceled := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -12,11 +12,14 @@ import (
 // Login jobs keep token results in bounded, short-lived memory. Account creation
 // and encrypted credential enrollment happen only after a successful login.
 type OpenAITwoFALoginJob struct {
-	ID         string         `json:"id"`
-	Status     string         `json:"status"`
-	Credential map[string]any `json:"credential,omitempty"`
-	cancel     context.CancelFunc
-	expiry     *time.Timer
+	ID            string                      `json:"id"`
+	Status        string                      `json:"status"`
+	Credential    map[string]any              `json:"credential,omitempty"`
+	Failure       *CredentialOperationFailure `json:"failure,omitempty"`
+	Diagnostic    *ReauthDiagnostic           `json:"diagnostic,omitempty"`
+	failureReason string
+	cancel        context.CancelFunc
+	expiry        *time.Timer
 }
 
 func ValidateOpenAITwoFALogin(entry AccountTokenGuardReloginAccount) error {
@@ -76,6 +79,10 @@ func (s *AccountTokenGuardService) StartTwoFALogin(ctx context.Context, entry Ac
 				"stage", "relogin",
 				"reason", safeTwoFALoginError(loginErr, entry),
 			)
+			job.failureReason = sanitizeReauthError(loginErr.Error())
+			if errors.Is(loginErr, context.DeadlineExceeded) {
+				job.failureReason = "timeout"
+			}
 			job.Status = "failed"
 			return
 		}
@@ -176,6 +183,11 @@ func (s *AccountTokenGuardService) TwoFALogin(id string) (*OpenAITwoFALoginJob, 
 		return nil, false
 	}
 	snapshot := &OpenAITwoFALoginJob{ID: job.ID, Status: job.Status}
+	if job.failureReason != "" {
+		_, diagnostic, _ := localProtocolError(job.failureReason)
+		snapshot.Diagnostic = diagnostic
+		snapshot.Failure = reauthOperationFailure(&OpenAIOAuthReauthTaskRecord{Status: OpenAIOAuthReauthStatusFailed, Error: job.failureReason}, diagnostic)
+	}
 	if job.Credential != nil {
 		snapshot.Credential = make(map[string]any, len(job.Credential))
 		for key, value := range job.Credential {

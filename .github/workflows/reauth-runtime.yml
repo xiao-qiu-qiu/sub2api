@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'tools/openai_oauth_reauth_worker.py'
+      - 'tools/Dockerfile.openai-oauth-reauth-worker'
       - 'tools/openai_codex_*'
       - 'tools/test_openai_codex_*'
       - 'tools/fixtures/codex-http-transport.mjs'
@@ -40,6 +41,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+      - name: Verify embedded Codex login sources
+        run: python3 tools/reauth-runtime/sync_codex_overlay.py --check
       - uses: docker/setup-buildx-action@v3
       - name: Package and validate without publishing
         env:

@@ -113,7 +113,12 @@ func (m *Manager) run() {
 		m.set("unavailable", "runtime_install_failed")
 		return
 	}
-	cmd := exec.CommandContext(m.ctx, filepath.Join(dir, "python"), filepath.Join(dir, "worker.py"))
+	worker, err := codexOverlayWorker(dir, m.version)
+	if err != nil {
+		m.set("unavailable", "runtime_install_failed")
+		return
+	}
+	cmd := exec.CommandContext(m.ctx, filepath.Join(dir, "python"), worker)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1",
 		"SUB2API_BASE_URL=" + m.baseURL, "OPENAI_REAUTH_WORKER_TOKEN=" + m.token,
 		"OPENAI_TOTP_JOURNAL_DIR=" + filepath.Join(m.root, "totp-recovery"),

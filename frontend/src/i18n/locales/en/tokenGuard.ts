@@ -12,6 +12,11 @@ export default {
   "retry": "Continue unfinished entries",
   "stop": "Stop further logins",
   "reset": "Import another batch",
+  "startErrors": {
+    "proxy": "The selected proxy is unavailable. Check its configuration.",
+    "worker": "The local login Worker is unavailable. Check its status in Credential Operations.",
+    "protocol": "The local login protocol failed during startup. Check the Worker status and retry."
+  },
   "states": {
     "pending": "Pending",
     "login": "Logging in…",

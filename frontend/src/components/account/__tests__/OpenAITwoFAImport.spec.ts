@@ -66,6 +66,35 @@ describe('OpenAI initial 2FA import', () => {
     expect(deleteTwoFALogin).toHaveBeenCalledWith('job-1')
   })
 
+  it('shows a Worker startup protocol failure until a retry succeeds', async () => {
+    const importCredential = vi.fn().mockResolvedValue('created')
+    const wrapper = mount(OpenAITwoFAImport, { props: { importCredential } })
+    vi.mocked(getTwoFALogin).mockResolvedValueOnce({ id: 'job-1', status: 'failed',
+      diagnostic: { stage: 'starting', reason: 'protocol_error', elapsed_ms: 1472, exit_code: 1 },
+    })
+    await start(wrapper, 'a@example.com----p----s')
+    expect(wrapper.text()).toContain('tokenGuard.twoFA.startErrors.protocol')
+    expect(importCredential).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="two-fa-start"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('tokenGuard.twoFA.states.created')
+    expect(wrapper.text()).not.toContain('tokenGuard.twoFA.startErrors.protocol')
+  })
+
+  it.each([
+    ['OPENAI_TWO_FA_PROXY_UNAVAILABLE', 'startErrors.proxy'],
+    ['OPENAI_REAUTH_WORKER_UNAVAILABLE', 'startErrors.worker'],
+    ['unrecognized-provider-code', 'states.failed'],
+  ])('shows a safe message for a rejected start request (%s)', async (reason, key) => {
+    const importCredential = vi.fn()
+    const wrapper = mount(OpenAITwoFAImport, { props: { importCredential } })
+    vi.mocked(startTwoFALogin).mockRejectedValueOnce({ reason, message: 'private provider message' })
+    await start(wrapper, 'a@example.com----p----s')
+    expect(wrapper.text()).toContain(`tokenGuard.twoFA.${key}`)
+    expect(wrapper.text()).not.toContain('private provider message')
+    expect(importCredential).not.toHaveBeenCalled()
+  })
+
   it('resumes a job after a polling failure instead of starting another login', async () => {
     const importCredential = vi.fn().mockResolvedValue('created')
     const wrapper = mount(OpenAITwoFAImport, { props: { importCredential } })

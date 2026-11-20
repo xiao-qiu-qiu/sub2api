@@ -21,6 +21,10 @@ go build -ldflags "-X main.Version=1.2.4-codeq -X main.ReauthRuntimeVersion=1.2.
 
 省略 `-X main.ReauthRuntimeVersion=...` 时使用内嵌 `REAUTH_RUNTIME_VERSION`，不从 `1.2.4-codeq` 这样的展示版本推导。修改 Worker 协议时，应提供兼容运行包并更新所选版本。这里的版本规则适用于托管 Worker；外部 Worker 由其部署方式单独升级和验收。
 
+`2.19.73-codeq` 起，主程序为固定 `2.19.1` 运行包内嵌 Codex 登录适配：从官方 OAuth 入口直接完成密码/TOTP，避免 ChatGPT 首页安全校验阻止认证。管理器把适配文件放入基础运行包下按内容摘要命名的独立目录，再启动基础 Worker；Python、Node、toSub2 依赖与 Worker API 协议沿用原运行包。缓存的原文件保持完整，回退主程序可恢复原入口。外部 Worker 需部署仓库中的最新脚本及 `openai_codex_password_flow.mjs`。
+
+维护适配源码后执行 `python tools/reauth-runtime/sync_codex_overlay.py` 更新 Go 内嵌资源，`--check` 用于检查资源与源码一致。该适配仅用于固定的 `2.19.1` 基础包；更新基础包版本时需重新验证并调整适配范围。
+
 版本输入都会去除首尾空白；仅包含空白的覆盖值按未设置处理。两个内嵌文件中的空值分别使对应版本回退为 `0.0.0-dev`。使用托管 Worker 时需选定实际已发布的兼容版本。
 
 构建后可通过 `./sub2api -version` 查看展示版本，以及单独输出的 `Re-login runtime version: ...`。凭证运营列表响应中的 `worker.version` 标明所选运行包版本；管理器会去掉版本开头的 `v`。该字段表示选定版本，须结合状态和实际通信判断 Worker 是否已就绪。

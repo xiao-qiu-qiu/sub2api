@@ -143,7 +143,7 @@ class PinnedCodexProtocolTests(unittest.TestCase):
         for mode, expected in [('success', None), ('workspace-success', None), ('missing-callback', 'callback_missing'),
                                ('wrong-state', 'callback_state_mismatch'), ('exchange-failed', 'token_exchange_failed'),
                                ('incomplete', 'credentials_incomplete'), ('session-rejected', 'session_unavailable'),
-                               ('workspace-mismatch', 'workspace_mismatch')]:
+                               ('workspace-mismatch', 'workspace_mismatch'), ('email-challenge', 'interaction_required')]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 temporary = Path(directory)
                 script = adapter.prepare_codex_runtime(dependency, temporary)
@@ -156,7 +156,8 @@ class PinnedCodexProtocolTests(unittest.TestCase):
                 if mode.startswith('workspace-'):
                     env['OPENAI_CODEX_EXPECTED_WORKSPACE'] = 'expected-workspace'
                 result = subprocess.run([os.getenv('NODE_EXECUTABLE', 'node'), str(script), '--email',
-                                         'test@example.test', '--output-mode', 'sub2api', '--sub2api-out', str(output)],
+                                         'test@example.test', '--output-mode', 'sub2api', '--sub2api-out', str(output),
+                                         '--proxy', 'http://fixture-session:fixture@proxy.example.test:3128'],
                                         cwd=temporary, env=env, stdin=subprocess.DEVNULL,
                                         capture_output=True, text=True, timeout=20)
                 safe = adapter.read_protocol_diagnostic(diagnostic, 7)
@@ -172,6 +173,14 @@ class PinnedCodexProtocolTests(unittest.TestCase):
                     self.assertEqual(safe['reason'], expected)
                     self.assertFalse(output.exists())
                 trace = routes.read_text()
+                self.assertTrue(trace.startswith('PROBE auth.openai.com\n'))
+                self.assertEqual(trace.count('GET /oauth/authorize'), 1)
+                self.assertEqual(trace.count('POST /api/accounts/authorize/continue'), 1)
+                self.assertNotIn('/api/auth/', trace)
+                if mode == 'email-challenge':
+                    self.assertNotIn('/api/accounts/password/verify', trace)
+                    self.assertNotIn('POST /oauth/token', trace)
+                    continue
                 self.assertEqual(trace.count('POST /api/accounts/password/verify'), 1)
                 self.assertEqual(trace.count('POST /api/accounts/mfa/verify'), 1)
                 if mode in ('missing-callback', 'wrong-state', 'session-rejected', 'workspace-mismatch'):

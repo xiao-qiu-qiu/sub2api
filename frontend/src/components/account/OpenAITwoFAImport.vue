@@ -15,7 +15,7 @@
     <ul v-if="rows.length" class="space-y-2" aria-live="polite">
       <li v-for="(row, index) in rows" :key="row.entry.email" class="flex justify-between gap-4 text-sm">
         <span>{{ index + 1 }}. {{ row.entry.email }}</span>
-        <span>{{ t(`tokenGuard.twoFA.states.${row.status}`) }}</span>
+        <span>{{ rowStatus(row) }}</span>
       </li>
     </ul>
     <div class="flex gap-3">
@@ -37,7 +37,9 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import CredentialEncryptionSetup from './CredentialEncryptionSetup.vue'
 import { useI18n } from 'vue-i18n'
 import { deleteTwoFALogin, getTwoFALogin, parseTwoFALoginText, startTwoFALogin } from '@/api/admin/accountTokenGuard'
-import type { TokenGuardReloginAccount } from '@/api/admin/accountTokenGuard'
+import type { TokenGuardReloginAccount, TwoFALoginJob } from '@/api/admin/accountTokenGuard'
+import { extractApiErrorCode } from '@/utils/apiError'
+import { safeOperationFailure } from '@/utils/credentialOperationFailure'
 
 const props = defineProps<{
   importCredential: (credential: Record<string, unknown>, email: string, login: TokenGuardReloginAccount) => Promise<'created' | 'skipped'>
@@ -50,7 +52,14 @@ type Row = {
   status: 'pending' | 'login' | 'importing' | 'created' | 'skipped' | 'failed' | 'importFailed'
   credential?: Record<string, unknown>
   jobId?: string
+  failure?: Pick<TwoFALoginJob, 'failure' | 'diagnostic'>
+  startErrorKey?: string
 }
+const startErrorKeys = new Map([
+  ['OPENAI_TWO_FA_PROXY_UNAVAILABLE', 'tokenGuard.twoFA.startErrors.proxy'],
+  ['OPENAI_REAUTH_UNAVAILABLE', 'tokenGuard.twoFA.startErrors.worker'],
+  ['OPENAI_REAUTH_WORKER_UNAVAILABLE', 'tokenGuard.twoFA.startErrors.worker'],
+])
 const raw = ref('')
 const encryptionReady = ref(false)
 const error = ref('')
@@ -59,6 +68,19 @@ const busy = ref(false)
 const stopRequested = ref(false)
 const hasPending = computed(() => rows.value.some(row => row.status !== 'created' && row.status !== 'skipped'))
 let disposed = false
+
+function rowStatus(row: Row) {
+  if (row.status === 'failed') {
+    if (row.startErrorKey) return t(row.startErrorKey)
+    const diagnostic = row.failure?.diagnostic
+    if (diagnostic?.stage === 'starting' && diagnostic.reason === 'protocol_error') {
+      return t('tokenGuard.twoFA.startErrors.protocol')
+    }
+    const failure = safeOperationFailure(row.failure?.failure)
+    if (failure.code !== 'unknown') return t(`tokenGuardV2.operationFailure.reasons.${failure.code}`)
+  }
+  return t(`tokenGuard.twoFA.states.${row.status}`)
+}
 
 async function discardJob(row: Row) {
   if (!row.jobId) return
@@ -89,6 +111,8 @@ async function run() {
       if (row.status === 'created' || row.status === 'skipped') continue
       try {
         if (!row.credential) {
+          row.failure = undefined
+          row.startErrorKey = undefined
           row.status = 'login'
           // Keep the job ID on polling failures; retry resumes the same login.
           if (!row.jobId) row.jobId = (await startTwoFALogin(row.entry, props.proxyId)).id
@@ -105,7 +129,9 @@ async function run() {
           }
           if (job.status !== 'succeeded' || !job.credential) {
             await discardJob(row)
-            throw new Error('login_failed')
+            row.failure = { failure: job.failure, diagnostic: job.diagnostic }
+            row.status = 'failed'
+            continue
           }
           row.credential = job.credential
           await discardJob(row)
@@ -119,6 +145,7 @@ async function run() {
         row.entry.password = ''
         row.entry.mfa_secret = ''
       } catch (cause: unknown) {
+        if (!row.jobId && !row.credential) row.startErrorKey = startErrorKeys.get(extractApiErrorCode(cause) ?? '')
         const status = (cause as { status?: number; response?: { status?: number } })?.status ??
           (cause as { response?: { status?: number } })?.response?.status
         if (status === 404) row.jobId = undefined

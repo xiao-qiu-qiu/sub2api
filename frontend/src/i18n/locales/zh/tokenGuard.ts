@@ -12,6 +12,11 @@ export default {
   "retry": "继续未完成的记录",
   "stop": "停止后续登录",
   "reset": "导入另一批",
+  "startErrors": {
+    "proxy": "所选代理不可用，请检查代理配置。",
+    "worker": "本地登录 Worker 不可用，请查看凭证运营中的 Worker 状态。",
+    "protocol": "本地登录协议在启动阶段失败，请查看 Worker 状态后重试。"
+  },
   "states": {
     "pending": "待处理",
     "login": "登录中…",

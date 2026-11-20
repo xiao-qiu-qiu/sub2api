@@ -1,4 +1,5 @@
 import { apiClient } from '../client'
+import type { TokenGuardV2Task } from './accountTokenGuardV2'
 
 export interface TokenGuardReloginAccount {
   email: string
@@ -27,6 +28,8 @@ export interface TwoFALoginJob {
   id: string
   status: 'running' | 'succeeded' | 'failed'
   credential?: Record<string, unknown>
+  failure?: TokenGuardV2Task['failure']
+  diagnostic?: TokenGuardV2Task['diagnostic']
 }
 
 const twoFALoginPath = '/admin/account-ops/token-guard/two-fa-login'
