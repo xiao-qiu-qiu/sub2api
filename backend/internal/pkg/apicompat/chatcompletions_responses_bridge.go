@@ -1615,17 +1615,20 @@ func ChatUsageToResponsesUsage(usage *ChatUsage) *ResponsesUsage {
 			RejectedPredictionTokens: details.RejectedPredictionTokens,
 		}
 	}
-	if usage.PromptTokensDetails != nil && (usage.PromptTokensDetails.CachedTokens > 0 ||
-		usage.PromptTokensDetails.CacheCreationTokens > 0 || usage.PromptTokensDetails.CacheWriteTokens > 0) {
+	if details := usage.PromptTokensDetails; details != nil && ((details.CachedTokens != nil && *details.CachedTokens >= 0) ||
+		details.CacheCreationTokens > 0 || details.CacheWriteTokens > 0) {
 		out.InputTokensDetails = &ResponsesInputTokensDetails{
-			CachedTokens:        usage.PromptTokensDetails.CachedTokens,
-			CacheCreationTokens: usage.PromptTokensDetails.CacheCreationTokens,
-			CacheWriteTokens:    usage.PromptTokensDetails.CacheWriteTokens,
+			CacheCreationTokens: details.CacheCreationTokens,
+			CacheWriteTokens:    details.CacheWriteTokens,
 		}
-		if usage.PromptTokensDetails.CacheWriteTokens > 0 {
-			out.CacheCreationInputTokens = usage.PromptTokensDetails.CacheWriteTokens
+		if details.CachedTokens != nil {
+			out.InputTokensDetails.CachedTokens = *details.CachedTokens
+			out.InputTokensDetails.cachedTokensReported = true
+		}
+		if details.CacheWriteTokens > 0 {
+			out.CacheCreationInputTokens = details.CacheWriteTokens
 		} else {
-			out.CacheCreationInputTokens = usage.PromptTokensDetails.CacheCreationTokens
+			out.CacheCreationInputTokens = details.CacheCreationTokens
 		}
 	}
 	return out

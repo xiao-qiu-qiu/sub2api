@@ -1302,52 +1302,88 @@ func TestForwardAsChatCompletions_StreamsTopLevelTerminalUsage(t *testing.T) {
 	require.Contains(t, responseBody, `"cached_tokens":4`)
 }
 
-func TestForwardAsChatCompletions_BufferedTopLevelTerminalUsage(t *testing.T) {
+func TestForwardAsChatCompletions_TerminalCachedTokenPresence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-
-	upstreamBody := strings.Join([]string{
-		`data: {"type":"response.completed","response":{"id":"resp_top_buffered","object":"response","model":"gpt-5.4","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]},"usage":{"input_tokens":18,"output_tokens":6,"total_tokens":24,"input_tokens_details":{"cached_tokens":3}}}`,
-		"",
-		"data: [DONE]",
-		"",
-	}, "\n")
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_chat_buffered_top_level_usage"}},
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-	}}
-
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	const responseFields = `"id":"resp_fixture","object":"response","model":"gpt-5.4","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]`
 	account := &Account{
 		ID:          1,
-		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
 		Concurrency: 1,
-		Credentials: map[string]any{
-			"access_token":       "oauth-token",
-			"chatgpt_account_id": "chatgpt-acc",
-		},
+		Credentials: map[string]any{"access_token": "fixture-token", "chatgpt_account_id": "fixture-account"},
 	}
+	tests := []struct {
+		name             string
+		inputDetails     string
+		topLevel         bool
+		wantCachePresent bool
+		wantCachedTokens int
+	}{
+		{name: "reported zero", inputDetails: `{"cached_tokens":0}`, wantCachePresent: true},
+		{name: "missing details"},
+		{name: "details without cache", inputDetails: `{"audio_tokens":2}`},
+		{name: "positive top-level usage", inputDetails: `{"cached_tokens":3}`, topLevel: true, wantCachePresent: true, wantCachedTokens: 3},
+	}
+	for _, test := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", test.name, stream), func(t *testing.T) {
+				body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":%t}`, stream))
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+				c.Request.Header.Set("Content-Type", "application/json")
 
-	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.1")
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, 18, result.Usage.InputTokens)
-	require.Equal(t, 6, result.Usage.OutputTokens)
-	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
+				usageFields := `"input_tokens":18,"output_tokens":6,"total_tokens":24`
+				if test.inputDetails != "" {
+					usageFields += `,"input_tokens_details":` + test.inputDetails
+				}
+				terminal := fmt.Sprintf(`{"type":"response.completed","response":{%s,"usage":{%s}}}`, responseFields, usageFields)
+				if test.topLevel {
+					terminal = fmt.Sprintf(`{"type":"response.completed","response":{%s},"usage":{%s}}`, responseFields, usageFields)
+				}
+				upstreamBody := "data: " + terminal + "\n\ndata: [DONE]\n\n"
+				upstream := &httpUpstreamRecorder{resp: &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+				}}
+				svc := &OpenAIGatewayService{httpUpstream: upstream}
+				result, err := svc.ForwardAsChatCompletions(t.Context(), c, account, body, "", "")
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.NotNil(t, upstream.lastReq)
+				require.Equal(t, chatgptCodexURL, upstream.lastReq.URL.String())
+				require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+				require.Equal(t, 18, result.Usage.InputTokens)
+				require.Equal(t, 6, result.Usage.OutputTokens)
+				require.Equal(t, test.wantCachedTokens, result.Usage.CacheReadInputTokens)
+				require.Equal(t, http.StatusOK, rec.Code)
 
-	responseBody := rec.Body.String()
-	require.Contains(t, responseBody, `"usage"`)
-	require.Contains(t, responseBody, `"prompt_tokens":18`)
-	require.Contains(t, responseBody, `"completion_tokens":6`)
-	require.Contains(t, responseBody, `"cached_tokens":3`)
+				var usage gjson.Result
+				if stream {
+					require.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
+					for _, chunk := range parseChatCompletionSSEChunks(t, rec.Body.String()) {
+						if chunk.Get("usage").IsObject() {
+							usage = chunk.Get("usage")
+						}
+					}
+				} else {
+					require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+					require.True(t, json.Valid(rec.Body.Bytes()), rec.Body.String())
+					usage = gjson.GetBytes(rec.Body.Bytes(), "usage")
+				}
+				require.EqualValues(t, 18, usage.Get("prompt_tokens").Int())
+				require.EqualValues(t, 6, usage.Get("completion_tokens").Int())
+				cached := usage.Get("prompt_tokens_details.cached_tokens")
+				require.Equal(t, test.wantCachePresent, cached.Exists(), "usage: %s", usage.Raw)
+				if test.wantCachePresent {
+					require.Equal(t, gjson.Number, cached.Type)
+					require.EqualValues(t, test.wantCachedTokens, cached.Int())
+				}
+			})
+		}
+	}
 }
 
 func TestForwardAsChatCompletions_TerminalUsageWithoutUpstreamCloseReturns(t *testing.T) {

@@ -45,13 +45,35 @@ func TestUsageConversionsPreserveCacheWriteTokens(t *testing.T) {
 
 	chatUsage := chatUsageFromResponsesUsage(&responsesUsage)
 	require.NotNil(t, chatUsage.PromptTokensDetails)
-	require.Equal(t, 100, chatUsage.PromptTokensDetails.CachedTokens)
+	require.Equal(t, new(100), chatUsage.PromptTokensDetails.CachedTokens)
 	require.Equal(t, 200, chatUsage.PromptTokensDetails.CacheWriteTokens)
 
 	roundTrip := ChatUsageToResponsesUsage(chatUsage)
 	require.NotNil(t, roundTrip.InputTokensDetails)
 	require.Equal(t, 200, roundTrip.CacheCreationInputTokens)
 	require.Equal(t, 200, roundTrip.InputTokensDetails.CacheWriteTokens)
+}
+
+func TestResponsesToChatCacheReadPresence(t *testing.T) {
+	for _, tc := range []struct{ name, usage, wantDetails string }{
+		{"no breakdown", `{}`, `null`},
+		{"empty breakdown", `{"input_tokens_details":{}}`, `null`},
+		{"unknown read with audio", `{"input_tokens_details":{"cached_tokens":null,"audio_tokens":3}}`, `{"audio_tokens":3}`},
+		{"write only", `{"input_tokens_details":{"cache_write_tokens":7}}`, `{"cache_write_tokens":7}`},
+		{"reported zero", `{"input_tokens_details":{"cached_tokens":0}}`, `{"cached_tokens":0}`},
+		{"reported zero with write", `{"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":7}}`, `{"cached_tokens":0,"cache_write_tokens":7}`},
+		{"prompt alias", `{"prompt_tokens_details":{"cached_tokens":0}}`, `{"cached_tokens":0}`},
+		{"canonical zero before alias", `{"input_tokens_details":{"cached_tokens":0},"prompt_tokens_details":{"cached_tokens":42}}`, `{"cached_tokens":0}`},
+		{"reported hit", `{"input_tokens_details":{"cached_tokens":42}}`, `{"cached_tokens":42}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var usage ResponsesUsage
+			require.NoError(t, json.Unmarshal([]byte(tc.usage), &usage))
+			details, err := json.Marshal(chatUsageFromResponsesUsage(&usage).PromptTokensDetails)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.wantDetails, string(details))
+		})
+	}
 }
 
 func TestResponsesUsageNestedCacheWritePresenceOverridesTopLevelAlias(t *testing.T) {
@@ -1101,7 +1123,7 @@ func TestResponsesToChatCompletions_CachedTokens(t *testing.T) {
 	chat := ResponsesToChatCompletions(resp, "gpt-4o")
 	require.NotNil(t, chat.Usage)
 	require.NotNil(t, chat.Usage.PromptTokensDetails)
-	assert.Equal(t, 80, chat.Usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, new(80), chat.Usage.PromptTokensDetails.CachedTokens)
 }
 
 func TestResponsesToChatCompletions_ReasoningTokens(t *testing.T) {
@@ -1163,7 +1185,7 @@ func TestResponsesToChatCompletions_AllTokenDetailsPassThrough(t *testing.T) {
 	chat := ResponsesToChatCompletions(resp, "gpt-5.5")
 	require.NotNil(t, chat.Usage)
 	require.NotNil(t, chat.Usage.PromptTokensDetails)
-	assert.Equal(t, 60, chat.Usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, new(60), chat.Usage.PromptTokensDetails.CachedTokens)
 	assert.Equal(t, 4, chat.Usage.PromptTokensDetails.AudioTokens)
 
 	require.NotNil(t, chat.Usage.CompletionTokensDetails)
@@ -1372,7 +1394,7 @@ func TestResponsesEventToChatChunks_Completed(t *testing.T) {
 	assert.Equal(t, 20, chunks[1].Usage.CompletionTokens)
 	assert.Equal(t, 70, chunks[1].Usage.TotalTokens)
 	require.NotNil(t, chunks[1].Usage.PromptTokensDetails)
-	assert.Equal(t, 30, chunks[1].Usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, new(30), chunks[1].Usage.PromptTokensDetails.CachedTokens)
 }
 
 func TestResponsesEventToChatChunks_CompletedWithReasoningTokens(t *testing.T) {
@@ -1446,7 +1468,7 @@ func TestResponsesEventToChatChunks_TopLevelTerminalUsage(t *testing.T) {
 	assert.Equal(t, 21, chunks[1].Usage.PromptTokens)
 	assert.Equal(t, 9, chunks[1].Usage.CompletionTokens)
 	require.NotNil(t, chunks[1].Usage.PromptTokensDetails)
-	assert.Equal(t, 4, chunks[1].Usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, new(4), chunks[1].Usage.PromptTokensDetails.CachedTokens)
 }
 
 func TestResponsesEventToChatChunks_ResponseDoneIncomplete(t *testing.T) {

@@ -539,6 +539,7 @@ type ResponsesUsage struct {
 func (u *ResponsesUsage) UnmarshalJSON(data []byte) error {
 	type responsesUsageAlias ResponsesUsage
 	type cacheTokenPresence struct {
+		CachedTokens        *int `json:"cached_tokens"`
 		CacheCreationTokens *int `json:"cache_creation_tokens"`
 		CacheWriteTokens    *int `json:"cache_write_tokens"`
 	}
@@ -579,8 +580,13 @@ func (u *ResponsesUsage) UnmarshalJSON(data []byte) error {
 			u.CacheCreationInputTokens = aux.CacheWriteTokens
 		}
 	}
+	readPresence := nestedPresence.InputTokensDetails
 	if u.InputTokensDetails == nil && aux.PromptTokensDetails != nil {
 		u.InputTokensDetails = aux.PromptTokensDetails
+		readPresence = nestedPresence.PromptTokensDetails
+	}
+	if u.InputTokensDetails != nil && readPresence != nil {
+		u.InputTokensDetails.cachedTokensReported = readPresence.CachedTokens != nil
 	}
 	if u.OutputTokensDetails == nil && aux.CompletionTokensDetails != nil {
 		u.OutputTokensDetails = aux.CompletionTokensDetails
@@ -610,10 +616,11 @@ type ResponsesInputTokensDetails struct {
 	// cached_tokens 不带 omitempty：Codex 的 ResponseCompletedInputTokensDetails
 	// 把该字段反序列化为必填（无 serde default），缺字段会让整条
 	// response.completed 解析失败。零值必须显式输出。
-	CachedTokens        int `json:"cached_tokens"`
-	AudioTokens         int `json:"audio_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
+	CachedTokens         int `json:"cached_tokens"`
+	AudioTokens          int `json:"audio_tokens,omitempty"`
+	CacheCreationTokens  int `json:"cache_creation_tokens,omitempty"`
+	CacheWriteTokens     int `json:"cache_write_tokens,omitempty"`
+	cachedTokensReported bool
 }
 
 // ResponsesOutputTokensDetails breaks down output token usage.
@@ -930,13 +937,13 @@ type ChatUsage struct {
 //   - completion_tokens_details: reasoning_tokens, audio_tokens,
 //     accepted_prediction_tokens, rejected_prediction_tokens
 type ChatTokenDetails struct {
-	CachedTokens             int `json:"cached_tokens,omitempty"`
-	AudioTokens              int `json:"audio_tokens,omitempty"`
-	CacheCreationTokens      int `json:"cache_creation_tokens,omitempty"`
-	CacheWriteTokens         int `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	CachedTokens             *int `json:"cached_tokens,omitempty"`
+	AudioTokens              int  `json:"audio_tokens,omitempty"`
+	CacheCreationTokens      int  `json:"cache_creation_tokens,omitempty"`
+	CacheWriteTokens         int  `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens          int  `json:"reasoning_tokens,omitempty"`
+	AcceptedPredictionTokens int  `json:"accepted_prediction_tokens,omitempty"`
+	RejectedPredictionTokens int  `json:"rejected_prediction_tokens,omitempty"`
 }
 
 // ChatCompletionsChunk is a single streaming chunk from POST /v1/chat/completions.

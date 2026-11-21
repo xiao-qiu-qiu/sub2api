@@ -70,11 +70,11 @@ func TestForwardAsChatCompletions_BPSResponseConversion(t *testing.T) {
 				require.Equal(t, stream, result.Stream)
 				require.Equal(t, 13, result.Usage.InputTokens)
 				require.Equal(t, 7, result.Usage.OutputTokens)
-				require.Equal(t, 5, result.Usage.CacheReadInputTokens)
+				require.Zero(t, result.Usage.CacheReadInputTokens)
 				require.Equal(t, http.StatusOK, rec.Code)
 				if stream {
 					require.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
-					chunks := chatBPSChunks(t, rec.Body.String())
+					chunks := parseChatCompletionSSEChunks(t, rec.Body.String())
 					var text strings.Builder
 					var finishes int
 					var usage gjson.Result
@@ -90,7 +90,7 @@ func TestForwardAsChatCompletions_BPSResponseConversion(t *testing.T) {
 					}
 					require.Equal(t, "Hello from BPS", text.String())
 					require.Equal(t, 1, finishes)
-					chatBPSAssertUsage(t, usage)
+					chatBPSAssertUsage(t, usage, 0)
 				} else {
 					require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
 					require.True(t, json.Valid(rec.Body.Bytes()), rec.Body.String())
@@ -100,7 +100,7 @@ func TestForwardAsChatCompletions_BPSResponseConversion(t *testing.T) {
 					require.Equal(t, "assistant", response.Get("choices.0.message.role").String())
 					require.Equal(t, "Hello from BPS", response.Get("choices.0.message.content").String())
 					require.Equal(t, "stop", response.Get("choices.0.finish_reason").String())
-					chatBPSAssertUsage(t, response.Get("usage"))
+					chatBPSAssertUsage(t, response.Get("usage"), 0)
 				}
 			})
 		}
@@ -158,7 +158,7 @@ func TestForwardAsChatCompletions_BPSToolCallConversion(t *testing.T) {
 			if stream {
 				var name, arguments strings.Builder
 				var finishes int
-				for _, chunk := range chatBPSChunks(t, rec.Body.String()) {
+				for _, chunk := range parseChatCompletionSSEChunks(t, rec.Body.String()) {
 					for _, call := range chunk.Get("choices.0.delta.tool_calls").Array() {
 						require.Zero(t, call.Get("index").Int())
 						if call.Get("id").Exists() {
@@ -220,7 +220,7 @@ func TestForwardAsChatCompletions_BPSDisabledOrModelMissUsesNative(t *testing.T)
 				require.Empty(t, rec.Header().Get("X-Sub2API-BPS-Transport"))
 				require.Contains(t, rec.Body.String(), "Hello from BPS")
 				if stream {
-					chatBPSChunks(t, rec.Body.String())
+					parseChatCompletionSSEChunks(t, rec.Body.String())
 				} else {
 					require.True(t, json.Valid(rec.Body.Bytes()), rec.Body.String())
 					require.Equal(t, "chat.completion", gjson.GetBytes(rec.Body.Bytes(), "object").String())
@@ -261,7 +261,7 @@ func TestForwardAsChatCompletions_BPSErrorsDoNotReplayOrAppendResponse(t *testin
 					require.Equal(t, http.StatusOK, rec.Code)
 					var errors int
 					var text strings.Builder
-					for _, chunk := range chatBPSChunks(t, rec.Body.String()) {
+					for _, chunk := range parseChatCompletionSSEChunks(t, rec.Body.String()) {
 						_, _ = text.WriteString(chunk.Get("choices.0.delta.content").String())
 						if chunk.Get("error").Exists() {
 							errors++
@@ -344,7 +344,7 @@ func TestForwardAsChatCompletions_BPSNormalIncomplete(t *testing.T) {
 						var text strings.Builder
 						var finishes int
 						var usage gjson.Result
-						for _, chunk := range chatBPSChunks(t, rec.Body.String()) {
+						for _, chunk := range parseChatCompletionSSEChunks(t, rec.Body.String()) {
 							require.False(t, chunk.Get("error").Exists(), chunk.Raw)
 							_, _ = text.WriteString(chunk.Get("choices.0.delta.content").String())
 							if chunk.Get("choices.0.finish_reason").String() == tc.finish {
@@ -356,7 +356,7 @@ func TestForwardAsChatCompletions_BPSNormalIncomplete(t *testing.T) {
 						}
 						require.Equal(t, "Partial BPS answer", text.String())
 						require.Equal(t, 1, finishes)
-						chatBPSAssertUsage(t, usage)
+						chatBPSAssertUsage(t, usage, 5)
 					} else {
 						require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
 						require.True(t, json.Valid(rec.Body.Bytes()), rec.Body.String())
@@ -365,7 +365,7 @@ func TestForwardAsChatCompletions_BPSNormalIncomplete(t *testing.T) {
 						require.Equal(t, "chat.completion", response.Get("object").String())
 						require.Equal(t, "Partial BPS answer", response.Get("choices.0.message.content").String())
 						require.Equal(t, tc.finish, response.Get("choices.0.finish_reason").String())
-						chatBPSAssertUsage(t, response.Get("usage"))
+						chatBPSAssertUsage(t, response.Get("usage"), 5)
 					}
 				})
 			}
@@ -432,7 +432,7 @@ func chatBPSTextWire(model string) string {
 
 data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hello from BPS"}
 
-data: {"type":"response.completed","response":{"id":"resp_chat_bps","model":%q,"status":"completed","output":[{"type":"message","id":"msg_chat_bps","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello from BPS"}]}],"usage":{"input_tokens":13,"output_tokens":7,"total_tokens":20,"input_tokens_details":{"cached_tokens":5}}}}
+data: {"type":"response.completed","response":{"id":"resp_chat_bps","model":%q,"status":"completed","output":[{"type":"message","id":"msg_chat_bps","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello from BPS"}]}],"usage":{"input_tokens":13,"output_tokens":7,"total_tokens":20,"input_tokens_details":{"cached_tokens":0}}}}
 
 data: [DONE]
 
@@ -441,7 +441,7 @@ data: [DONE]
 
 // Parse the wire independently of the production Responses-to-Chat converter.
 // Every data frame must be JSON, with exactly one final Chat DONE sentinel.
-func chatBPSChunks(t *testing.T, wire string) []gjson.Result {
+func parseChatCompletionSSEChunks(t *testing.T, wire string) []gjson.Result {
 	t.Helper()
 	var chunks []gjson.Result
 	var done bool
@@ -466,10 +466,12 @@ func chatBPSChunks(t *testing.T, wire string) []gjson.Result {
 	return chunks
 }
 
-func chatBPSAssertUsage(t *testing.T, usage gjson.Result) {
+func chatBPSAssertUsage(t *testing.T, usage gjson.Result, wantCached int) {
 	t.Helper()
 	require.EqualValues(t, 13, usage.Get("prompt_tokens").Int())
 	require.EqualValues(t, 7, usage.Get("completion_tokens").Int())
 	require.EqualValues(t, 20, usage.Get("total_tokens").Int())
-	require.EqualValues(t, 5, usage.Get("prompt_tokens_details.cached_tokens").Int())
+	cached := usage.Get("prompt_tokens_details.cached_tokens")
+	require.Equal(t, gjson.Number, cached.Type)
+	require.EqualValues(t, wantCached, cached.Int())
 }

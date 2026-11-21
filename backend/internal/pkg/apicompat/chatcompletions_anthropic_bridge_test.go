@@ -469,7 +469,7 @@ func TestChatCompletionsResponseToAnthropic_CacheTokens(t *testing.T) {
 			CompletionTokens: 5,
 			TotalTokens:      105,
 			PromptTokensDetails: &ChatTokenDetails{
-				CachedTokens:        30,
+				CachedTokens:        new(30),
 				CacheCreationTokens: 10,
 			},
 		},
@@ -720,7 +720,7 @@ func TestDirectBridge_NonStreamingMatchesDoubleConversion(t *testing.T) {
 			PromptTokens:        50,
 			CompletionTokens:    10,
 			TotalTokens:         60,
-			PromptTokensDetails: &ChatTokenDetails{CachedTokens: 5},
+			PromptTokensDetails: &ChatTokenDetails{CachedTokens: new(5)},
 		},
 	}
 
@@ -1033,7 +1033,7 @@ func TestDirectBridge_NonStreamingMatchesDoubleConversion_CacheWriteTokens(t *te
 			CompletionTokens: 10,
 			TotalTokens:      110,
 			PromptTokensDetails: &ChatTokenDetails{
-				CachedTokens:        20,
+				CachedTokens:        new(20),
 				CacheCreationTokens: 7,
 				CacheWriteTokens:    9,
 			},

@@ -424,11 +424,15 @@ func promptDetailsFromResponses(src *ResponsesInputTokensDetails) *ChatTokenDeta
 	if src == nil {
 		return nil
 	}
-	if src.CachedTokens == 0 && src.AudioTokens == 0 && src.CacheCreationTokens == 0 && src.CacheWriteTokens == 0 {
+	var cachedTokens *int
+	if src.CachedTokens != 0 || src.cachedTokensReported {
+		cachedTokens = new(src.CachedTokens)
+	}
+	if cachedTokens == nil && src.AudioTokens == 0 && src.CacheCreationTokens == 0 && src.CacheWriteTokens == 0 {
 		return nil
 	}
 	return &ChatTokenDetails{
-		CachedTokens:        src.CachedTokens,
+		CachedTokens:        cachedTokens,
 		AudioTokens:         src.AudioTokens,
 		CacheCreationTokens: src.CacheCreationTokens,
 		CacheWriteTokens:    src.CacheWriteTokens,

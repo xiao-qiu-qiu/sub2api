@@ -105,7 +105,7 @@ func TestAnthropicChatStreamAuthoritativeUsage(t *testing.T) {
 							require.Equal(t, tc.prompt+tc.output, chunk.Usage.TotalTokens)
 							if tc.cached > 0 {
 								require.NotNil(t, chunk.Usage.PromptTokensDetails)
-								require.Equal(t, tc.cached, chunk.Usage.PromptTokensDetails.CachedTokens)
+								require.Equal(t, new(tc.cached), chunk.Usage.PromptTokensDetails.CachedTokens)
 								require.Equal(t, tc.created, chunk.Usage.PromptTokensDetails.CacheCreationTokens)
 							}
 						}
