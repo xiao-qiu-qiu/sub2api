@@ -10,7 +10,25 @@ import (
 	"strings"
 )
 
-const maxToolRepairs = 2
+const (
+	maxToolRepairs             = 2
+	maxRepairToolBatch         = 1024
+	repairOperationMismatch    = "operation_mismatch"
+	repairTargetChanged        = "explicit_target_changed"
+	repairRawPayloadMismatch   = "raw_payload_mismatch"
+	repairCorrectedCallInvalid = "corrected_translation_failed"
+)
+
+type toolRepairMismatch struct {
+	reason  string
+	tool    string
+	index   int
+	attempt int
+}
+
+func (e *toolRepairMismatch) Error() string {
+	return fmt.Sprintf("basispoints tool transport correction changed an operation; no tool was executed (tool=%q, tool_index=%d, repair_attempt=%d, reason=%s)", e.tool, e.index, e.attempt, e.reason)
+}
 
 // ToolRepairFunc continues the same BPS conversation after a rejected native
 // transport call. The entire tool batch is still unexecuted at this boundary.
@@ -67,7 +85,7 @@ func repairableTools(response object) ([]object, bool) {
 		ids[call] = true
 		items = append(items, item)
 	}
-	return items, len(items) > 0 && len(items) <= 1024
+	return items, len(items) > 0 && len(items) <= maxRepairToolBatch
 }
 
 func (b *Bridge) translateCompleted(ctx context.Context, response object, repair ToolRepairFunc) error {
@@ -122,8 +140,9 @@ func (b *Bridge) translateCompleted(ctx context.Context, response object, repair
 			if err := b.validateToolResponse(combined); err != nil {
 				return err
 			}
-			if !b.preservesToolOperations(original, items) {
-				return fmt.Errorf("basispoints tool transport correction changed an operation; no tool was executed")
+			if mismatch := b.checkToolRepairOperations(original, items); mismatch != nil {
+				mismatch.attempt = attempt + 1
+				return mismatch
 			}
 			// Text has already streamed. Replace only its withheld tool slots,
 			// keeping one downstream response identity and stable output indexes.
@@ -203,20 +222,24 @@ func (b *Bridge) restoreToolOperations(original, corrected []object) ([]object, 
 // Valid calls in a mixed batch must retain their exact client operation. For
 // unframed raw text, require byte-for-byte preservation in the corrected payload.
 // This checks content, without interpreting code or choosing its target.
-func (b *Bridge) preservesToolOperations(original, corrected []object) bool {
+func (b *Bridge) checkToolRepairOperations(original, corrected []object) *toolRepairMismatch {
 	check := *b
 	check.replay = nil
 	for i, native := range original {
 		before, err := check.translateCall(native)
 		after, afterErr := check.translateCall(corrected[i])
 		if afterErr != nil {
-			return false
+			return &toolRepairMismatch{reason: repairCorrectedCallInvalid, index: i}
+		}
+		toolName := text(after["name"])
+		if namespace := text(after["namespace"]); namespace != "" {
+			toolName = namespace + "." + toolName
 		}
 		if err == nil {
 			// A call ID changes between model turns; it is not part of the operation.
 			before["call_id"], after["call_id"] = "compare", "compare"
 			if historyCallFingerprint(before) != historyCallFingerprint(after) {
-				return false
+				return &toolRepairMismatch{reason: repairOperationMismatch, tool: safeDiagnosticToolName(toolName), index: i}
 			}
 			continue
 		}
@@ -224,7 +247,7 @@ func (b *Bridge) preservesToolOperations(original, corrected []object) bool {
 		if target := transportTarget(args); target != "" {
 			info, allowed := b.tools[target]
 			if !allowed || after["name"] != info.Name || text(after["namespace"]) != info.Namespace {
-				return false
+				return &toolRepairMismatch{reason: repairTargetChanged, tool: safeDiagnosticToolName(toolName), index: i}
 			}
 		}
 		code, isText := args["code"].(string)
@@ -238,7 +261,7 @@ func (b *Bridge) preservesToolOperations(original, corrected []object) bool {
 		}
 		if text(after["type"]) == "custom_tool_call" {
 			if after["input"] != code {
-				return false
+				return &toolRepairMismatch{reason: repairRawPayloadMismatch, tool: safeDiagnosticToolName(toolName), index: i}
 			}
 		} else {
 			var payload object
@@ -247,11 +270,11 @@ func (b *Bridge) preservesToolOperations(original, corrected []object) bool {
 				field = "cmd"
 			}
 			if decode([]byte(text(after["arguments"])), &payload) != nil || payload[field] != code {
-				return false
+				return &toolRepairMismatch{reason: repairRawPayloadMismatch, tool: safeDiagnosticToolName(toolName), index: i}
 			}
 		}
 	}
-	return true
+	return nil
 }
 
 func transportArguments(native object) object {

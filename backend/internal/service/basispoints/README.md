@@ -136,6 +136,9 @@ Local conversion failures retain `basispoints_protocol_error` and add bounded
 applicable. For unsupported direct native calls, the error message and
 `rejected_tool` report the name as received, including any `functions.` prefix;
 unsafe names are redacted and a missing name is not invented.
+When transport correction fails the operation-preservation check, the error
+reports the rejected corrected tool (including its namespace), the zero-based
+`repair_tool_index`, the one-based `repair_attempt`, and `repair_failure_reason`.
 `upstream_terminal_event=response.completed` is included only when
 that terminal was actually observed. Tool arguments and business text are not
 added to diagnostics. Ops assigns these failures to `gateway` / `platform`,

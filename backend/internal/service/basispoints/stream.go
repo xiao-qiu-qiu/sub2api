@@ -307,6 +307,13 @@ func (b *Bridge) transformWithRepairs(ctx context.Context, reader io.Reader, wri
 		if errors.As(err, &native) {
 			failure.RejectedTool = native.name
 		}
+		var mismatch *toolRepairMismatch
+		if errors.As(err, &mismatch) {
+			failure.RejectedTool = mismatch.tool
+			failure.RepairFailureReason = mismatch.reason
+			failure.RepairToolIndex = mismatch.index
+			failure.RepairAttempt = mismatch.attempt
+		}
 		if text(terminalResponse["status"]) == "completed" {
 			failure.UpstreamTerminalEvent = "response.completed"
 		}

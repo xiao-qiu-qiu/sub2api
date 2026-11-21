@@ -1,6 +1,7 @@
 package basispoints
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -8,10 +9,14 @@ import (
 type unsupportedNativeToolError struct{ name string }
 
 func newUnsupportedNativeToolError(name string) unsupportedNativeToolError {
+	return unsupportedNativeToolError{name: safeDiagnosticToolName(name)}
+}
+
+func safeDiagnosticToolName(name string) string {
 	if len(name) > 128 || strings.ContainsAny(name, "/~$") {
-		return unsupportedNativeToolError{name: "[redacted]"}
+		return "[redacted]"
 	}
-	return unsupportedNativeToolError{name: safeSchemaName(name)}
+	return safeSchemaName(name)
 }
 
 func (e unsupportedNativeToolError) Error() string {
@@ -28,6 +33,9 @@ type BridgeFailure struct {
 	FailureStage          string
 	RejectedTool          string
 	RepairSkippedReason   string
+	RepairFailureReason   string
+	RepairToolIndex       int
+	RepairAttempt         int
 	UpstreamTerminalEvent string
 }
 
@@ -38,6 +46,11 @@ func (f *BridgeFailure) Details() map[string]any {
 	}
 	if f.RepairSkippedReason != "" {
 		result["repair_skipped_reason"] = f.RepairSkippedReason
+	}
+	if f.RepairFailureReason != "" {
+		result["repair_failure_reason"] = f.RepairFailureReason
+		result["repair_tool_index"] = f.RepairToolIndex
+		result["repair_attempt"] = f.RepairAttempt
 	}
 	if f.UpstreamTerminalEvent != "" {
 		result["upstream_terminal_event"] = f.UpstreamTerminalEvent
@@ -58,7 +71,22 @@ func ParseBridgeFailure(raw []byte) *BridgeFailure {
 	if text(detail["code"]) != "basispoints_protocol_error" || (stage != "bridge_tool_validation" && stage != "bridge_protocol_conversion") {
 		return nil
 	}
-	return &BridgeFailure{Message: text(detail["message"]), FailureStage: stage,
+	failure := &BridgeFailure{Message: text(detail["message"]), FailureStage: stage,
 		RejectedTool: safeSchemaName(text(detail["rejected_tool"])), RepairSkippedReason: text(detail["repair_skipped_reason"]),
 		UpstreamTerminalEvent: text(detail["upstream_terminal_event"])}
+	if reason := text(detail["repair_failure_reason"]); stage == "bridge_tool_validation" && reason != "" {
+		indexNumber, _ := detail["repair_tool_index"].(json.Number)
+		attemptNumber, _ := detail["repair_attempt"].(json.Number)
+		index, indexErr := indexNumber.Int64()
+		attempt, attemptErr := attemptNumber.Int64()
+		if indexErr == nil && attemptErr == nil && index >= 0 && index < maxRepairToolBatch && attempt >= 1 && attempt <= maxToolRepairs {
+			switch reason {
+			case repairOperationMismatch, repairTargetChanged, repairRawPayloadMismatch, repairCorrectedCallInvalid:
+				failure.RepairFailureReason = reason
+				failure.RepairToolIndex = int(index)
+				failure.RepairAttempt = int(attempt)
+			}
+		}
+	}
+	return failure
 }

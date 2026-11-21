@@ -277,39 +277,95 @@ func TestToolRepairRestoresOriginalRawPayload(t *testing.T) {
 }
 
 func TestToolRepairRejectsChangedBatchAndOperations(t *testing.T) {
-	for _, change := range []string{"extra_tool", "text_only", "unmarked_raw_code", "changed_target", "explicit_target", "oversized_raw_code"} {
-		t.Run(change, func(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		reason  string
+		index   int
+		attempt int
+	}{
+		{name: "extra_tool", attempt: 1},
+		{name: "text_only", attempt: 1},
+		{name: "unmarked_raw_code", reason: "raw_payload_mismatch", attempt: 2},
+		{name: "changed_target", reason: "operation_mismatch", index: 1, attempt: 1},
+		{name: "explicit_target", reason: "explicit_target_changed", attempt: 1},
+		{name: "oversized_raw_code", attempt: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			cache := new(ReplayCache)
-			_, bridge := repairBridge(t, cache)
-			code := "text(1)"
+			source := testSource()
+			source["stream"] = true
+			source["tools"] = []any{
+				object{"type": "namespace", "name": "functions", "tools": []any{object{"type": "custom", "name": "exec"}}},
+				object{"type": "function", "name": "shell"},
+			}
+			_, bridge := mustPrepare(t, source, "repair-scope", cache)
+			code := "text('private-original-payload')"
 			original := []any{repairCall("bad", "Run", code)}
 			corrected := []any{repairCall("fixed", "codex2api.custom/functions.exec", code)}
-			switch change {
+			switch test.name {
 			case "extra_tool":
 				corrected = append(corrected, repairCall("extra", "codex2api.custom/functions.exec", code))
 			case "text_only":
 				corrected = nil
 			case "unmarked_raw_code":
-				corrected = []any{nativeCall(object{"name": "functions.exec", "input": "text(2)"})}
+				fixed := nativeCall(object{"name": "functions.exec", "input": "text('private-corrected-payload')"})
+				fixed["id"], fixed["call_id"] = "fc_fixed", "fixed"
+				corrected = []any{fixed}
 			case "changed_target":
-				original = append(original, nativeCall(object{"name": "shell", "arguments": object{"cmd": "pwd"}}))
-				corrected = append(corrected, repairCall("changed_target", customTransportPrefix+"functions.exec", "text(1)"))
+				original = append(original, nativeCall(object{"name": "shell", "arguments": object{"cmd": "private-original-argument"}}))
+				corrected = append(corrected, repairCall("changed_target", customTransportPrefix+"functions.exec", "text('private-corrected-payload')"))
 			case "explicit_target":
-				original = []any{nativeCall(object{"name": "shell", "arguments": 42})}
+				original = []any{nativeCall(object{"name": "shell", "arguments": "private-invalid-argument"})}
 			case "oversized_raw_code":
 				original = []any{repairCall("bad", "Run", strings.Repeat("x", maxEnvelopeBytes+1))}
 			}
 			calls := 0
 			initial := repairResponse("resp", 10, 2, original...)
-			body := bridge.StreamWithToolRepair(context.Background(), io.NopCloser(strings.NewReader(sse(object{"type": "response.completed", "response": initial}))), func(context.Context, object, error) (object, error) {
+			wire := sse(object{"type": "response.output_text.delta", "delta": "Working."}) + sse(object{"type": "response.completed", "response": initial})
+			body := bridge.StreamWithToolRepair(context.Background(), io.NopCloser(strings.NewReader(wire)), func(context.Context, object, error) (object, error) {
 				calls++
+				if test.name == "unmarked_raw_code" && calls == 1 {
+					return repairResponse("resp_invalid", 20, 3, repairCall("invalid", "Run", code)), nil
+				}
 				return repairResponse("resp_fixed", 20, 3, corrected...), nil
 			})
 			events := repairEvents(t, body)
-			require.Equal(t, 1, calls)
-			require.Len(t, events, 1)
-			require.Equal(t, "response.failed", events[0]["type"])
+			require.Equal(t, test.attempt, calls)
+			require.Len(t, events, 2)
+			require.Equal(t, "response.output_text.delta", events[0]["type"])
+			require.Equal(t, "Working.", events[0]["delta"])
+			require.Equal(t, "response.failed", events[1]["type"])
+			response := repairValue[object](t, events[1]["response"])
+			require.Empty(t, response["output"])
+			failure := repairValue[object](t, response["error"])
+			require.Equal(t, "basispoints_protocol_error", failure["code"])
+			require.Equal(t, "bridge_tool_validation", failure["failure_stage"])
+			parsed := ParseBridgeFailure([]byte(quoted(events[1])))
+			require.NotNil(t, parsed)
+			details := parsed.Details()
+			if test.reason != "" {
+				require.Equal(t, "functions.exec", failure["rejected_tool"])
+				require.Equal(t, test.reason, failure["repair_failure_reason"])
+				require.Equal(t, json.Number(fmt.Sprint(test.index)), failure["repair_tool_index"])
+				require.Equal(t, json.Number(fmt.Sprint(test.attempt)), failure["repair_attempt"])
+				require.Equal(t, "functions.exec", details["rejected_tool"])
+				require.Equal(t, test.reason, details["repair_failure_reason"])
+				require.Equal(t, test.index, details["repair_tool_index"])
+				require.Equal(t, test.attempt, details["repair_attempt"])
+				message := text(failure["message"])
+				require.Contains(t, message, "basispoints tool transport correction changed an operation; no tool was executed")
+				require.Contains(t, message, "functions.exec")
+				require.Contains(t, message, test.reason)
+			} else {
+				for _, field := range []string{"rejected_tool", "repair_failure_reason", "repair_tool_index", "repair_attempt"} {
+					require.NotContains(t, failure, field)
+					require.NotContains(t, details, field)
+				}
+			}
+			require.JSONEq(t, quoted(failure), quoted(details))
+			require.NotContains(t, quoted(events), "private-")
 			require.Nil(t, cache.get("repair-scope", "fixed"))
+			require.Nil(t, cache.get("repair-scope", "changed_target"))
 		})
 	}
 }
