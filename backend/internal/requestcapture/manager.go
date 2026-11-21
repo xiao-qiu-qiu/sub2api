@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,27 +112,19 @@ func New(store Store, dir string, config Config) (*Manager, error) {
 					return nil, e
 				}
 			}
+			if e = store.PruneRecords(ctx, t.ID); e != nil {
+				return nil, e
+			}
 			var requests, partial, bytes int64
-			for ro := 0; ; {
+			for ro := 0; ; ro += 100 {
 				records, e := store.Records(ctx, t.ID, "", false, 100, ro)
 				if e != nil {
 					return nil, e
 				}
-				kept := 0
 				for _, r := range records {
-					if !r.IsError || r.FinishedAt == nil {
-						if _, e = uuid.Parse(r.ID); e != nil {
-							return nil, e
-						}
-						if e = os.RemoveAll(filepath.Join(dir, t.ID, r.ID)); e != nil {
-							return nil, e
-						}
-						if e = store.DeleteRecord(ctx, t.ID, r.ID); e != nil {
-							return nil, e
-						}
+					if !r.visible(false) || r.InstanceID != m.instance {
 						continue
 					}
-					kept++
 					requests++
 					bytes += r.Bytes
 					if r.Partial {
@@ -141,7 +134,6 @@ func New(store Store, dir string, config Config) (*Manager, error) {
 				if len(records) < 100 {
 					break
 				}
-				ro += kept
 			}
 			// A crash can occur between record persistence and task counter flush.
 			if t.Requests != requests || t.Partial != partial || t.Bytes != bytes {
@@ -155,8 +147,7 @@ func New(store Store, dir string, config Config) (*Manager, error) {
 			break
 		}
 	}
-	// Remove bodies whose final error index was never committed, including crashes
-	// between a successful response and its asynchronous deletion.
+	// Remove bodies without a committed retention decision.
 	if err = m.cleanOrphanBodies(ctx); err != nil {
 		return nil, err
 	}
@@ -341,21 +332,28 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	m.signal()
 	return nil
 }
-func (m *Manager) Records(ctx context.Context, task, rid string, _ bool, limit, offset int) ([]Record, error) {
+func (m *Manager) Records(ctx context.Context, task, rid string, onlyErrors bool, limit, offset int) ([]Record, error) {
 	if _, err := m.Task(ctx, task); err != nil {
 		return nil, err
 	}
-	return m.store.Records(ctx, task, rid, true, limit, offset)
+	records, err := m.store.Records(ctx, task, rid, onlyErrors, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(records, func(r Record) bool { return r.InstanceID != m.instance || !r.visible(onlyErrors) }), nil
 }
 func (m *Manager) Record(ctx context.Context, task, id string) (*Record, error) {
 	if _, err := m.Task(ctx, task); err != nil {
 		return nil, err
 	}
 	r, err := m.store.Record(ctx, task, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
-	if r.InstanceID != m.instance || !r.IsError || r.FinishedAt == nil {
+	if r.InstanceID != m.instance || !r.visible(false) {
 		return nil, ErrNotFound
 	}
 	return r, nil
@@ -579,7 +577,7 @@ func (m *Manager) cleanExpired() {
 	}
 }
 
-// Recovery is fail-closed: only a finished error index authorizes retained files.
+// Recovery is fail-closed: only a finished retained record authorizes body files.
 func (m *Manager) cleanOrphanBodies(ctx context.Context) error {
 	tasks, err := os.ReadDir(m.dir)
 	if err != nil {
@@ -607,7 +605,7 @@ func (m *Manager) cleanOrphanBodies(ctx context.Context) error {
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			if err != nil || r.InstanceID != m.instance || !r.IsError || r.FinishedAt == nil {
+			if err != nil || r.InstanceID != m.instance || !r.visible(false) {
 				if err := os.RemoveAll(filepath.Join(m.dir, task.Name(), record.Name())); err != nil {
 					return err
 				}

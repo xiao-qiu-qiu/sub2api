@@ -24,6 +24,8 @@ describe('request capture API', () => {
     mocks.get.mockResolvedValue({ data: {} }); mocks.post.mockResolvedValue({ data: {} })
     await listRecords('task', 2, 'request-id', true)
     expect(mocks.get).toHaveBeenLastCalledWith('/admin/request-captures/task/requests', { params: { page: 2, page_size: 20, request_id: 'request-id', errors_only: true } })
+    await listRecords('task', 1, '', false)
+    expect(mocks.get).toHaveBeenLastCalledWith('/admin/request-captures/task/requests', { params: { page: 1, page_size: 20, request_id: '', errors_only: false } })
     await getContent('task', 'record', 'a.txt', 262144)
     expect(mocks.get).toHaveBeenLastCalledWith('/admin/request-captures/task/requests/record/content/a.txt', { params: { offset: 262144 } })
     const body = { target_type: 'account' as const, target_id: 2, duration_minutes: 1, save_media: false }

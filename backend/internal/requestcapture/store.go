@@ -8,6 +8,8 @@ import (
 
 type SQLStore struct{ DB *sql.DB }
 
+const retainedRecordSQL = `data->>'finished_at' IS NOT NULL AND (is_error OR data->'is_suspected_distillation' = 'true'::jsonb)`
+
 func (s *SQLStore) SaveTask(ctx context.Context, t *Task) error {
 	b, err := json.Marshal(t)
 	if err != nil {
@@ -45,7 +47,7 @@ func (s *SQLStore) SaveRecord(ctx context.Context, r *Record) error {
 	return err
 }
 func (s *SQLStore) Records(ctx context.Context, task, requestID string, onlyErrors bool, limit, offset int) ([]Record, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT data - 'parts' - 'attempts' - 'usage' FROM request_capture_records WHERE task_id=$1 AND ($2='' OR request_id=$2) AND ($3=FALSE OR (is_error=TRUE AND data->>'finished_at' IS NOT NULL)) ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5`, task, requestID, onlyErrors, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT data - 'parts' - 'attempts' - 'usage' FROM request_capture_records WHERE task_id=$1 AND ($2='' OR request_id=$2) AND (NOT $3 OR is_error) AND `+retainedRecordSQL+` ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5`, task, requestID, onlyErrors, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -66,12 +68,16 @@ func (s *SQLStore) Records(ctx context.Context, task, requestID string, onlyErro
 }
 func (s *SQLStore) Record(ctx context.Context, task, id string) (*Record, error) {
 	var b []byte
-	if err := s.DB.QueryRowContext(ctx, `SELECT data FROM request_capture_records WHERE task_id=$1 AND id=$2`, task, id).Scan(&b); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT data FROM request_capture_records WHERE task_id=$1 AND id=$2 AND `+retainedRecordSQL, task, id).Scan(&b); err != nil {
 		return nil, err
 	}
 	var r Record
 	err := json.Unmarshal(b, &r)
 	return &r, err
+}
+func (s *SQLStore) PruneRecords(ctx context.Context, task string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM request_capture_records WHERE task_id=$1 AND (`+retainedRecordSQL+`) IS NOT TRUE`, task)
+	return err
 }
 func (s *SQLStore) DeleteTask(ctx context.Context, instance, id string) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM request_capture_tasks WHERE instance_id=$1 AND id=$2`, instance, id)

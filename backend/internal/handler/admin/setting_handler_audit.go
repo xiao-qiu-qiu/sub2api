@@ -51,6 +51,18 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.RequestCaptureRetentionDays != after.RequestCaptureRetentionDays {
 		changed = append(changed, "request_capture_retention_days")
 	}
+	if before.RequestCaptureIncludeDistillation != after.RequestCaptureIncludeDistillation {
+		changed = append(changed, service.SettingKeyRequestCaptureIncludeDistillation)
+	}
+	if before.RequestCaptureDistillationMinOutputTokens != after.RequestCaptureDistillationMinOutputTokens {
+		changed = append(changed, service.SettingKeyRequestCaptureDistillationMinOutputTokens)
+	}
+	if before.RequestCaptureDistillationMaxCacheReadTokens != after.RequestCaptureDistillationMaxCacheReadTokens {
+		changed = append(changed, service.SettingKeyRequestCaptureDistillationMaxCacheReadTokens)
+	}
+	if before.RequestCaptureDistillationNonStreamOnly != after.RequestCaptureDistillationNonStreamOnly {
+		changed = append(changed, service.SettingKeyRequestCaptureDistillationNonStreamOnly)
+	}
 
 	if before.RegistrationEnabled != after.RegistrationEnabled {
 		changed = append(changed, "registration_enabled")

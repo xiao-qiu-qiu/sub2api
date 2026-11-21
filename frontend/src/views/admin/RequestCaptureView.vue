@@ -46,13 +46,14 @@
       <p v-if="!streamExport" class="text-sm text-gray-500">{{ t('admin.requestCapture.exportBrowser') }}</p>
       <section v-if="selectedTask" class="card space-y-4 p-5">
         <h2 class="font-semibold">{{ t('admin.requestCapture.records') }} - {{ selectedTask.target_name }}</h2>
-        <form class="flex flex-wrap items-center gap-3" @submit.prevent="recordPage = 1; loadRecords()"><input v-model.trim="requestID" class="input max-w-md" placeholder="Request ID" /><span class="text-sm text-gray-500">{{ t('admin.requestCapture.errorsOnly') }}</span><button class="btn btn-secondary">{{ t('admin.requestCapture.filter') }}</button></form>
-        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr><th class="p-2">Request ID</th><th class="p-2">{{ t('admin.requestCapture.model') }}</th><th class="p-2">{{ t('admin.requestCapture.status') }}</th><th class="p-2">{{ t('admin.requestCapture.size') }}</th></tr></thead><tbody><tr v-for="record in records" :key="record.id" class="border-t border-gray-100 dark:border-dark-700"><td class="p-2"><button class="break-all text-primary-600 underline" @click="viewRecord(record)">{{ record.request_id || record.id }}</button><div class="text-xs text-gray-500">{{ record.created_at }} / {{ record.protocol }}<span v-if="record.turn"> / {{ t('admin.requestCapture.turn') }} {{ record.turn }}</span></div></td><td class="p-2">{{ record.model }}</td><td class="p-2"><span>HTTP {{ record.status }}</span><span v-if="record.is_error" class="ml-2 text-red-600" data-testid="capture-outcome">{{ captureOutcome(record) }}</span><div v-if="record.error_code" class="break-all text-xs text-red-600">{{ record.error_code }}</div><span v-if="record.partial" class="ml-2 text-amber-700">{{ record.reason || t('admin.requestCapture.partial') }}</span></td><td class="p-2">{{ bytes(record.bytes) }}</td></tr></tbody></table></div>
+        <form class="flex flex-wrap items-center gap-3" @submit.prevent="recordPage = 1; loadRecords()"><input v-model.trim="requestID" class="input max-w-md" placeholder="Request ID" /><label class="flex items-center gap-2 text-sm"><input v-model="errorsOnly" type="checkbox" class="checkbox" @change="recordPage = 1; loadRecords()" />{{ t('admin.requestCapture.errorsOnly') }}</label><button class="btn btn-secondary">{{ t('admin.requestCapture.filter') }}</button></form>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead><tr><th class="p-2">Request ID</th><th class="p-2">{{ t('admin.requestCapture.model') }}</th><th class="p-2">{{ t('admin.requestCapture.status') }}</th><th class="p-2">{{ t('admin.requestCapture.size') }}</th></tr></thead><tbody><tr v-for="record in records" :key="record.id" class="border-t border-gray-100 dark:border-dark-700"><td class="p-2"><button class="break-all text-primary-600 underline" @click="viewRecord(record)">{{ record.request_id || record.id }}</button><div class="text-xs text-gray-500">{{ record.created_at }} / {{ record.protocol }}<span v-if="record.turn"> / {{ t('admin.requestCapture.turn') }} {{ record.turn }}</span></div></td><td class="p-2">{{ record.model }}</td><td class="p-2"><span>HTTP {{ record.status }}</span><span v-if="record.is_error" class="ml-2 text-red-600" data-testid="capture-outcome">{{ captureOutcome(record) }}</span><span v-if="record.is_suspected_distillation" class="ml-2 inline-flex rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-200" data-testid="distillation-badge">{{ t('admin.requestCapture.suspectedDistillation') }}</span><div v-if="record.error_code" class="break-all text-xs text-red-600">{{ record.error_code }}</div><span v-if="record.partial" class="ml-2 text-amber-700">{{ record.reason || t('admin.requestCapture.partial') }}</span></td><td class="p-2">{{ bytes(record.bytes) }}</td></tr></tbody></table></div>
         <div class="flex justify-end gap-3"><button class="btn btn-secondary" :disabled="recordPage <= 1" @click="recordPage--; loadRecords()">{{ t('admin.requestCapture.previous') }}</button><span class="self-center">{{ recordPage }}</span><button class="btn btn-secondary" :disabled="!recordMore" @click="recordPage++; loadRecords()">{{ t('admin.requestCapture.next') }}</button></div>
       </section>
       <section v-if="detail" class="card space-y-4 p-5">
         <div class="flex justify-between gap-3"><h2 class="font-semibold">{{ t('admin.requestCapture.detail') }} - {{ detail.request_id }}</h2><button class="btn btn-secondary" :disabled="busy || !streamExport || selectedTask?.status === 'running'" @click="download(detail.task_id, detail.id)">{{ t('admin.requestCapture.export') }}</button></div>
         <p v-if="detail.is_error" class="text-sm text-red-600">HTTP {{ detail.status }} · {{ captureOutcome(detail) }}<span v-if="detail.error_code"> · {{ detail.error_code }}</span></p>
+        <p v-if="detail.is_suspected_distillation" class="text-sm text-amber-800 dark:text-amber-200" data-testid="distillation-detail">{{ t('admin.requestCapture.suspectedDistillation') }}<span v-if="detail.distillation_evidence"> · {{ t('admin.requestCapture.distillationEvidence', { output: detail.distillation_evidence.output_tokens, cache: detail.distillation_evidence.cache_read_tokens }) }} · {{ t(detail.distillation_evidence.client_stream ? 'admin.requestCapture.streaming' : 'admin.requestCapture.nonStreaming') }}</span></p>
         <p v-if="detail.partial" class="text-sm text-amber-700">{{ t('admin.requestCapture.partial') }}: {{ detail.reason }}</p>
         <details><summary class="cursor-pointer text-sm">{{ t('admin.requestCapture.metadata') }}</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-50 p-3 text-xs dark:bg-dark-900">{{ metadata }}</pre></details>
         <div class="flex flex-wrap gap-2"><button v-for="item in stages" :key="item" class="btn" :class="stage === item ? 'btn-primary' : 'btn-secondary'" @click="selectStage(item)">{{ t('admin.requestCapture.' + item) }}</button></div>
@@ -86,6 +87,7 @@ const targetType = ref<CaptureTarget>('user'), targetID = ref(0), duration = ref
 const targets = ref<Array<{ id: number; label: string }>>([]), targetPage = ref(1), targetMore = ref(false), searching = ref(false)
 const tasks = ref<CaptureTask[]>([]), stats = ref<CaptureStats>(), taskPage = ref(1), taskMore = ref(false)
 const selectedTask = ref<CaptureTask>(), records = ref<CaptureRecord[]>([]), recordPage = ref(1), recordMore = ref(false)
+const errorsOnly = ref(false)
 const requestID = ref(''), detail = ref<CaptureRecord>(), stage = ref(stages[0]), part = ref<CapturePart>()
 const content = ref(''), contentOffset = ref(0), nextOffset = ref(0), contentMore = ref(false), contentLoading = ref(false)
 const loading = ref(false), busy = ref(false), error = ref(''), now = ref(Date.now())
@@ -94,7 +96,7 @@ const validDuration = computed(() => Number.isInteger(duration.value) && duratio
 const stageParts = computed(() => (detail.value?.parts || []).filter(item => item.stage === stage.value).sort((a, b) => a.name.localeCompare(b.name)))
 const metadata = computed(() => { if (!detail.value) return ''; const { parts: _parts, ...meta } = detail.value; return JSON.stringify(meta, null, 2) })
 let poll: ReturnType<typeof setInterval> | undefined, debounce: ReturnType<typeof setTimeout> | undefined
-let searchAbort: AbortController | undefined, disposed = false, detailVersion = 0, contentVersion = 0
+let searchAbort: AbortController | undefined, disposed = false, detailVersion = 0, contentVersion = 0, recordsVersion = 0
 function captureOutcome(record: CaptureRecord) {
   if (record.status >= 400) return t('admin.requestCapture.requestFailed')
   if (record.client_outcome === 'failed' || (!record.client_outcome && record.error_code === 'basispoints_stream_incomplete')) return t('admin.requestCapture.streamFailed')
@@ -115,7 +117,19 @@ async function loadTargets(page = 1) {
     targetPage.value = page; targetMore.value = page * 20 < result.total
   } catch (err) { if (!controller.signal.aborted) report(err) } finally { if (searchAbort === controller) searching.value = false }
 }
-async function loadRecords() { if (!selectedTask.value) return; const id = selectedTask.value.id; try { const result = await api.listRecords(id, recordPage.value, requestID.value, true); if (!disposed && selectedTask.value?.id === id) { records.value = result.items; recordMore.value = result.has_more } } catch (err) { report(err) } }
+async function loadRecords() {
+  if (!selectedTask.value) return
+  const id = selectedTask.value.id, version = ++recordsVersion
+  try {
+    const result = await api.listRecords(id, recordPage.value, requestID.value, errorsOnly.value)
+    if (!disposed && version === recordsVersion && selectedTask.value?.id === id) {
+      records.value = result.items
+      recordMore.value = result.has_more
+    }
+  } catch (err) {
+    if (!disposed && version === recordsVersion && selectedTask.value?.id === id) report(err)
+  }
+}
 async function refresh() { if (loading.value || disposed) return; loading.value = true; try { const result = await api.listTasks(taskPage.value); if (disposed) return; tasks.value = result.items; stats.value = result.stats; taskMore.value = result.has_more; if (selectedTask.value) { selectedTask.value = result.items.find(item => item.id === selectedTask.value?.id) || selectedTask.value; await loadRecords() } } catch (err) { report(err) } finally { loading.value = false } }
 async function action(fn: () => Promise<void>) { busy.value = true; error.value = ''; try { await fn(); await refresh() } catch (err) { report(err) } finally { busy.value = false } }
 async function create() { if (!targetID.value || !validDuration.value) return; await action(async () => { const task = await api.createTask({ target_type: targetType.value, target_id: targetID.value, duration_minutes: duration.value, save_media: saveMedia.value }); taskPage.value = 1; selectTask(task) }) }

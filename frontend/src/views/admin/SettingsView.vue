@@ -7459,6 +7459,29 @@
               <label for="request-capture-enabled" class="input-label">{{ t('admin.requestCapture.enabled') }}</label>
               <Toggle id="request-capture-enabled" v-model="form.request_capture_enabled" />
             </div>
+            <fieldset :disabled="!form.request_capture_enabled" class="space-y-4 rounded-lg border border-gray-200 p-4 disabled:opacity-50 dark:border-dark-700">
+              <label class="flex min-h-11 items-center gap-2 text-sm font-medium text-gray-900 dark:text-white">
+                <input id="request-capture-include-distillation" v-model="form.request_capture_include_distillation" type="checkbox" class="checkbox" />
+                {{ t('admin.requestCapture.includeDistillation') }}
+              </label>
+              <div v-if="form.request_capture_include_distillation" class="space-y-4">
+                <div class="grid gap-4 md:grid-cols-2">
+                  <label class="space-y-1">
+                    <span class="input-label">{{ t('admin.requestCapture.distillationMinOutputTokens') }}</span>
+                    <input id="request-capture-distillation-min-output" v-model.number="form.request_capture_distillation_min_output_tokens" class="input" type="number" min="0" max="9007199254740991" step="1" required />
+                  </label>
+                  <label class="space-y-1">
+                    <span class="input-label">{{ t('admin.requestCapture.distillationMaxCacheReadTokens') }}</span>
+                    <input id="request-capture-distillation-max-cache" v-model.number="form.request_capture_distillation_max_cache_read_tokens" class="input" type="number" min="0" max="9007199254740991" step="1" required />
+                  </label>
+                </div>
+                <label class="flex min-h-11 items-center gap-2 text-sm">
+                  <input id="request-capture-distillation-non-stream-only" v-model="form.request_capture_distillation_non_stream_only" type="checkbox" class="checkbox" />
+                  {{ t('admin.requestCapture.distillationNonStreamOnly') }}
+                </label>
+                <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.requestCapture.distillationHint') }}</p>
+              </div>
+            </fieldset>
             <div class="grid gap-5 md:grid-cols-2">
               <label class="space-y-1"><span class="input-label">{{ t('admin.requestCapture.quota') }}</span><input v-model.number="form.request_capture_quota_mib" class="input" type="number" min="1" step="1" required /></label>
               <label class="space-y-1"><span class="input-label">{{ t('admin.requestCapture.retention') }}</span><input v-model.number="form.request_capture_retention_days" class="input" type="number" min="1" max="30" step="1" required /></label>
@@ -10687,6 +10710,10 @@ const form = reactive<SettingsForm>({
   usage_show_upstream_response_model_to_users: false,
   smart_ops_hidden_menu_items: [] as string[],
   request_capture_enabled: false,
+  request_capture_include_distillation: false,
+  request_capture_distillation_min_output_tokens: 3000,
+  request_capture_distillation_max_cache_read_tokens: 0,
+  request_capture_distillation_non_stream_only: true,
   request_capture_quota_mib: 1024,
   request_capture_retention_days: 7,
   excel_bps_image_mode: 'native' as 'relay' | 'native',
@@ -11969,6 +11996,13 @@ const siteBillingModeHint = computed(() =>
 );
 
 async function saveSettings() {
+  const distillationThreshold = (value: number) => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const distillationMinOutput = distillationThreshold(form.request_capture_distillation_min_output_tokens);
+  const distillationMaxCache = distillationThreshold(form.request_capture_distillation_max_cache_read_tokens);
+  if (form.request_capture_enabled && form.request_capture_include_distillation && (distillationMinOutput === undefined || distillationMaxCache === undefined)) {
+    appStore.showError(t('admin.requestCapture.invalidDistillationThresholds'));
+    return;
+  }
   if (Array.from(form.excel_bps_client_instructions.trim()).length > 16000) {
     appStore.showError(t('admin.settings.features.excelBpsInstructions.tooLong'));
     return;
@@ -12537,6 +12571,10 @@ async function saveSettings() {
       usage_show_upstream_response_model_to_users: form.usage_show_upstream_response_model_to_users,
       smart_ops_hidden_menu_items: form.smart_ops_hidden_menu_items,
       request_capture_enabled: form.request_capture_enabled,
+      request_capture_include_distillation: form.request_capture_include_distillation,
+      request_capture_distillation_min_output_tokens: distillationMinOutput,
+      request_capture_distillation_max_cache_read_tokens: distillationMaxCache,
+      request_capture_distillation_non_stream_only: form.request_capture_distillation_non_stream_only,
       request_capture_quota_mib: form.request_capture_quota_mib,
       request_capture_retention_days: form.request_capture_retention_days,
       excel_bps_image_mode: form.excel_bps_image_mode,

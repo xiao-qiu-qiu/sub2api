@@ -114,7 +114,7 @@ func TestUnconfirmedDataDeletedWhenStoppedOrDisabled(t *testing.T) {
 			case "stop":
 				require.NoError(t, m.Stop(context.Background(), target.ID))
 			case "disable":
-				m.ApplyConfig(Config{false, 1024, 7})
+				m.ApplyConfig(Config{Enabled: false, QuotaMiB: 1024, RetentionDays: 7})
 			case "expire":
 				m.mu.Lock()
 				m.tasks[target.ID].task.ExpiresAt = time.Now().Add(-time.Minute)
@@ -189,10 +189,12 @@ func TestLegacyAndPendingRecordsCannotBeReadOrExported(t *testing.T) {
 	m, store := testManager(t)
 	target := task(t, m, "user", 1, false)
 	now := time.Now().UTC()
-	for _, r := range []Record{
+	hidden := []Record{
 		{ID: uuid.NewString(), TaskID: target.ID, InstanceID: m.instance, CreatedAt: now, FinishedAt: &now},
 		{ID: uuid.NewString(), TaskID: target.ID, InstanceID: m.instance, CreatedAt: now, IsError: true},
-	} {
+		{ID: uuid.NewString(), TaskID: target.ID, InstanceID: m.instance, CreatedAt: now, IsSuspectedDistillation: true},
+	}
+	for _, r := range hidden {
 		require.NoError(t, store.SaveRecord(context.Background(), &r))
 		_, err := m.Record(context.Background(), target.ID, r.ID)
 		require.ErrorIs(t, err, ErrNotFound)
@@ -205,7 +207,8 @@ func TestLegacyAndPendingRecordsCannotBeReadOrExported(t *testing.T) {
 	require.NoError(t, m.Stop(context.Background(), target.ID))
 	all, err := store.Records(context.Background(), target.ID, "", false, 10, 0)
 	require.NoError(t, err)
-	for _, r := range all {
+	require.Empty(t, all)
+	for _, r := range hidden {
 		var denied bytes.Buffer
 		require.ErrorIs(t, m.Export(context.Background(), &denied, target.ID, r.ID), ErrNotFound)
 		require.Zero(t, denied.Len())
@@ -217,17 +220,16 @@ func TestLegacyAndPendingRecordsCannotBeReadOrExported(t *testing.T) {
 func TestRestartPurgesSuccessPendingAndOrphanBodiesAcrossPages(t *testing.T) {
 	store := newMemoryStore()
 	dir := t.TempDir()
-	m, err := New(store, dir, Config{true, 1024, 7})
+	m, err := New(store, dir, Config{Enabled: true, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	target := task(t, m, "user", 1, true)
 	instance := m.instance
 	m.Close()
 	now := time.Now().UTC()
-	// More than one page, mixed with retained errors, to detect deletion/offset skips.
-	for i := 0; i < 210; i++ {
-		r := Record{ID: uuid.NewString(), TaskID: target.ID, InstanceID: instance, CreatedAt: now.Add(time.Duration(i)), FinishedAt: &now, IsError: i%3 == 0, Bytes: 7}
-		if i%3 == 1 {
-			r.IsError = true
+	for i := 0; i < 240; i++ {
+		r := Record{ID: uuid.NewString(), TaskID: target.ID, InstanceID: instance, CreatedAt: now.Add(time.Duration(i)), FinishedAt: &now, IsError: i%4 == 0, IsSuspectedDistillation: i%4 == 1, Bytes: 7}
+		if i%4 == 2 {
+			r.IsSuspectedDistillation = true
 			r.FinishedAt = nil
 		}
 		require.NoError(t, store.SaveRecord(context.Background(), &r))
@@ -238,19 +240,20 @@ func TestRestartPurgesSuccessPendingAndOrphanBodiesAcrossPages(t *testing.T) {
 	orphan := filepath.Join(dir, target.ID, uuid.NewString())
 	require.NoError(t, os.MkdirAll(orphan, 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(orphan, "body.txt"), []byte("orphan"), 0600))
-	m, err = New(store, dir, Config{false, 1024, 7})
+	m, err = New(store, dir, Config{Enabled: false, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	defer m.Close()
 	rows, err := store.Records(context.Background(), target.ID, "", false, 300, 0)
 	require.NoError(t, err)
-	require.Len(t, rows, 70)
+	require.Len(t, rows, 120)
+	require.Len(t, store.records, 120)
 	dirs, err := os.ReadDir(filepath.Join(dir, target.ID))
 	require.NoError(t, err)
-	require.Len(t, dirs, 70)
-	require.EqualValues(t, 70*7, m.Stats().UsedBytes)
+	require.Len(t, dirs, 120)
+	require.EqualValues(t, 120*7, m.Stats().UsedBytes)
 	v, err := m.Task(context.Background(), target.ID)
 	require.NoError(t, err)
-	require.EqualValues(t, 70, v.Requests)
+	require.EqualValues(t, 120, v.Requests)
 	require.Equal(t, m.Stats().UsedBytes, v.Bytes)
 }
 
@@ -274,7 +277,7 @@ func TestSSEErrorEventWithoutErrorTypeIsRetained(t *testing.T) {
 func TestGracefulShutdownDiscardsUnclassifiedBody(t *testing.T) {
 	store := newMemoryStore()
 	dir := t.TempDir()
-	m, err := New(store, dir, Config{true, 1024, 7})
+	m, err := New(store, dir, Config{Enabled: true, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	target := task(t, m, "user", 1, false)
 	s := m.Begin(Meta{UserID: 1})

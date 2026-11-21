@@ -102,7 +102,7 @@ func (s *memoryStore) Records(_ context.Context, task, rid string, errorsOnly bo
 	for _, b := range s.records {
 		var r Record
 		_ = json.Unmarshal(b, &r)
-		if r.TaskID == task && (rid == "" || r.RequestID == rid) && (!errorsOnly || (r.IsError && r.FinishedAt != nil)) {
+		if r.TaskID == task && (rid == "" || r.RequestID == rid) && r.visible(errorsOnly) {
 			out = append(out, r)
 		}
 	}
@@ -115,6 +115,20 @@ func (s *memoryStore) Records(_ context.Context, task, rid string, errorsOnly bo
 		end = len(out)
 	}
 	return out[offset:end], nil
+}
+func (s *memoryStore) PruneRecords(_ context.Context, task string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, data := range s.records {
+		var r Record
+		if err := json.Unmarshal(data, &r); err != nil {
+			return err
+		}
+		if r.TaskID == task && !r.visible(false) {
+			delete(s.records, id)
+		}
+	}
+	return nil
 }
 func (s *memoryStore) DeleteRecord(_ context.Context, task, id string) error {
 	s.mu.Lock()
@@ -145,7 +159,7 @@ func (s *memoryStore) DeleteTask(_ context.Context, instance, id string) error {
 func testManager(t *testing.T) (*Manager, *memoryStore) {
 	t.Helper()
 	store := newMemoryStore()
-	m, err := New(store, t.TempDir(), Config{true, 1024, 7})
+	m, err := New(store, t.TempDir(), Config{Enabled: true, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	t.Cleanup(m.Close)
 	return m, store
@@ -296,7 +310,7 @@ func TestDisableStopsCaptureWithoutBlockingBusiness(t *testing.T) {
 	s := m.Begin(Meta{UserID: 1})
 	require.NotNil(t, s)
 	s.ClientRequest([]byte(`{"input":"hello"}`), "application/json", nil)
-	m.ApplyConfig(Config{false, 1024, 7})
+	m.ApplyConfig(Config{Enabled: false, QuotaMiB: 1024, RetentionDays: 7})
 	n, err := s.NewStream("client_response", 0, 0, "application/json", nil).Write([]byte("business still writes"))
 	require.NoError(t, err)
 	require.Equal(t, 21, n)
@@ -310,7 +324,7 @@ func TestDisableStopsCaptureWithoutBlockingBusiness(t *testing.T) {
 func TestQuotaStopsAndPreservesFiles(t *testing.T) {
 	m, _ := testManager(t)
 	target := task(t, m, "user", 1, true)
-	m.ApplyConfig(Config{true, 1, 7})
+	m.ApplyConfig(Config{Enabled: true, QuotaMiB: 1, RetentionDays: 7})
 	s := m.Begin(Meta{UserID: 1})
 	require.NotNil(t, s)
 	s.MarkError("upstream_failure")
@@ -328,7 +342,7 @@ func TestQuotaStopsAndPreservesFiles(t *testing.T) {
 func TestRestartInterruptsAndRetentionDeletes(t *testing.T) {
 	store := newMemoryStore()
 	dir := t.TempDir()
-	m, err := New(store, dir, Config{true, 1024, 7})
+	m, err := New(store, dir, Config{Enabled: true, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	target := task(t, m, "user", 1, false)
 	m.Close()
@@ -343,7 +357,7 @@ func TestRestartInterruptsAndRetentionDeletes(t *testing.T) {
 		}
 		require.NoError(t, store.SaveRecord(context.Background(), &r))
 	}
-	m, err = New(store, dir, Config{true, 1024, 7})
+	m, err = New(store, dir, Config{Enabled: true, QuotaMiB: 1024, RetentionDays: 7})
 	require.NoError(t, err)
 	defer m.Close()
 	v, err := m.Task(context.Background(), target.ID)

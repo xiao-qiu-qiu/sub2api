@@ -354,11 +354,17 @@ type SystemSettings struct {
 	AccountSchedulingThresholds map[string]int `json:"account_scheduling_thresholds"`
 
 	// 允许终端用户在用量页查看自己的失败请求
-	AllowUserViewErrorRequests  bool
-	SmartOpsHiddenMenuItems     []string // Sidebar presentation only; does not disable jobs or routes.
-	RequestCaptureEnabled       bool
-	RequestCaptureQuotaMiB      int64
-	RequestCaptureRetentionDays int
+	AllowUserViewErrorRequests bool
+	SmartOpsHiddenMenuItems    []string // Sidebar presentation only; does not disable jobs or routes.
+
+	RequestCaptureEnabled                        bool
+	RequestCaptureQuotaMiB                       int64
+	RequestCaptureRetentionDays                  int
+	RequestCaptureIncludeDistillation            bool
+	RequestCaptureDistillationMinOutputTokens    int64
+	RequestCaptureDistillationMaxCacheReadTokens int64
+	RequestCaptureDistillationNonStreamOnly      bool
+
 	// 使用详情中长上下文计费 x2 徽标的展示开关（默认开启）
 	ExcelBPSClientInstructions            string
 	ExcelBPSDefaultClientInstructions     string

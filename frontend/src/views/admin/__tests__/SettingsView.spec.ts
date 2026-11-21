@@ -1051,6 +1051,73 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
+  it("saves adjustable distillation capture rules with default thresholds", async () => {
+    settingsRoute.query = { tab: 'features' };
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get('[data-testid="request-capture-settings"]');
+    expect(card.get('fieldset').attributes('disabled')).toBeDefined();
+    expect((card.get('#request-capture-include-distillation').element as HTMLInputElement).checked).toBe(false);
+    expect(card.find('#request-capture-distillation-min-output').exists()).toBe(false);
+    await card.get('#request-capture-enabled').setValue(true);
+    await card.get('#request-capture-include-distillation').setValue(true);
+    expect((card.get('#request-capture-distillation-min-output').element as HTMLInputElement).value).toBe('3000');
+    expect((card.get('#request-capture-distillation-max-cache').element as HTMLInputElement).value).toBe('0');
+    expect((card.get('#request-capture-distillation-non-stream-only').element as HTMLInputElement).checked).toBe(true);
+    await card.get('#request-capture-distillation-min-output').setValue('5000');
+    await card.get('#request-capture-distillation-max-cache').setValue('100');
+    await card.get('#request-capture-distillation-non-stream-only').setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      request_capture_enabled: true,
+      request_capture_include_distillation: true,
+      request_capture_distillation_min_output_tokens: 5000,
+      request_capture_distillation_max_cache_read_tokens: 100,
+      request_capture_distillation_non_stream_only: false,
+    }));
+  });
+
+  it("restores distillation zero thresholds and rejects invalid settings", async () => {
+    settingsRoute.query = { tab: 'features' };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, request_capture_enabled: true, request_capture_include_distillation: true, request_capture_distillation_min_output_tokens: 0, request_capture_distillation_max_cache_read_tokens: 0, request_capture_distillation_non_stream_only: false });
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get('[data-testid="request-capture-settings"]');
+    expect((card.get('#request-capture-distillation-min-output').element as HTMLInputElement).value).toBe('0');
+    expect((card.get('#request-capture-distillation-non-stream-only').element as HTMLInputElement).checked).toBe(false);
+    for (const id of ['request-capture-distillation-min-output', 'request-capture-distillation-max-cache']) {
+      for (const value of ['-1', '0.5', '', '9007199254740992']) {
+        await card.get('#' + id).setValue(value);
+        await wrapper.find('form').trigger('submit.prevent');
+        await flushPromises();
+        expect(updateSettings).not.toHaveBeenCalled();
+        expect(showError).toHaveBeenLastCalledWith('admin.requestCapture.invalidDistillationThresholds');
+      }
+      await card.get('#' + id).setValue('0');
+    }
+    await card.get('#request-capture-include-distillation').setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ request_capture_include_distillation: false, request_capture_distillation_min_output_tokens: 0, request_capture_distillation_max_cache_read_tokens: 0, request_capture_distillation_non_stream_only: false }));
+  });
+
+  it.each(['request-capture-include-distillation', 'request-capture-enabled'])("can disable %s after clearing a threshold", async (toggle) => {
+    settingsRoute.query = { tab: 'features' };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, request_capture_enabled: true, request_capture_include_distillation: true });
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get('[data-testid="request-capture-settings"]');
+    await card.get('#request-capture-distillation-min-output').setValue('');
+    await card.get('#' + toggle).setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings.mock.calls[0]?.[0].request_capture_distillation_min_output_tokens).toBeUndefined();
+    expect(updateSettings.mock.calls[0]?.[0][toggle === 'request-capture-enabled' ? 'request_capture_enabled' : 'request_capture_include_distillation']).toBe(false);
+    expect(showError).not.toHaveBeenCalledWith('admin.requestCapture.invalidDistillationThresholds');
+  });
+
   it("saves Excel BPS image relay from the feature switches tab", async () => {
     getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, excel_bps_image_mode: 'relay', excel_bps_image_relay_enabled: false });
     const wrapper = mountView();

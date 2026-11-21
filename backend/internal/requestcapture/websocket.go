@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/util/transportdiag"
 	"github.com/tidwall/gjson"
@@ -138,7 +139,7 @@ func (s *Session) endTurnLocked() {
 		return
 	}
 	snapshot := &Record{}
-	s.snapshotLocked(snapshot)
+	s.snapshotLocked(snapshot, time.Now().UTC())
 	snapshot.Status = 101
 	targets := []string{}
 	for _, t := range s.candidates {

@@ -309,6 +309,11 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyExcelBPSImageRelayEnabled:  "true",
 		SettingKeyExcelBPSImageBaseURL:       "",
 
+		SettingKeyRequestCaptureIncludeDistillation:            "false",
+		SettingKeyRequestCaptureDistillationMinOutputTokens:    strconv.FormatInt(defaultRequestCaptureDistillationMinOutputTokens, 10),
+		SettingKeyRequestCaptureDistillationMaxCacheReadTokens: "0",
+		SettingKeyRequestCaptureDistillationNonStreamOnly:      "true",
+
 		SettingKeyUsageShowLongContextBadge:             "true",
 		SettingKeyUsageShowCacheRate:                    "true",
 		SettingKeyUsageShowCacheRateToUsers:             "false",
@@ -1127,6 +1132,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	if result.RequestCaptureRetentionDays < 1 || result.RequestCaptureRetentionDays > 30 {
 		result.RequestCaptureRetentionDays = 7
 	}
+	result.RequestCaptureIncludeDistillation = settings[SettingKeyRequestCaptureIncludeDistillation] == "true"
+	result.RequestCaptureDistillationMinOutputTokens = parseRequestCaptureDistillationTokens(settings[SettingKeyRequestCaptureDistillationMinOutputTokens], defaultRequestCaptureDistillationMinOutputTokens)
+	result.RequestCaptureDistillationMaxCacheReadTokens = parseRequestCaptureDistillationTokens(settings[SettingKeyRequestCaptureDistillationMaxCacheReadTokens], 0)
+	result.RequestCaptureDistillationNonStreamOnly = settings[SettingKeyRequestCaptureDistillationNonStreamOnly] != "false"
 	result.ExcelBPSClientInstructions = effectiveExcelBPSClientInstructions(settings[SettingKeyExcelBPSClientInstructions])
 	result.ExcelBPSDefaultClientInstructions = basispoints.DefaultClientInstructions
 	result.ExcelBPSImageMode = settings[SettingKeyExcelBPSImageMode]

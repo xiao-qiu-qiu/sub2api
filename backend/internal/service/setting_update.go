@@ -743,6 +743,10 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyRequestCaptureEnabled] = strconv.FormatBool(captureConfig.Enabled)
 	updates[SettingKeyRequestCaptureQuotaMiB] = strconv.FormatInt(captureConfig.QuotaMiB, 10)
 	updates[SettingKeyRequestCaptureRetentionDays] = strconv.Itoa(captureConfig.RetentionDays)
+	updates[SettingKeyRequestCaptureIncludeDistillation] = strconv.FormatBool(captureConfig.IncludeDistillation)
+	updates[SettingKeyRequestCaptureDistillationMinOutputTokens] = strconv.FormatInt(captureConfig.DistillationMinOutputTokens, 10)
+	updates[SettingKeyRequestCaptureDistillationMaxCacheReadTokens] = strconv.FormatInt(captureConfig.DistillationMaxCacheReadTokens, 10)
+	updates[SettingKeyRequestCaptureDistillationNonStreamOnly] = strconv.FormatBool(captureConfig.DistillationNonStreamOnly)
 	updates[SettingKeyExcelBPSClientInstructions] = clientInstructions
 	updates[SettingKeyExcelBPSImageMode] = imageRelay.Mode
 	updates[SettingKeyExcelBPSImageRelayEnabled] = strconv.FormatBool(imageRelay.Enabled)

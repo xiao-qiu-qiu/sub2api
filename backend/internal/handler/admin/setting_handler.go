@@ -441,9 +441,6 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		UsageShowCacheRateToUsers:             settings.UsageShowCacheRateToUsers,
 		UsageShowUpstreamResponseModelToUsers: settings.UsageShowUpstreamResponseModelToUsers,
 		SmartOpsHiddenMenuItems:               settings.SmartOpsHiddenMenuItems,
-		RequestCaptureEnabled:                 settings.RequestCaptureEnabled,
-		RequestCaptureQuotaMiB:                settings.RequestCaptureQuotaMiB,
-		RequestCaptureRetentionDays:           settings.RequestCaptureRetentionDays,
 		ExcelBPSClientInstructions:            settings.ExcelBPSClientInstructions,
 		ExcelBPSDefaultClientInstructions:     settings.ExcelBPSDefaultClientInstructions,
 		ExcelBPSImageMode:                     settings.ExcelBPSImageMode,
@@ -461,6 +458,14 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ExcelBPSImageStorageMiB:               settings.ExcelBPSImageStorageMiB,
 		ExcelBPSImageStorageEntries:           settings.ExcelBPSImageStorageEntries,
 		ExcelBPSImageTTLMinutes:               settings.ExcelBPSImageTTLMinutes,
+
+		RequestCaptureEnabled:                        settings.RequestCaptureEnabled,
+		RequestCaptureQuotaMiB:                       settings.RequestCaptureQuotaMiB,
+		RequestCaptureRetentionDays:                  settings.RequestCaptureRetentionDays,
+		RequestCaptureIncludeDistillation:            settings.RequestCaptureIncludeDistillation,
+		RequestCaptureDistillationMinOutputTokens:    settings.RequestCaptureDistillationMinOutputTokens,
+		RequestCaptureDistillationMaxCacheReadTokens: settings.RequestCaptureDistillationMaxCacheReadTokens,
+		RequestCaptureDistillationNonStreamOnly:      settings.RequestCaptureDistillationNonStreamOnly,
 	}
 
 	// OpenAI fast policy (stored under a dedicated setting key)

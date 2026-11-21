@@ -431,9 +431,6 @@ type UpdateSettingsRequest struct {
 	UsageShowCacheRate                    *bool   `json:"usage_show_cache_rate"`
 	UsageShowCacheRateToUsers             *bool   `json:"usage_show_cache_rate_to_users"`
 	UsageShowUpstreamResponseModelToUsers *bool   `json:"usage_show_upstream_response_model_to_users"`
-	RequestCaptureEnabled                 *bool   `json:"request_capture_enabled"`
-	RequestCaptureQuotaMiB                *int64  `json:"request_capture_quota_mib"`
-	RequestCaptureRetentionDays           *int    `json:"request_capture_retention_days"`
 	ExcelBPSClientInstructions            *string `json:"excel_bps_client_instructions"`
 	ExcelBPSImageMode                     *string `json:"excel_bps_image_mode"`
 	ExcelBPSImageRelayEnabled             *bool   `json:"excel_bps_image_relay_enabled"`
@@ -450,6 +447,14 @@ type UpdateSettingsRequest struct {
 	ExcelBPSImageStorageMiB               *int    `json:"excel_bps_image_storage_mib"`
 	ExcelBPSImageStorageEntries           *int    `json:"excel_bps_image_storage_entries"`
 	ExcelBPSImageTTLMinutes               *int    `json:"excel_bps_image_ttl_minutes"`
+
+	RequestCaptureEnabled                        *bool  `json:"request_capture_enabled"`
+	RequestCaptureQuotaMiB                       *int64 `json:"request_capture_quota_mib"`
+	RequestCaptureRetentionDays                  *int   `json:"request_capture_retention_days"`
+	RequestCaptureIncludeDistillation            bool   `json:"request_capture_include_distillation"`
+	RequestCaptureDistillationMinOutputTokens    int64  `json:"request_capture_distillation_min_output_tokens"`
+	RequestCaptureDistillationMaxCacheReadTokens int64  `json:"request_capture_distillation_max_cache_read_tokens"`
+	RequestCaptureDistillationNonStreamOnly      bool   `json:"request_capture_distillation_non_stream_only"`
 
 	SmartOpsHiddenMenuItems []string `json:"smart_ops_hidden_menu_items" binding:"max=100,dive,max=128"`
 }
@@ -606,6 +611,17 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	if req.RequestCaptureRetentionDays != nil && (*req.RequestCaptureRetentionDays < 1 || *req.RequestCaptureRetentionDays > 30) {
 		response.BadRequest(c, "Capture retention must be 1-30 days")
 		return
+	}
+	for _, key := range []string{
+		service.SettingKeyRequestCaptureIncludeDistillation,
+		service.SettingKeyRequestCaptureDistillationMinOutputTokens,
+		service.SettingKeyRequestCaptureDistillationMaxCacheReadTokens,
+		service.SettingKeyRequestCaptureDistillationNonStreamOnly,
+	} {
+		if strings.TrimSpace(string(sentFields[key])) == "null" {
+			response.BadRequest(c, key+" cannot be null")
+			return
+		}
 	}
 	if req.ExcelBPSImageMaxImageMiB != nil && (*req.ExcelBPSImageMaxImageMiB < 1 || *req.ExcelBPSImageMaxImageMiB > basispoints.MaxRelayImageMiB) {
 		response.BadRequest(c, fmt.Sprintf("Image relay max_image_mib must be 1-%d", basispoints.MaxRelayImageMiB))
@@ -1881,6 +1897,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.RequestCaptureRetentionDays
 		}(),
+		RequestCaptureIncludeDistillation:            req.RequestCaptureIncludeDistillation,
+		RequestCaptureDistillationMinOutputTokens:    req.RequestCaptureDistillationMinOutputTokens,
+		RequestCaptureDistillationMaxCacheReadTokens: req.RequestCaptureDistillationMaxCacheReadTokens,
+		RequestCaptureDistillationNonStreamOnly:      req.RequestCaptureDistillationNonStreamOnly,
+
 		ExcelBPSClientInstructions: func() string {
 			if req.ExcelBPSClientInstructions != nil {
 				return *req.ExcelBPSClientInstructions
@@ -2934,9 +2955,6 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		UsageShowCacheRateToUsers:             updatedSettings.UsageShowCacheRateToUsers,
 		UsageShowUpstreamResponseModelToUsers: updatedSettings.UsageShowUpstreamResponseModelToUsers,
 		SmartOpsHiddenMenuItems:               updatedSettings.SmartOpsHiddenMenuItems,
-		RequestCaptureEnabled:                 updatedSettings.RequestCaptureEnabled,
-		RequestCaptureQuotaMiB:                updatedSettings.RequestCaptureQuotaMiB,
-		RequestCaptureRetentionDays:           updatedSettings.RequestCaptureRetentionDays,
 		ExcelBPSClientInstructions:            updatedSettings.ExcelBPSClientInstructions,
 		ExcelBPSDefaultClientInstructions:     updatedSettings.ExcelBPSDefaultClientInstructions,
 		ExcelBPSImageMode:                     updatedSettings.ExcelBPSImageMode,
@@ -2946,6 +2964,14 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		ExcelBPSImageLimitPolicy:              updatedSettings.ExcelBPSImageLimitPolicy,
 		ExcelBPSImageWarningRemaining:         updatedSettings.ExcelBPSImageWarningRemaining,
 		ExcelBPSImageCompactReserve:           updatedSettings.ExcelBPSImageCompactReserve,
+
+		RequestCaptureEnabled:                        updatedSettings.RequestCaptureEnabled,
+		RequestCaptureQuotaMiB:                       updatedSettings.RequestCaptureQuotaMiB,
+		RequestCaptureRetentionDays:                  updatedSettings.RequestCaptureRetentionDays,
+		RequestCaptureIncludeDistillation:            updatedSettings.RequestCaptureIncludeDistillation,
+		RequestCaptureDistillationMinOutputTokens:    updatedSettings.RequestCaptureDistillationMinOutputTokens,
+		RequestCaptureDistillationMaxCacheReadTokens: updatedSettings.RequestCaptureDistillationMaxCacheReadTokens,
+		RequestCaptureDistillationNonStreamOnly:      updatedSettings.RequestCaptureDistillationNonStreamOnly,
 
 		ExcelBPSImageMaxTotalMiB:    updatedSettings.ExcelBPSImageMaxTotalMiB,
 		ExcelBPSImageStorageMiB:     updatedSettings.ExcelBPSImageStorageMiB,

@@ -3,14 +3,15 @@ package admin
 import (
 	"context"
 	"encoding/json"
-	"github.com/Wei-Shaw/sub2api/internal/service"
-	"github.com/gin-gonic/gin"
-	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestRequestCaptureSettings(t *testing.T) {
@@ -36,6 +37,83 @@ func TestRequestCaptureSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "request_capture")
 }
+
+func TestRequestCaptureDistillationSettingsRoundTrip(t *testing.T) {
+	const (
+		include       = service.SettingKeyRequestCaptureIncludeDistillation
+		minOutput     = service.SettingKeyRequestCaptureDistillationMinOutputTokens
+		maxCache      = service.SettingKeyRequestCaptureDistillationMaxCacheReadTokens
+		nonStreamOnly = service.SettingKeyRequestCaptureDistillationNonStreamOnly
+	)
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	getSettings := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings", nil)
+		h.GetSettings(ctx)
+		return recorder
+	}
+	assertSettings := func(recorder *httptest.ResponseRecorder, want map[string]string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		for key, value := range want {
+			require.Equal(t, value, gjson.GetBytes(recorder.Body.Bytes(), "data."+key).Raw, key)
+		}
+	}
+
+	defaults := map[string]string{include: "false", minOutput: "3000", maxCache: "0", nonStreamOnly: "true"}
+	assertSettings(getSettings(), defaults)
+	assertSettings(doUpdateSettings(t, h, map[string]any{"site_name": "legacy client"}, nil), defaults)
+	for key := range defaults {
+		require.NotContains(t, repo.values, key)
+	}
+
+	before, err := h.settingService.GetAllSettings(context.Background())
+	require.NoError(t, err)
+	initial := map[string]any{include: true, minOutput: 4500, maxCache: int64(9007199254740991), nonStreamOnly: false}
+	configured := map[string]string{include: "true", minOutput: "4500", maxCache: "9007199254740991", nonStreamOnly: "false"}
+	assertSettings(doUpdateSettings(t, h, initial, nil), configured)
+	assertSettings(getSettings(), configured)
+	for key, value := range configured {
+		require.Equal(t, value, repo.values[key], key)
+	}
+	after, err := h.settingService.GetAllSettings(context.Background())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{include, minOutput, maxCache, nonStreamOnly}, diffSettings(before, after, nil, nil, UpdateSettingsRequest{}))
+
+	assertSettings(doUpdateSettings(t, h, map[string]any{"site_name": "keep filters"}, nil), configured)
+	for key := range configured {
+		require.NotContains(t, repo.lastUpdates, key)
+	}
+
+	cleared := map[string]string{include: "false", minOutput: "0", maxCache: "0", nonStreamOnly: "false"}
+	assertSettings(doUpdateSettings(t, h, map[string]any{include: false, minOutput: 0, maxCache: 0}, nil), cleared)
+	assertSettings(getSettings(), cleared)
+	for key, value := range cleared {
+		require.Equal(t, value, repo.values[key], key)
+	}
+}
+
+func TestRequestCaptureDistillationSettingsRejectInvalidValues(t *testing.T) {
+	const (
+		minOutput = service.SettingKeyRequestCaptureDistillationMinOutputTokens
+		maxCache  = service.SettingKeyRequestCaptureDistillationMaxCacheReadTokens
+		include   = service.SettingKeyRequestCaptureIncludeDistillation
+	)
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	for _, key := range []string{minOutput, maxCache} {
+		for _, invalid := range []any{-1, 1.5, int64(9007199254740992), json.Number("9223372036854775808"), "3000", nil} {
+			recorder := doUpdateSettings(t, h, map[string]any{key: invalid, "site_name": "must not persist"}, nil)
+			require.Equal(t, http.StatusBadRequest, recorder.Code, "%s=%v: %s", key, invalid, recorder.Body.String())
+		}
+	}
+	for _, invalid := range []any{"false", nil} {
+		recorder := doUpdateSettings(t, h, map[string]any{include: invalid, "site_name": "must not persist"}, nil)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	require.Empty(t, repo.values)
+}
+
 func TestRequestCaptureGateAndValidation(t *testing.T) {
 	h := NewRequestCaptureHandler(nil, nil, nil, nil)
 	router := gin.New()

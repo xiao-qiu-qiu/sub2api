@@ -10,12 +10,13 @@ import (
 )
 
 const (
-	MaxTasks           = 16
-	MaxSessions        = 256
-	BufferLimit  int64 = 64 << 20
-	RecordLimit  int64 = 128 << 20
-	ChunkSize          = 32 << 10
-	PreviewLimit       = 256 << 10
+	MaxTasks                    = 16
+	MaxSessions                 = 256
+	BufferLimit           int64 = 64 << 20
+	RecordLimit           int64 = 128 << 20
+	ChunkSize                   = 32 << 10
+	PreviewLimit                = 256 << 10
+	MaxDistillationTokens int64 = 1<<53 - 1
 )
 
 var (
@@ -26,9 +27,13 @@ var (
 )
 
 type Config struct {
-	Enabled       bool
-	QuotaMiB      int64
-	RetentionDays int
+	Enabled                        bool
+	QuotaMiB                       int64
+	RetentionDays                  int
+	IncludeDistillation            bool
+	DistillationMinOutputTokens    int64
+	DistillationMaxCacheReadTokens int64
+	DistillationNonStreamOnly      bool
 }
 
 func (c Config) Validate() error {
@@ -37,6 +42,10 @@ func (c Config) Validate() error {
 	}
 	if c.RetentionDays < 1 || c.RetentionDays > 30 {
 		return errors.New("capture retention must be between 1 and 30 days")
+	}
+	if c.DistillationMinOutputTokens < 0 || c.DistillationMinOutputTokens > MaxDistillationTokens ||
+		c.DistillationMaxCacheReadTokens < 0 || c.DistillationMaxCacheReadTokens > MaxDistillationTokens {
+		return errors.New("capture distillation token thresholds must be nonnegative safe integers")
 	}
 	return nil
 }
@@ -113,18 +122,32 @@ type Record struct {
 	InstanceID string `json:"instance_id"`
 	Turn       int    `json:"turn,omitempty"`
 	Meta
-	CreatedAt     time.Time        `json:"created_at"`
-	FinishedAt    *time.Time       `json:"finished_at,omitempty"`
-	Status        int              `json:"status"`
-	IsError       bool             `json:"is_error"`
-	Partial       bool             `json:"partial"`
-	Reason        string           `json:"reason,omitempty"`
-	Bytes         int64            `json:"bytes"`
-	Attempts      []Attempt        `json:"attempts"`
-	Parts         []Part           `json:"parts"`
-	ClientOutcome string           `json:"client_outcome,omitempty"`
-	ErrorCode     string           `json:"error_code,omitempty"`
-	Usage         map[string]int64 `json:"usage,omitempty"`
+	CreatedAt               time.Time             `json:"created_at"`
+	FinishedAt              *time.Time            `json:"finished_at,omitempty"`
+	Status                  int                   `json:"status"`
+	IsError                 bool                  `json:"is_error"`
+	IsSuspectedDistillation bool                  `json:"is_suspected_distillation"`
+	DistillationEvidence    *DistillationEvidence `json:"distillation_evidence,omitempty"`
+	Partial                 bool                  `json:"partial"`
+	Reason                  string                `json:"reason,omitempty"`
+	Bytes                   int64                 `json:"bytes"`
+	Attempts                []Attempt             `json:"attempts"`
+	Parts                   []Part                `json:"parts"`
+	ClientOutcome           string                `json:"client_outcome,omitempty"`
+	ErrorCode               string                `json:"error_code,omitempty"`
+	Usage                   map[string]int64      `json:"usage,omitempty"`
+}
+
+type DistillationEvidence struct {
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+	ClientStream    bool  `json:"client_stream"`
+}
+
+func (r *Record) retain() bool { return r.IsError || r.IsSuspectedDistillation }
+
+func (r *Record) visible(onlyErrors bool) bool {
+	return r.FinishedAt != nil && (r.IsError || !onlyErrors && r.IsSuspectedDistillation)
 }
 
 // Store accepts metadata only. Payload bytes must never enter this interface.
@@ -134,6 +157,7 @@ type Store interface {
 	Tasks(context.Context, string, int, int) ([]Task, error)
 	SaveRecord(context.Context, *Record) error
 	Records(context.Context, string, string, bool, int, int) ([]Record, error)
+	PruneRecords(context.Context, string) error
 	Record(context.Context, string, string) (*Record, error)
 	DeleteRecord(context.Context, string, string) error
 	DeleteTask(context.Context, string, string) error

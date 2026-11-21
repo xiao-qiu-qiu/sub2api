@@ -398,9 +398,6 @@ type SystemSettings struct {
 	UsageShowCacheRate                    bool   `json:"usage_show_cache_rate"`
 	UsageShowCacheRateToUsers             bool   `json:"usage_show_cache_rate_to_users"`
 	UsageShowUpstreamResponseModelToUsers bool   `json:"usage_show_upstream_response_model_to_users"`
-	RequestCaptureEnabled                 bool   `json:"request_capture_enabled"`
-	RequestCaptureQuotaMiB                int64  `json:"request_capture_quota_mib"`
-	RequestCaptureRetentionDays           int    `json:"request_capture_retention_days"`
 	ExcelBPSClientInstructions            string `json:"excel_bps_client_instructions"`
 	ExcelBPSDefaultClientInstructions     string `json:"excel_bps_default_client_instructions"`
 	ExcelBPSImageMode                     string `json:"excel_bps_image_mode"`
@@ -418,6 +415,14 @@ type SystemSettings struct {
 	ExcelBPSImageStorageMiB               int    `json:"excel_bps_image_storage_mib"`
 	ExcelBPSImageStorageEntries           int    `json:"excel_bps_image_storage_entries"`
 	ExcelBPSImageTTLMinutes               int    `json:"excel_bps_image_ttl_minutes"`
+
+	RequestCaptureEnabled                        bool  `json:"request_capture_enabled"`
+	RequestCaptureQuotaMiB                       int64 `json:"request_capture_quota_mib"`
+	RequestCaptureRetentionDays                  int   `json:"request_capture_retention_days"`
+	RequestCaptureIncludeDistillation            bool  `json:"request_capture_include_distillation"`
+	RequestCaptureDistillationMinOutputTokens    int64 `json:"request_capture_distillation_min_output_tokens"`
+	RequestCaptureDistillationMaxCacheReadTokens int64 `json:"request_capture_distillation_max_cache_read_tokens"`
+	RequestCaptureDistillationNonStreamOnly      bool  `json:"request_capture_distillation_non_stream_only"`
 
 	SmartOpsHiddenMenuItems []string `json:"smart_ops_hidden_menu_items"`
 }

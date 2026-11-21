@@ -833,6 +833,10 @@ export interface SystemSettings {
   usage_show_upstream_response_model_to_users: boolean;
   smart_ops_hidden_menu_items: string[];
   request_capture_enabled: boolean;
+  request_capture_include_distillation: boolean;
+  request_capture_distillation_min_output_tokens: number;
+  request_capture_distillation_max_cache_read_tokens: number;
+  request_capture_distillation_non_stream_only: boolean;
   request_capture_quota_mib: number;
   request_capture_retention_days: number;
   excel_bps_image_mode: 'relay' | 'native'
@@ -1198,6 +1202,10 @@ export interface UpdateSettingsRequest {
   usage_show_upstream_response_model_to_users?: boolean;
   smart_ops_hidden_menu_items?: string[];
   request_capture_enabled?: boolean;
+  request_capture_include_distillation?: boolean;
+  request_capture_distillation_min_output_tokens?: number;
+  request_capture_distillation_max_cache_read_tokens?: number;
+  request_capture_distillation_non_stream_only?: boolean;
   request_capture_quota_mib?: number;
   request_capture_retention_days?: number;
   excel_bps_image_mode?: 'relay' | 'native'

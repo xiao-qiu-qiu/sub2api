@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,5 +112,77 @@ func TestRequestCaptureMiddlewarePreservesCompressedInputAndRouting(t *testing.T
 func TestCaptureSensitiveReadAuditRoutes(t *testing.T) {
 	for _, route := range []string{"GET /api/v1/admin/request-captures/:task/requests/:record", "GET /api/v1/admin/request-captures/:task/requests/:record/content/:part", "GET /api/v1/admin/request-captures/:task/export", "GET /api/v1/admin/request-captures/:task/requests/:record/export"} {
 		require.NotEmpty(t, auditSensitiveReads[route])
+	}
+}
+
+func TestRequestCaptureMiddlewareDistillation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		stream  bool
+		usage   string
+		keep    bool
+	}{
+		{"disabled", false, false, `"output_tokens":3000,"input_tokens_details":{"cached_tokens":0}`, false},
+		{"at_threshold", true, false, `"output_tokens":3000,"input_tokens_details":{"cached_tokens":0}`, true},
+		{"below_threshold", true, false, `"output_tokens":2999,"input_tokens_details":{"cached_tokens":0}`, false},
+		{"cached", true, false, `"output_tokens":4000,"input_tokens_details":{"cached_tokens":1}`, false},
+		{"streaming_client", true, true, `"output_tokens":4000,"input_tokens_details":{"cached_tokens":0}`, false},
+		{"unknown_cache", true, false, `"output_tokens":4000`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			store := &captureMiddlewareStore{tasks: map[string]requestcapture.Task{}, records: map[string]requestcapture.Record{}}
+			manager, err := requestcapture.New(store, t.TempDir(), requestcapture.Config{
+				Enabled: true, QuotaMiB: 10, RetentionDays: 7,
+				IncludeDistillation: tc.enabled, DistillationMinOutputTokens: 3000, DistillationNonStreamOnly: true,
+			})
+			require.NoError(t, err)
+			defer manager.Close()
+			_, err = manager.Create(context.Background(), requestcapture.CreateTask{TargetType: "user", TargetID: 1, DurationMinutes: 1}, "fixture")
+			require.NoError(t, err)
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Set(string(ContextKeyAPIKey), &service.APIKey{UserID: 1})
+				c.Next()
+			})
+			router.Use(RequestCapture(manager))
+			input, err := json.Marshal(map[string]any{"model": "fixture", "stream": tc.stream})
+			require.NoError(t, err)
+			output := `{"object":"response","status":"completed","output_text":"` + strings.Repeat("x", 24<<10) + `","usage":{` + tc.usage + `}}`
+			captured := false
+			router.POST("/v1/responses", func(c *gin.Context) {
+				captured = requestcapture.FromContext(c.Request.Context()) != nil
+				body, readErr := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
+				require.NoError(t, readErr)
+				require.Equal(t, input, body)
+				c.Data(http.StatusOK, "application/json", []byte(output))
+			})
+			var writer *httptest.ResponseRecorder
+			require.Eventually(t, func() bool {
+				req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(input))
+				req.Header.Set("Content-Type", "application/json")
+				writer = httptest.NewRecorder()
+				router.ServeHTTP(writer, req)
+				return captured
+			}, time.Second, time.Millisecond)
+			require.Equal(t, http.StatusOK, writer.Code)
+			require.Equal(t, output, writer.Body.String())
+			require.Eventually(t, func() bool { return manager.Stats().ActiveRequests == 0 }, 5*time.Second, 10*time.Millisecond)
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if !tc.keep {
+				require.Empty(t, store.records)
+				return
+			}
+			require.Len(t, store.records, 1)
+			for _, record := range store.records {
+				require.True(t, record.IsSuspectedDistillation)
+				require.False(t, record.IsError)
+				require.False(t, record.Partial, record.Reason)
+				require.NotNil(t, record.FinishedAt)
+				require.Len(t, record.Parts, 2)
+			}
+		})
 	}
 }

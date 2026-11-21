@@ -1,6 +1,7 @@
 package requestcapture
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -92,6 +93,13 @@ type Session struct {
 	streams         map[*Stream]struct{}
 	finishedTargets map[string]bool
 	records         map[string]*recordState // Worker-owned, never accessed by forwarding goroutines.
+	config          Config
+	clientStream    bool
+	clientModeKnown bool
+	clientFinished  time.Time
+	clientUsage     responseUsage
+	upstreamUsage   responseUsage
+	usageAttempt    int
 }
 
 func (m *Manager) Begin(meta Meta) *Session {
@@ -140,7 +148,7 @@ func (m *Manager) Begin(meta Meta) *Session {
 	meta.ClientRequestID = bounded(meta.ClientRequestID, 128)
 	meta.Path = bounded(SafeURL(meta.Path), 2048)
 	meta.Method = bounded(meta.Method, 16)
-	s := &Session{m: m, meta: meta, candidates: candidates, matched: matched, hasAccounts: accounts, streams: map[*Stream]struct{}{}, records: map[string]*recordState{}, finishedTargets: map[string]bool{}, usage: map[string]int64{}}
+	s := &Session{m: m, meta: meta, candidates: candidates, matched: matched, hasAccounts: accounts, streams: map[*Stream]struct{}{}, records: map[string]*recordState{}, finishedTargets: map[string]bool{}, usage: map[string]int64{}, config: m.config}
 	for _, t := range candidates {
 		t.refs++
 	}
@@ -214,6 +222,12 @@ func (s *Session) ClientRequest(body []byte, ct string, h http.Header) {
 	}
 	s.clientObserved = true
 	s.meta.Model = bounded(gjson.GetBytes(body, "model").String(), 256)
+	if s.config.IncludeDistillation {
+		path, _, _ := strings.Cut(s.meta.Path, "?")
+		stream := gjson.GetBytes(body, "stream")
+		s.clientStream = stream.Type == gjson.True || strings.HasSuffix(path, ":streamGenerateContent")
+		s.clientModeKnown = s.clientStream || stream.Type == gjson.False || (!stream.Exists() && bytes.HasPrefix(bytes.TrimSpace(body), []byte{'{'}))
+	}
 	s.mu.Unlock()
 	stream := s.NewStream("client_request", 0, 0, ct, h)
 	_, _ = stream.Write(body)
@@ -249,6 +263,8 @@ func (s *Session) ClientFrame(body []byte) {
 		s.clientOutcome = ""
 		s.resultBuffer = s.resultBuffer[:0]
 		s.usage = map[string]int64{}
+		s.clientUsage, s.upstreamUsage = responseUsage{}, responseUsage{}
+		s.usageAttempt = 0
 		for _, t := range s.candidates {
 			if t.task.TargetType == "account" {
 				s.matched[t.task.ID] = false
@@ -293,6 +309,9 @@ func (s *Session) beginAttempt(account int64, route transportdiag.Route, phase s
 	}
 	n := len(s.attempts) + 1
 	s.attempts = append(s.attempts, Attempt{Number: n, AccountID: account, StartedAt: time.Now().UTC(), Route: route, Phase: phase})
+	if phase != "websocket_handshake" {
+		s.usageAttempt, s.upstreamUsage = n, responseUsage{}
+	}
 	s.bindAccountLocked(account)
 	return n
 }
@@ -368,6 +387,9 @@ func (s *Session) Finish(status int) {
 	s.closeFrameStreams()
 	s.mu.Lock()
 	s.status = status
+	if !s.done.Load() && s.meta.Protocol != "websocket" {
+		s.clientFinished = time.Now().UTC()
+	}
 	s.done.Store(true)
 	s.mu.Unlock()
 	s.m.signal()
@@ -441,7 +463,8 @@ func (st *Stream) Write(p []byte) (int, error) {
 		st.buffer = make([]byte, 0, ChunkSize)
 		if st.charge > ChunkSize {
 			st.diagnostic = make([]byte, 0, 16<<10)
-			st.observer = &responseObserver{framing: newBodyFraming(st.part.ContentType)}
+			collectUsage := st.s.config.IncludeDistillation
+			st.observer = &responseObserver{framing: newBodyFraming(st.part.ContentType), collectUsage: collectUsage, json: responseJSON{collectUsage: collectUsage}}
 		}
 	}
 	if strings.HasSuffix(st.part.Stage, "_response") {
@@ -546,6 +569,23 @@ func (st *Stream) observeOutcomeLocked() {
 			st.s.clientOutcome = "completed"
 		}
 	}
+	if st.observer.collectUsage {
+		usage := st.observer.usage
+		usage.observed = true
+		usage.complete = usage.complete && !st.responseFailed
+		switch st.part.Stage {
+		case "client_response":
+			st.s.clientUsage = usage
+			if st.sse || usage.complete {
+				st.s.clientStream = st.s.clientStream || st.sse
+				st.s.clientModeKnown = true
+			}
+		case "upstream_response":
+			if st.part.Attempt == st.s.usageAttempt {
+				st.s.upstreamUsage = usage
+			}
+		}
+	}
 	if st.responseFailed {
 		st.s.resultError = true
 		if st.s.errorCode == "" {
@@ -628,7 +668,7 @@ func (s *Session) enqueueLocked(part Part, p []byte, end bool, targets []string)
 		}
 	}
 }
-func (s *Session) snapshotLocked(r *Record) {
+func (s *Session) snapshotLocked(r *Record, completedAt time.Time) {
 	r.Meta = s.meta
 	r.Turn = s.turn
 	r.Status = s.status
@@ -645,9 +685,40 @@ func (s *Session) snapshotLocked(r *Record) {
 	for k, v := range s.usage {
 		r.Usage[k] = v
 	}
-	if s.reason != "" {
+	if s.config.IncludeDistillation && !completedAt.IsZero() {
+		s.applyFinalUsageLocked(r, completedAt)
+	}
+	if s.reason != "" && !(r.IsSuspectedDistillation && !r.IsError && !s.failed && s.reason == "diagnostic_limit") {
 		r.Partial = true
 		r.Reason = s.reason
+	}
+}
+
+func (s *Session) applyFinalUsageLocked(r *Record, completedAt time.Time) {
+	usage := s.clientUsage
+	if s.upstreamUsage.observed {
+		usage = s.upstreamUsage
+		if s.usageAttempt > 0 {
+			attempt := s.attempts[s.usageAttempt-1]
+			usage.complete = usage.complete && attempt.Error == "" && attempt.Status < 400
+		}
+	}
+	if !usage.complete {
+		return
+	}
+	r.Usage = usage.metadata()
+	ws := s.meta.Protocol == "websocket"
+	stream := ws || s.clientStream
+	if (!ws && (s.status < 200 || s.status >= 300)) || (s.clientUsage.observed && !s.clientUsage.complete) ||
+		(!ws && !s.clientModeKnown) || (s.config.DistillationNonStreamOnly && stream) {
+		return
+	}
+	output, outputKnown := usage.output()
+	cache, cacheKnown := usage.cacheRead()
+	if outputKnown && cacheKnown && output >= s.config.DistillationMinOutputTokens && cache <= s.config.DistillationMaxCacheReadTokens {
+		r.IsSuspectedDistillation = true
+		r.DistillationEvidence = &DistillationEvidence{OutputTokens: output, CacheReadTokens: cache, ClientStream: stream}
+		r.FinishedAt = &completedAt
 	}
 }
 
@@ -771,7 +842,7 @@ func (m *Manager) process(e event) {
 		}
 		if r == nil {
 			r = &recordState{Record: Record{ID: uuid.NewString(), TaskID: target, InstanceID: m.instance, Turn: e.part.Turn, CreatedAt: time.Now().UTC()}, parts: map[string]*partState{}}
-			// Pending bodies have no queryable index. Publish only finalized errors.
+			// Pending bodies have no queryable index.
 			e.s.records[key] = r
 		}
 		if r.blocked {
@@ -869,15 +940,26 @@ func (m *Manager) writePart(r *recordState, p *partState, data []byte) error {
 }
 func recordKey(task string, turn int) string { return fmt.Sprintf("%s:%d", task, turn) }
 
-// Only the worker finalizes records. Successful and unclassified payloads are
-// removed before processing subsequent events; they never receive a DB index.
+// Only the worker finalizes records. Unclassified payloads never receive a DB index.
 func (m *Manager) finishRecord(r *recordState, t *runtimeTask, snapshot *Record) {
 	r.Meta, r.Turn = snapshot.Meta, snapshot.Turn
 	r.Status, r.IsError = snapshot.Status, snapshot.IsError
+	r.IsSuspectedDistillation, r.DistillationEvidence = snapshot.IsSuspectedDistillation, snapshot.DistillationEvidence
 	r.ClientOutcome = snapshot.ClientOutcome
 	r.Attempts, r.Usage, r.ErrorCode = snapshot.Attempts, snapshot.Usage, snapshot.ErrorCode
 	if snapshot.Partial && r.Reason == "" {
 		r.Partial, r.Reason = true, snapshot.Reason
+	}
+	if r.IsSuspectedDistillation {
+		m.mu.Lock()
+		cutoff := t.task.ExpiresAt
+		if t.task.EndedAt != nil && t.task.EndedAt.Before(cutoff) {
+			cutoff = *t.task.EndedAt
+		}
+		m.mu.Unlock()
+		if !snapshot.FinishedAt.Before(cutoff) {
+			r.IsSuspectedDistillation, r.DistillationEvidence = false, nil
+		}
 	}
 	if !t.active.Load() {
 		r.Partial = true
@@ -886,7 +968,7 @@ func (m *Manager) finishRecord(r *recordState, t *runtimeTask, snapshot *Record)
 		}
 	}
 	for _, p := range r.parts {
-		if !p.ended && r.IsError {
+		if !p.ended && r.retain() {
 			tail, reason := p.filter.End()
 			p.part.Omitted = reason
 			r.Partial = true
@@ -904,7 +986,7 @@ func (m *Manager) finishRecord(r *recordState, t *runtimeTask, snapshot *Record)
 		r.Parts = append(r.Parts, p.part)
 	}
 	sort.Slice(r.Parts, func(i, j int) bool { return r.Parts[i].Name < r.Parts[j].Name })
-	if !r.IsError {
+	if !r.retain() {
 		if r.Partial {
 			m.mu.Lock()
 			t.task.Skipped++
@@ -976,7 +1058,7 @@ func (m *Manager) finishTurn(s *Session, snapshot *Record, targets []string) {
 		}
 		key := recordKey(id, snapshot.Turn)
 		r := s.records[key]
-		if r == nil && snapshot.IsError {
+		if r == nil && snapshot.retain() {
 			r = &recordState{Record: Record{ID: uuid.NewString(), TaskID: id, InstanceID: m.instance, CreatedAt: time.Now().UTC(), Partial: true, Reason: "no_payload_recorded"}, parts: map[string]*partState{}}
 		}
 		if r != nil {
@@ -1026,7 +1108,7 @@ func (m *Manager) finishTarget(s *Session, t *runtimeTask) {
 	s.finishedTargets[id] = true
 	hit := s.matched[id] && !s.turnEnded
 	snapshot := &Record{}
-	s.snapshotLocked(snapshot)
+	s.snapshotLocked(snapshot, s.clientFinished)
 	if !s.done.Load() {
 		snapshot.Partial = true
 		if snapshot.Reason == "" {
@@ -1048,7 +1130,7 @@ func (m *Manager) finishTarget(s *Session, t *runtimeTask) {
 		m.finishRecord(r, t, snap)
 		delete(s.records, key)
 	}
-	if hit && !found && snapshot.IsError {
+	if hit && !found && snapshot.retain() {
 		r := &recordState{Record: Record{ID: uuid.NewString(), TaskID: id, InstanceID: m.instance, CreatedAt: time.Now().UTC(), Partial: true, Reason: "no_payload_recorded"}, parts: map[string]*partState{}}
 		m.finishRecord(r, t, snapshot)
 	}
